@@ -187,6 +187,27 @@ function generateRequestId(): string {
   return `req-${++requestIdCounter}-${Date.now()}`
 }
 
+// Rate limiter for device registration: max 5 registrations per IP per minute
+const registrationRateLimits = new Map<string, { count: number; resetAt: number }>()
+
+function checkRegistrationRateLimit(ip: string): boolean {
+  const now = Date.now()
+  const limit = registrationRateLimits.get(ip)
+
+  if (!limit || now >= limit.resetAt) {
+    // Reset or first request
+    registrationRateLimits.set(ip, { count: 1, resetAt: now + 60000 })
+    return true
+  }
+
+  if (limit.count < 5) {
+    limit.count++
+    return true
+  }
+
+  return false
+}
+
 // HTTP server
 const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json')
@@ -289,6 +310,15 @@ const server = http.createServer(async (req, res) => {
 
   // Device registration endpoint: register new device with new token
   if (req.method === 'POST' && req.url === '/api/register') {
+    const clientIp = req.headers['x-forwarded-for'] as string || req.socket.remoteAddress || 'unknown'
+    const ipAddr = typeof clientIp === 'string' ? clientIp.split(',')[0].trim() : 'unknown'
+
+    if (!checkRegistrationRateLimit(ipAddr)) {
+      res.writeHead(429)
+      res.end(JSON.stringify({ error: 'Too many registration attempts. Maximum 5 per minute.' }))
+      return
+    }
+
     parseRequestBody(req, MAX_REGISTER_BODY).then(async (result) => {
       if (!result.success) {
         res.writeHead(413)

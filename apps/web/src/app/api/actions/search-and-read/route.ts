@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeAction, ActionTransportError } from '@/lib/actions/transport'
+import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
+import { makeActivity, withActivity } from '@/lib/actions/gpt'
 
 export async function POST(request: NextRequest) {
   const auth = checkActionAuth(request)
@@ -12,7 +14,10 @@ export async function POST(request: NextRequest) {
 
     if (!query) {
       return NextResponse.json(
-        { error: 'Missing query parameter' },
+        buildActionErrorEnvelope({
+          code: 'BUILDFLOW_STATUS_ERROR',
+          message: 'Missing query parameter'
+        }),
         { status: 400 }
       )
     }
@@ -29,6 +34,7 @@ export async function POST(request: NextRequest) {
 
     // Read each result (up to capped limit)
     const results = []
+    let successCount = 0
     for (const result of searchResults.slice(0, cappedLimit)) {
       const resultObj = result as Record<string, unknown>
       try {
@@ -50,6 +56,7 @@ export async function POST(request: NextRequest) {
           content: readDataObj.content || '',
           modifiedAt: resultObj.modifiedAt || ''
         })
+        successCount++
       } catch (err) {
         // Preserve the published response shape for mixed-result reads:
         // failed items stay in-band so the overall action still returns usable results.
@@ -64,16 +71,36 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({ results })
+    return NextResponse.json(withActivity({ results }, makeActivity({
+      operationId: 'searchAndReadBuildFlowContext',
+      phase: 'completed',
+      actionLabel: 'Searched and read files',
+      userMessage: `Searched for "${query}", found ${searchResults.length} results, read ${successCount} files successfully.`,
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      whatHappened: [`Searched for: "${query}"`, `Found ${searchResults.length} matches`, `Read ${successCount} of ${results.length} files`],
+      readPaths: results.map(r => (r as Record<string, unknown>).path as string),
+      provenFacts: [`Search-and-read completed`, `Total results: ${results.length}`, `Files with content: ${successCount}`],
+      nextActions: successCount > 0 ? ['Analyze the content', 'Search with refined query'] : ['Try a different search', 'Check source configuration']
+    })))
   } catch (err) {
     if (err instanceof ActionTransportError) {
       return NextResponse.json(
-        { error: err.message },
+        buildActionErrorEnvelope({
+          code: 'ACTION_TRANSPORT_ERROR',
+          message: err.message,
+          details: `Status ${err.statusCode}`
+        }),
         { status: err.statusCode }
       )
     }
     return NextResponse.json(
-      { error: `Search-and-read error: ${String(err)}` },
+      buildActionErrorEnvelope({
+        code: 'BUILDFLOW_STATUS_ERROR',
+        message: 'Search-and-read error',
+        details: err instanceof Error ? err.message : String(err)
+      }),
       { status: 500 }
     )
   }

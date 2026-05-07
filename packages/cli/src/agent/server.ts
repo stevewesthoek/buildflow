@@ -8,11 +8,19 @@ import { readFile, createFile, appendFile, listFolder } from './vault'
 import { logToFile } from '../utils/logger'
 import { createExportPlan } from './export'
 import { loadConfig, getWorkspaces, getSources, getSourcesSafe, addSource, removeSource, setSourceEnabled, setSourceAutoIndex, markSourceAutoIndexed, getSourceDiscoverySettings, setSourceDiscoverySettings, discoverRepositories, getActiveSourceContext, setActiveSourceContext, getWriteMode, setWriteMode, getSourceIndexState, setSourceIndexStatus } from './config'
-import { reconcileIndexStateFromDocs } from './index-state'
+import { reconcileIndexStateFromDocs, flushIndexStateOnShutdown } from './index-state'
 import { listWorkspaceTree, grepWorkspace, getWorkspaceInfo, resolveWorkspacePath, validateWorkspacePath } from './workspace'
 import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot, isBlockedWritePath, redactSecrets, resolveTargetSourceId, resolveWithinSource, shouldIncludeEntry, truncateContent, getDefaultWritePolicy, validateWriteTarget, normalizeRepoRelativePath } from './safe-access'
 import type { Workspace } from '@buildflow/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
+
+let cliVersion = '1.2.13-beta'
+try {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf-8')) as { version?: string }
+  if (pkg.version) cliVersion = pkg.version
+} catch {
+  // fallback to hardcoded version if package.json not found
+}
 
 export async function startLocalServer(port: number = 3052): Promise<void> {
   const fastify = Fastify({ logger: true })
@@ -62,12 +70,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   const buildConfirmationToken = (sourceId: string, operation: string, normalizedPath: string, toPath?: string) =>
     `confirm:${sourceId}:${operation}:${normalizedPath}${toPath ? `->${toPath}` : ''}`
-
-  const structuredWriteError = (
-    reply: any,
-    code: number,
-    payload: Record<string, unknown>
-  ) => reply.code(code).send({ status: 'error', verified: false, ...payload })
 
   const confirmationPayload = (
     sourceId: string,
@@ -228,7 +230,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         port,
         vaultPath: config?.vaultPath || 'not configured',
         indexedFiles: indexer.getDocs().length,
-        version: '1.2.13-beta'
+        version: cliVersion
       }
   })
 
@@ -326,6 +328,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         const resolvedSourceIds = sourceIds && sourceIds.length > 0 ? sourceIds : sourceId ? [sourceId] : getActiveSourceContext().activeSourceIds
         const targets = getResolvedActiveSources(resolvedSourceIds.length > 0 ? resolvedSourceIds : undefined)
         const matches: Array<{ sourceId: string; content: string; size: number; modifiedAt: string }> = []
+        const errors: Array<{ sourceId: string; error: string }> = []
         for (const sid of targets.map(source => source.id)) {
           try {
             const result = await readFile(relPath, sid)
@@ -334,10 +337,12 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
             const fullPath = path.join(fullMatch.path, path.normalize(relPath))
             const stat = fs.statSync(fullPath)
             matches.push({ sourceId: sid, content: result.content, size: stat.size, modifiedAt: stat.mtime.toISOString() })
-          } catch {}
+          } catch (err) {
+            errors.push({ sourceId: sid, error: String(err) })
+          }
         }
         if (matches.length === 0) {
-        return reply.code(404).send({ error: 'File not found in active sources' })
+          return reply.code(404).send({ error: 'File not found in active sources', attemptedSourceErrors: errors.length > 0 ? errors : undefined })
         }
         if (!sourceId && matches.length > 1) {
           return reply.code(400).send({ error: `Ambiguous path across active sources: ${matches.map(m => m.sourceId).join(', ')}` })
@@ -361,6 +366,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const files = []
       for (const relPath of relPaths.slice(0, 10)) {
         let found = false
+        const pathErrors: string[] = []
         for (const source of targets) {
           try {
             const result = await readFile(relPath, source.id)
@@ -371,9 +377,11 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
             files.push({ sourceId: source.id, path: relPath, content: truncated.content, truncated: truncated.truncated, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString() })
             found = true
             break
-          } catch {}
+          } catch (err) {
+            pathErrors.push(`${source.id}: ${String(err)}`)
+          }
         }
-        if (!found) files.push({ path: relPath, error: 'File not found in active sources' })
+        if (!found) files.push({ path: relPath, error: 'File not found in active sources', sourceErrors: pathErrors.length > 0 ? pathErrors : undefined })
       }
       return { files }
     } catch (err) {
@@ -602,7 +610,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const validation = validateWriteTarget({ sourceId: resolvedSourceId, requestedPath: relPath, changeType: recursive ? 'delete_directory' : 'delete_file', sourceRoot, confirmedByUser: request.body.confirmedByUser, confirmationToken: request.body.confirmationToken })
       if (!validation.ok) {
         const blocked = validation as Extract<typeof validation, { ok: false }>
-        return structuredWriteError(reply, 403, {
+        return writeError(reply, 403, {
           sourceId: resolvedSourceId,
           path: blocked.requestedPath,
           requestedPath: blocked.requestedPath,
@@ -657,7 +665,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const validation = validateWriteTarget({ sourceId: resolvedSourceId, requestedPath: fromPath, changeType: 'move', sourceRoot, toPath: to, confirmedByUser: request.body.confirmedByUser, confirmationToken: request.body.confirmationToken })
       if (!validation.ok) {
         const blocked = validation as Extract<typeof validation, { ok: false }>
-        return structuredWriteError(reply, 403, { sourceId: resolvedSourceId, path: blocked.requestedPath, requestedPath: blocked.requestedPath, normalizedPath: blocked.normalizedPath, to, sourceRootRelativePath: blocked.sourceRootRelativePath, changeType: 'move', error: { ...blocked.error, policy: blocked.policy } })
+        return writeError(reply, 403, { sourceId: resolvedSourceId, path: blocked.requestedPath, requestedPath: blocked.requestedPath, normalizedPath: blocked.normalizedPath, to, sourceRootRelativePath: blocked.sourceRootRelativePath, changeType: 'move', error: { ...blocked.error, policy: blocked.policy } })
       }
       const fromExists = fs.existsSync(validation.fullPath)
       if (!fromExists) return reply.code(404).send({ error: 'Source path not found' })
@@ -684,7 +692,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const validation = validateWriteTarget({ sourceId: resolvedSourceId, requestedPath: relPath, changeType: 'mkdir', sourceRoot, confirmedByUser: request.body.confirmedByUser, confirmationToken: request.body.confirmationToken })
       if (!validation.ok) {
         const blocked = validation as Extract<typeof validation, { ok: false }>
-        return structuredWriteError(reply, 403, { sourceId: resolvedSourceId, path: blocked.requestedPath, requestedPath: blocked.requestedPath, normalizedPath: blocked.normalizedPath, sourceRootRelativePath: blocked.sourceRootRelativePath, changeType: 'mkdir', error: { ...blocked.error, policy: blocked.policy } })
+        return writeError(reply, 403, { sourceId: resolvedSourceId, path: blocked.requestedPath, requestedPath: blocked.requestedPath, normalizedPath: blocked.normalizedPath, sourceRootRelativePath: blocked.sourceRootRelativePath, changeType: 'mkdir', error: { ...blocked.error, policy: blocked.policy } })
       }
       if (fs.existsSync(validation.fullPath)) return reply.code(409).send({ error: 'Target already exists' })
       const allowRecursive = createParents || validation.policy.allowCreateParentDirectories
@@ -721,7 +729,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const validation = validateWriteTarget({ sourceId: resolvedSourceId, requestedPath: relPath, changeType: 'rmdir', sourceRoot, confirmedByUser: request.body.confirmedByUser, confirmationToken: request.body.confirmationToken })
       if (!validation.ok) {
         const blocked = validation as Extract<typeof validation, { ok: false }>
-        return structuredWriteError(reply, 403, { sourceId: resolvedSourceId, path: blocked.requestedPath, requestedPath: blocked.requestedPath, normalizedPath: blocked.normalizedPath, sourceRootRelativePath: blocked.sourceRootRelativePath, changeType: 'rmdir', error: { ...blocked.error, policy: blocked.policy } })
+        return writeError(reply, 403, { sourceId: resolvedSourceId, path: blocked.requestedPath, requestedPath: blocked.requestedPath, normalizedPath: blocked.normalizedPath, sourceRootRelativePath: blocked.sourceRootRelativePath, changeType: 'rmdir', error: { ...blocked.error, policy: blocked.policy } })
       }
       if (!fs.existsSync(validation.fullPath)) return reply.code(404).send({ error: 'Directory not found' })
       if (!fs.statSync(validation.fullPath).isDirectory()) return reply.code(400).send({ error: 'Not a directory' })
@@ -1188,6 +1196,10 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     } catch (err) {
       return reply.code(400).send({ error: String(err) })
     }
+  })
+
+  fastify.addHook('onClose', async () => {
+    flushIndexStateOnShutdown()
   })
 
   await fastify.listen({ port, host: '127.0.0.1' })

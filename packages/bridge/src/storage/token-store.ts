@@ -59,10 +59,10 @@ export function initDefaultTokens(): void {
     return
   }
 
-  const enableDefaults = process.env.RELAY_ENABLE_DEFAULT_TOKENS !== 'false'
+  const enableDefaults = process.env.RELAY_ENABLE_DEFAULT_TOKENS === 'true'
 
   if (!enableDefaults) {
-    console.log('[TokenStore] Default tokens disabled via RELAY_ENABLE_DEFAULT_TOKENS=false')
+    console.log('[TokenStore] Default tokens disabled (set RELAY_ENABLE_DEFAULT_TOKENS=true to enable development tokens)')
     return
   }
 

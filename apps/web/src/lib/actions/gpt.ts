@@ -107,6 +107,7 @@ const ENV_TEMPLATE_FILES = new Set([
   '.env.production.example'
 ])
 
+// Validate that a sourceId is provided or exactly one source is active; returns error if sourceId is required but missing.
 export async function requireExplicitSourceId(body: Record<string, unknown>, userToken?: string) {
   if (typeof body.sourceId === 'string' && body.sourceId.length > 0) {
     return null
@@ -128,6 +129,7 @@ function normalizePath(input: string): string {
   return input.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/').trim()
 }
 
+// Compose a normalized, safe artifact path from title, folder, and filename params; sanitizes input and applies .md extension.
 export function composeArtifactRelativePath(params: {
   title: string
   folder?: string
@@ -173,7 +175,8 @@ function summarizeActivityOutput(input: ActivityInput): string {
   return parts.join('; ')
 }
 
-function makeActivity(input: ActivityInput): ActionActivity {
+// Build a structured activity object for ChatGPT narration; synthesizes user message, proven facts, next actions, and risk level from operation context.
+export function makeActivity(input: ActivityInput): ActionActivity {
   const nextActions = input.nextActions || compactList([
     input.nextStep,
     input.requiresConfirmation ? 'Ask the user for explicit confirmation before retrying.' : undefined,
@@ -195,7 +198,8 @@ function makeActivity(input: ActivityInput): ActionActivity {
   }
 }
 
-function withActivity<T extends Record<string, unknown>>(result: T, activity: ActionActivity): T & { activity: ActionActivity } {
+// Attach an activity object to an operation result for ChatGPT to narrate what happened.
+export function withActivity<T extends Record<string, unknown>>(result: T, activity: ActionActivity): T & { activity: ActionActivity } {
   return { ...result, activity }
 }
 
@@ -263,6 +267,7 @@ function isDependencyChange(content?: string): boolean {
   }
 }
 
+// Classify a write operation to determine if it's blocked or requires confirmation; checks path safety, content patterns, dependency changes, and policy globs.
 function classifyBlockedWrite(path: string, policy?: WritePolicy, content?: string, changeType?: string) {
   const normalized = normalizePath(path)
   if (!normalized) {
@@ -437,6 +442,7 @@ async function fetchJson(endpoint: string, init?: RequestInit): Promise<unknown>
   return response.json()
 }
 
+// Normalize action errors into consistent error envelope format with proper HTTP status code extraction.
 export function unwrapActionError(err: unknown, fallback: string) {
   if (err instanceof ActionTransportError) {
     return {
@@ -498,6 +504,7 @@ async function ensureContextSourcesAllowed(sourceIds: string[], userToken?: stri
   }
 }
 
+// Copy user confirmation signals (confirmedByUser, confirmationToken) from request body to write payload.
 export function attachWriteConfirmation(payload: Record<string, unknown>, body: Record<string, unknown>) {
   payload.confirmedByUser = body.confirmedByUser === true
   if (typeof body.confirmationToken === 'string' && body.confirmationToken.length > 0) {
@@ -558,6 +565,7 @@ async function preflightWrite(body: Record<string, unknown>, userToken?: string)
   }
 }
 
+// List all connected sources with their indexed/writable status and write policy; returns activity narration.
 export async function listBuildFlowSources(userToken?: string) {
   const mode = getBackendMode()
   const headers: Record<string, string> = { method: 'GET' }
@@ -592,6 +600,7 @@ export async function listBuildFlowSources(userToken?: string) {
   }))
 }
 
+// Get the currently active source context (single or multi-mode); returns activity narration.
 export async function getBuildFlowActiveContext(userToken?: string) {
   const activePayload = await executeAction('/api/get-active-sources', {}, userToken)
   const context = normalizeActiveContext(activePayload)
@@ -611,6 +620,7 @@ export async function getBuildFlowActiveContext(userToken?: string) {
   }))
 }
 
+// Change the active source context to single or multi-mode; validates selection and returns updated context with activity narration.
 export async function setBuildFlowActiveContext(body: Record<string, unknown>, userToken?: string) {
   validateContextSelection(body)
   await ensureContextSourcesAllowed(body.sourceIds as string[], userToken)
@@ -639,6 +649,7 @@ export async function setBuildFlowActiveContext(body: Record<string, unknown>, u
   }))
 }
 
+// Route context operations (list, get, set) to specialized handlers; dispatches based on action field.
 export async function dispatchBuildFlowContext(body: Record<string, unknown>, userToken?: string) {
   const action = body.action
   if (action === 'list_sources') {
@@ -653,6 +664,7 @@ export async function dispatchBuildFlowContext(body: Record<string, unknown>, us
   throw new Error('Invalid action')
 }
 
+// Inspect vault structure or search; supports list_files and search modes; returns results with activity narration.
 export async function dispatchBuildFlowInspect(body: Record<string, unknown>, userToken?: string) {
   const mode = body.mode
   if (mode === 'list_files') {
@@ -711,6 +723,7 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
   throw new Error('Invalid mode')
 }
 
+// Read files from vault; supports read_paths and search_and_read modes; handles source routing and truncation; returns activity narration.
 export async function dispatchBuildFlowRead(body: Record<string, unknown>, userToken?: string) {
   const mode = body.mode
   if (mode === 'read_paths') {
@@ -830,6 +843,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
   throw new Error('Invalid mode')
 }
 
+// Create an artifact (personal note) in vault; supports preflight and dry-run; enforces write policy; returns activity narration.
 export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, userToken?: string) {
   const artifactPath = composeArtifactRelativePath({
     title: typeof body.title === 'string' ? body.title : 'artifact',
@@ -917,6 +931,7 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
   }))
 }
 
+// Apply file operations (create, append, overwrite, patch, delete, move, mkdir); supports preflight, dry-run, and confirmation tokens; enforces write policy; returns activity narration.
 export async function dispatchBuildFlowFileChange(body: Record<string, unknown>, userToken?: string) {
   if (body.dryRun === true || body.preflight === true) {
     const result = await preflightWrite(body, userToken) as {

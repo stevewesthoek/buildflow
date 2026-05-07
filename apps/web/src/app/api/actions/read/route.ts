@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeAction, ActionTransportError } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
+import { makeActivity, withActivity } from '@/lib/actions/gpt'
 
 export async function POST(request: NextRequest) {
   const auth = checkActionAuth(request)
@@ -33,7 +34,21 @@ export async function POST(request: NextRequest) {
     }
 
     const data = await executeAction('/api/read', payload, auth.bearerToken)
-    return NextResponse.json(data)
+    const dataObj = data as Record<string, unknown>
+    const bytesRead = typeof dataObj.sizeBytes === 'number' ? (dataObj.sizeBytes as number) : 0
+    return NextResponse.json(withActivity(dataObj, makeActivity({
+      operationId: 'readBuildFlowContext',
+      phase: 'completed',
+      actionLabel: 'Read file',
+      userMessage: `Read file: ${path}${bytesRead > 0 ? ` (${bytesRead} bytes)` : ''}`,
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      readPaths: [path as string],
+      whatHappened: [`Read file: ${path}`],
+      provenFacts: [`File exists and was readable`, `File size: ${bytesRead} bytes`],
+      nextActions: ['Analyze file content', 'Read another file']
+    })))
   } catch (err) {
     if (err instanceof ActionTransportError) {
       return NextResponse.json(

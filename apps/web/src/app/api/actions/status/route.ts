@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeActionGET, ActionTransportError } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
+import { makeActivity, withActivity } from '@/lib/actions/gpt'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 function buildStatusActivity(sourceCount: number) {
-  return {
-    version: '1.2.13-beta',
+  return makeActivity({
     operationId: 'getBuildFlowStatus',
     phase: 'completed',
     actionLabel: 'Checked BuildFlow connection',
@@ -17,21 +17,19 @@ function buildStatusActivity(sourceCount: number) {
     requiresConfirmation: false,
     verified: true,
     nextStep: sourceCount > 0 ? 'Select a source and continue.' : 'Connect a source and try again.'
-  }
+  })
 }
 
 export async function GET(request: NextRequest) {
   const auth = checkActionAuth(request)
   if (!auth.valid) return auth.error
 
-  console.log('[BuildFlow status] action entry')
   try {
-    console.log('[BuildFlow status] connection check')
     const result = await executeActionGET('/api/status', auth.bearerToken)
     const sourceCount = typeof result.data === 'object' && result.data !== null && typeof (result.data as { sourceCount?: unknown }).sourceCount === 'number'
       ? (result.data as { sourceCount: number }).sourceCount
       : 0
-    const payload = {
+    const payload = withActivity({
       ok: true,
       connected: true,
       status: 'available',
@@ -42,11 +40,8 @@ export async function GET(request: NextRequest) {
       sourcesReady: sourceCount > 0,
       message: 'BuildFlow is available',
       sourceCount,
-      ...(result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {}),
-      activity: buildStatusActivity(sourceCount)
-    }
-    console.log('[BuildFlow status] response construction')
-    console.log(`[BuildFlow status] response serialization bytes=${Buffer.byteLength(JSON.stringify(payload), 'utf8')}`)
+      ...(result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {})
+    }, buildStatusActivity(sourceCount))
     return NextResponse.json(payload, {
       status: result.status,
       headers: {
@@ -54,7 +49,6 @@ export async function GET(request: NextRequest) {
       }
     })
   } catch (err) {
-    console.log('[BuildFlow status] caught error', err instanceof Error ? err.message : String(err))
     if (err instanceof ActionTransportError) {
       const payload = err.payload && typeof err.payload === 'object'
         ? (() => {
@@ -77,7 +71,6 @@ export async function GET(request: NextRequest) {
           recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
           status: 'unavailable'
         })
-      console.log(`[BuildFlow status] response serialization bytes=${Buffer.byteLength(JSON.stringify(payload), 'utf8')}`)
       return NextResponse.json(payload, {
         status: err.statusCode,
         headers: {
@@ -92,7 +85,6 @@ export async function GET(request: NextRequest) {
       recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
       status: 'error'
     })
-    console.log(`[BuildFlow status] response serialization bytes=${Buffer.byteLength(JSON.stringify(payload), 'utf8')}`)
     return NextResponse.json(payload, {
       status: 503,
       headers: {

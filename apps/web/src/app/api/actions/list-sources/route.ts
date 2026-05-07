@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeActionGET, ActionTransportError } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
+import { makeActivity, withActivity } from '@/lib/actions/gpt'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -12,7 +13,20 @@ export async function GET(request: NextRequest) {
 
   try {
     const result = await executeActionGET('/api/sources/list', auth.bearerToken)
-    return NextResponse.json(result.data, {
+    const sources = Array.isArray((result.data as Record<string, unknown>).sources) ? (result.data as Record<string, unknown>).sources : []
+    const sourceCount = (sources as unknown[]).length
+    return NextResponse.json(withActivity(result.data as Record<string, unknown>, makeActivity({
+      operationId: 'listBuildFlowSources',
+      phase: 'completed',
+      actionLabel: 'Listed sources',
+      userMessage: `Found ${sourceCount} ${sourceCount === 1 ? 'source' : 'sources'}.`,
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      whatHappened: [`Listed all available sources`, `Found ${sourceCount} sources`],
+      provenFacts: [`All sources retrieved successfully`, `Total sources: ${sourceCount}`],
+      nextActions: sourceCount > 0 ? ['Select a source', 'Set active sources'] : ['Add a new source', 'Check configuration']
+    })), {
       status: result.status,
       headers: {
         'Cache-Control': 'no-store'

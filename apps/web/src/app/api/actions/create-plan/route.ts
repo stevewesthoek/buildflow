@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { executeAction, ActionTransportError } from '@/lib/actions/transport'
-import { requireExplicitSourceId, unwrapActionError } from '@/lib/actions/source-guard'
+import { executeAction } from '@/lib/actions/transport'
+import { requireExplicitSourceId, unwrapActionError, makeActivity, withActivity } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 
 export async function POST(request: NextRequest) {
@@ -18,9 +18,24 @@ export async function POST(request: NextRequest) {
         message: 'Write was not verified'
       }), { status: 502 })
     }
-    return NextResponse.json(data)
+    const dataObj = data as Record<string, unknown>
+    const bytesWritten = typeof dataObj.bytesWritten === 'number' ? dataObj.bytesWritten : 0
+    return NextResponse.json(withActivity(dataObj, makeActivity({
+      operationId: 'createBuildFlowPlan',
+      phase: 'completed',
+      actionLabel: 'Created plan',
+      userMessage: `Created plan: ${body.title} (${bytesWritten} bytes)`,
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      targetPaths: [(dataObj.path as string) || body.title],
+      changedPaths: [(dataObj.path as string) || body.title],
+      whatHappened: [`Created plan: ${body.title}`, `Verified: ${dataObj.verified}`],
+      provenFacts: [`Plan created successfully`, `Bytes written: ${bytesWritten}`],
+      nextActions: ['Read the plan', 'Create another plan']
+    })))
   } catch (err) {
-    const { error, status } = unwrapActionError(err, 'Create plan error') as unknown as { error: unknown; status: number }
+    const { error, status } = unwrapActionError(err, 'Create plan error')
     return NextResponse.json(error && typeof error === 'object' ? error : buildActionErrorEnvelope({
       code: 'BUILDFLOW_STATUS_ERROR',
       message: String(error)

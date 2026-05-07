@@ -2,15 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { dispatchBuildFlowArtifact, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
-
-function getSafeActionHttpStatus(error: unknown): number {
-  if (error && typeof error === 'object') {
-    const code = (error as { code?: unknown }).code
-    if (code === 'REQUIRES_EXPLICIT_CONFIRMATION') return 200
-    return 403
-  }
-  return 403
-}
+import { getSafeActionHttpStatus } from '@/lib/actions/http-status'
 
 export async function POST(request: NextRequest) {
   const auth = checkActionAuth(request)

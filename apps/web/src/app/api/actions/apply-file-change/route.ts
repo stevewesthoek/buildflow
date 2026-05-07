@@ -2,15 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { dispatchBuildFlowFileChange, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
-
-function getSafeActionHttpStatus(error: unknown): number {
-  if (error && typeof error === 'object') {
-    const code = (error as { code?: unknown }).code
-    if (code === 'REQUIRES_EXPLICIT_CONFIRMATION') return 200
-    return 403
-  }
-  return 403
-}
+import { getSafeActionHttpStatus } from '@/lib/actions/http-status'
 
 export async function POST(request: NextRequest) {
   const auth = checkActionAuth(request)
@@ -18,11 +10,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    if (body.dryRun === true || body.preflight === true) {
-      const data = await dispatchBuildFlowFileChange(body, auth.bearerToken)
-      return NextResponse.json(data)
-    }
+    const isDryRun = body.dryRun === true || body.preflight === true
     const data = await dispatchBuildFlowFileChange(body, auth.bearerToken)
+
     if ('error' in (data as Record<string, unknown>)) {
       const payload = data as { error: unknown }
       const status = getSafeActionHttpStatus(payload.error)
@@ -34,10 +24,8 @@ export async function POST(request: NextRequest) {
         message: String(payload.error)
       }), { status })
     }
-    if ((body.dryRun === true || body.preflight === true) && (data as { verified?: unknown }).verified === false) {
-      return NextResponse.json(data)
-    }
-    if ((data as { verified?: unknown }).verified !== true) {
+
+    if (!isDryRun && (data as { verified?: unknown }).verified !== true) {
       return NextResponse.json(buildActionErrorEnvelope({
         code: 'BUILDFLOW_STATUS_ERROR',
         message: 'Write was not verified'

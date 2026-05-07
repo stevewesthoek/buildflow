@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { executeAction, ActionTransportError } from '@/lib/actions/transport'
-import { requireExplicitSourceId, unwrapActionError } from '@/lib/actions/source-guard'
+import { executeAction } from '@/lib/actions/transport'
+import { requireExplicitSourceId, unwrapActionError, makeActivity, withActivity } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 
 export async function POST(request: NextRequest) {
@@ -18,15 +18,31 @@ export async function POST(request: NextRequest) {
         message: 'Write was not verified'
       }), { status: 502 })
     }
-    return NextResponse.json(data)
+    const dataObj = data as Record<string, unknown>
+    const bytesWritten = typeof dataObj.bytesWritten === 'number' ? dataObj.bytesWritten : 0
+    const created = typeof dataObj.created === 'boolean' ? dataObj.created : false
+    return NextResponse.json(withActivity(dataObj, makeActivity({
+      operationId: 'writeBuildFlowFileChange',
+      phase: 'completed',
+      actionLabel: created ? 'Created file' : 'Overwrote file',
+      userMessage: `${created ? 'Created' : 'Overwrote'} file: ${body.path} (${bytesWritten} bytes)`,
+      riskLevel: 'high',
+      requiresConfirmation: false,
+      verified: true,
+      targetPaths: [body.path as string],
+      changedPaths: [body.path as string],
+      whatHappened: [created ? `Created file: ${body.path}` : `Overwrote file: ${body.path}`, `Verified: ${dataObj.verified}`],
+      provenFacts: [created ? 'File created successfully' : 'File overwritten successfully', `Bytes written: ${bytesWritten}`],
+      nextActions: ['Read the file', 'Write another file']
+    })))
   } catch (err) {
-    const actionError = unwrapActionError(err, 'Write file error') as unknown as { error: unknown; status: number }
-    if (actionError.error && typeof actionError.error === 'object') {
-      return NextResponse.json(actionError.error, { status: actionError.status })
+    const { error, status } = unwrapActionError(err, 'Write file error')
+    if (error && typeof error === 'object') {
+      return NextResponse.json(error, { status })
     }
     return NextResponse.json(buildActionErrorEnvelope({
       code: 'BUILDFLOW_STATUS_ERROR',
-      message: String(actionError.error)
-    }), { status: actionError.status })
+      message: String(error)
+    }), { status })
   }
 }

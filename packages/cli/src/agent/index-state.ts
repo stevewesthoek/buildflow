@@ -16,6 +16,8 @@ export type SourceIndexRecord = {
 export type SourceIndexState = Record<string, SourceIndexRecord>
 
 const INDEX_STATE_FILENAME = 'index-state.json'
+let pendingWrite: NodeJS.Timeout | null = null
+let pendingState: SourceIndexState | null = null
 
 export function getIndexStatePath(): string {
   return path.join(getConfigDir(), INDEX_STATE_FILENAME)
@@ -51,11 +53,25 @@ export function loadIndexState(): SourceIndexState {
   }
 }
 
-export function saveIndexState(state: SourceIndexState): void {
+export function saveIndexState(state: SourceIndexState, immediate: boolean = false): void {
+  pendingState = state
+  if (immediate) {
+    if (pendingWrite) clearTimeout(pendingWrite)
+    pendingWrite = null
+    _flushIndexState()
+  } else if (!pendingWrite) {
+    pendingWrite = setTimeout(_flushIndexState, 500)
+  }
+}
+
+function _flushIndexState(): void {
+  if (!pendingState) return
   const statePath = getIndexStatePath()
   const dir = path.dirname(statePath)
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2))
+  fs.writeFileSync(statePath, JSON.stringify(pendingState, null, 2))
+  pendingWrite = null
+  pendingState = null
 }
 
 export function upsertIndexState(sourceId: string, record: Partial<SourceIndexRecord>): SourceIndexState {
@@ -69,6 +85,13 @@ export function upsertIndexState(sourceId: string, record: Partial<SourceIndexRe
   state[sourceId] = next
   saveIndexState(state)
   return state
+}
+
+export function flushIndexStateOnShutdown(): void {
+  if (pendingWrite) {
+    clearTimeout(pendingWrite)
+    _flushIndexState()
+  }
 }
 
 export function getIndexRecord(sourceId: string): SourceIndexRecord | undefined {

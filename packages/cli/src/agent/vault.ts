@@ -228,24 +228,20 @@ export async function appendFile(relativePath: string, content: string): Promise
 }
 
 export async function listFolder(relativePath?: string): Promise<Array<{ path: string; type: 'file' | 'folder' }>> {
-  try {
-    const vaultPath = getVaultPath()
-    const fullPath = relativePath ? await resolveSafePath(relativePath) : vaultPath
+  const vaultPath = getVaultPath()
+  const fullPath = relativePath ? await resolveSafePath(relativePath) : vaultPath
 
-    const entries = fs.readdirSync(fullPath, { withFileTypes: true })
-    const results = []
+  const entries = fs.readdirSync(fullPath, { withFileTypes: true })
+  const results = []
 
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue
 
-      results.push({
-        path: relativePath ? `${relativePath}/${entry.name}` : entry.name,
-        type: entry.isDirectory() ? ('folder' as const) : ('file' as const)
-      })
-    }
-
-    return results
-  } catch (err) {
-    throw err
+    results.push({
+      path: relativePath ? `${relativePath}/${entry.name}` : entry.name,
+      type: entry.isDirectory() ? ('folder' as const) : ('file' as const)
+    })
   }
+
+  return results
 }
