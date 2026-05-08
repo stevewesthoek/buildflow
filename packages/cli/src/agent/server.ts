@@ -950,6 +950,9 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         indexedFileCount: source.indexedFileCount,
         lastIndexedAt: source.lastIndexedAt,
         indexError: source.indexError,
+        autoIndexEnabled: source.autoIndexEnabled,
+        autoIndexIntervalMinutes: source.autoIndexIntervalMinutes,
+        lastAutoIndexedAt: source.lastAutoIndexedAt,
         writable: source.enabled !== false,
         writeProfile: 'repo_app_maintainer',
         writePolicy: getDefaultWritePolicy()

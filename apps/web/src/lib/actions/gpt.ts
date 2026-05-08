@@ -8,6 +8,11 @@ type NormalizedSource = {
   enabled: boolean
   active: boolean
   type?: string
+  indexStatus?: string
+  indexedFileCount?: number
+  autoIndexEnabled?: boolean
+  autoIndexIntervalMinutes?: number
+  lastAutoIndexedAt?: string
   writable?: boolean
   writeProfile?: string
   writePolicy?: Record<string, unknown>
@@ -348,7 +353,10 @@ function normalizeSourceRecord(source: Record<string, unknown>): NormalizedSourc
   const indexedFileCount = typeof source.indexedFileCount === 'number' ? source.indexedFileCount : undefined
   const lastIndexedAt = typeof source.lastIndexedAt === 'string' && source.lastIndexedAt.trim() ? source.lastIndexedAt : undefined
   const searchable = typeof source.searchable === 'boolean' ? source.searchable : (indexStatus ?? (indexed ? 'ready' : 'pending')) === 'ready'
-  return { id, label, enabled, active, ...(type ? { type } : {}), ...(writable !== undefined ? { writable } : {}), ...(writeProfile ? { writeProfile } : {}), ...(writePolicy ? { writePolicy } : {}), ...(indexed !== undefined ? { indexed } : {}), ...(indexStatus ? { indexStatus } : {}), ...(indexedFileCount !== undefined ? { indexedFileCount } : {}), ...(lastIndexedAt ? { lastIndexedAt } : {}), ...(searchable !== undefined ? { searchable } : {}) }
+  const autoIndexEnabled = typeof source.autoIndexEnabled === 'boolean' ? source.autoIndexEnabled : undefined
+  const autoIndexIntervalMinutes = typeof source.autoIndexIntervalMinutes === 'number' ? source.autoIndexIntervalMinutes : undefined
+  const lastAutoIndexedAt = typeof source.lastAutoIndexedAt === 'string' && source.lastAutoIndexedAt.trim() ? source.lastAutoIndexedAt : undefined
+  return { id, label, enabled, active, ...(type ? { type } : {}), ...(writable !== undefined ? { writable } : {}), ...(writeProfile ? { writeProfile } : {}), ...(writePolicy ? { writePolicy } : {}), ...(indexed !== undefined ? { indexed } : {}), ...(indexStatus ? { indexStatus } : {}), ...(indexedFileCount !== undefined ? { indexedFileCount } : {}), ...(lastIndexedAt ? { lastIndexedAt } : {}), ...(searchable !== undefined ? { searchable } : {}), ...(autoIndexEnabled !== undefined ? { autoIndexEnabled } : {}), ...(autoIndexIntervalMinutes !== undefined ? { autoIndexIntervalMinutes } : {}), ...(lastAutoIndexedAt ? { lastAutoIndexedAt } : {}) }
 }
 
 function normalizeSourcesList(sourcesPayload: unknown) {
@@ -580,6 +588,9 @@ export async function listBuildFlowSources(userToken?: string) {
     active: source.active,
     indexStatus: source.indexStatus ?? (source.searchable ? 'ready' : 'pending'),
     searchable: source.searchable === true,
+    indexedFileCount: source.indexedFileCount,
+    autoIndexEnabled: source.autoIndexEnabled,
+    autoIndexIntervalMinutes: source.autoIndexIntervalMinutes,
     writable: source.writable === true,
     writeProfile: source.writeProfile,
     operations: ['create', 'patch', 'overwrite', 'append', 'deleteFile', 'deleteDirectory', 'move', 'rename', 'mkdir', 'rmdir'],

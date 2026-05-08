@@ -43,6 +43,7 @@ export interface AgentConfig {
   allowedExtensions: string[]
   ignorePatterns: string[]
   workspaces?: Workspace[]
+  autoIndexDefaultMigratedAt?: string
 }
 
 export function loadConfig(): AgentConfig | null {
@@ -55,9 +56,9 @@ export function loadConfig(): AgentConfig | null {
     const content = fs.readFileSync(configPath, 'utf-8')
     const config = JSON.parse(content) as AgentConfig
 
-    // Normalize: migrate existing sources with auto-index enabled to disabled by default
-    // Rationale: prevent surprise background reindexing of existing sources
-    if (config.sources) {
+    // One-time migration: disable auto-index for existing sources (prevent surprise background reindexing)
+    // Only run if not already migrated (check for marker: autoIndexDefaultMigratedAt)
+    if (config.sources && !config.autoIndexDefaultMigratedAt) {
       let changed = false
       config.sources = config.sources.map(source => {
         if (source.autoIndexEnabled === true) {
@@ -67,7 +68,12 @@ export function loadConfig(): AgentConfig | null {
         return source
       })
       if (changed) {
-        console.log('[Config] Migrating existing sources to autoIndexEnabled=false (prevent surprise background indexing)')
+        console.log('[Config] One-time migration: disabling auto-index for existing sources')
+        config.autoIndexDefaultMigratedAt = new Date().toISOString()
+        saveConfig(config)
+      } else if (config.sources.length > 0) {
+        // Mark migration as done even if no changes (avoid repeated checks)
+        config.autoIndexDefaultMigratedAt = new Date().toISOString()
         saveConfig(config)
       }
     }
