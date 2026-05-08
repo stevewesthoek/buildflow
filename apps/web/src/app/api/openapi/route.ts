@@ -70,6 +70,30 @@ const fileResultSchema = {
   required: ['path']
 }
 
+const skippedReadFileSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    path: { type: 'string' },
+    sourceId: { type: 'string' },
+    sizeBytes: { type: 'integer' },
+    reason: { type: 'string', enum: ['response_budget_exceeded', 'file_too_large'] }
+  },
+  required: ['path', 'reason']
+}
+
+const nextBatchSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    paths: { type: 'array', items: { type: 'string' } },
+    sourceId: { type: 'string' },
+    sourceIds: { type: 'array', items: { type: 'string' } },
+    maxBytesPerFile: { type: 'integer' }
+  },
+  required: ['paths']
+}
+
 const activitySchema = {
   type: 'object',
   additionalProperties: false,
@@ -411,7 +435,7 @@ const openapi = {
                   paths: { type: 'array', description: 'Exact paths.', items: { type: 'string' }, minItems: 1, maxItems: 10 },
                   query: { type: 'string', description: 'Search query.' },
                   limit: { type: 'integer', description: 'Max results.', default: 3, minimum: 1, maximum: 5 },
-                  maxBytesPerFile: { type: 'integer', description: 'Max bytes per file.', default: 30000, minimum: 1000, maximum: 60000 }
+                  maxBytesPerFile: { type: 'integer', description: 'Max bytes per file.', default: 12000, minimum: 1000, maximum: 60000 }
                 },
                 required: ['mode']
               },
@@ -433,6 +457,10 @@ const openapi = {
                   properties: {
                     mode: { type: 'string' },
                     files: { type: 'array', items: fileResultSchema },
+                    skipped: { type: 'array', items: skippedReadFileSchema },
+                    nextBatch: nextBatchSchema,
+                    budgetBytes: { type: 'integer' },
+                    returnedBytes: { type: 'integer' },
                     results: { type: 'array', items: { type: 'object', additionalProperties: true } },
                     activity: activitySchema
                   }

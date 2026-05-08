@@ -737,32 +737,46 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
 // Read files from vault; supports read_paths and search_and_read modes; handles source routing and truncation; returns activity narration.
 export async function dispatchBuildFlowRead(body: Record<string, unknown>, userToken?: string) {
   const mode = body.mode
+  const DEFAULT_MULTI_FILE_READ_MAX_BYTES_PER_FILE = 12_000
   if (mode === 'read_paths') {
     if (!Array.isArray(body.paths) || body.paths.length === 0) throw new Error('Missing paths parameter')
     const payload: Record<string, unknown> = {
       paths: body.paths,
-      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : 30000
+      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : DEFAULT_MULTI_FILE_READ_MAX_BYTES_PER_FILE
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
     const result = await executeAction('/api/read-files', payload, userToken)
     const files = Array.isArray((result as { files?: unknown }).files) ? (result as { files: Array<Record<string, unknown>> }).files : []
+    const skipped = Array.isArray((result as { skipped?: unknown }).skipped) ? (result as { skipped: Array<Record<string, unknown>> }).skipped : []
+    const nextBatch = (result as { nextBatch?: Record<string, unknown> }).nextBatch
+    const budgetBytes = typeof (result as { budgetBytes?: unknown }).budgetBytes === 'number' ? (result as { budgetBytes: number }).budgetBytes : undefined
+    const returnedBytes = typeof (result as { returnedBytes?: unknown }).returnedBytes === 'number' ? (result as { returnedBytes: number }).returnedBytes : undefined
     const truncatedCount = files.filter(file => typeof file.truncated === 'boolean' && file.truncated).length
+    const budgeted = skipped.length > 0 || (typeof budgetBytes === 'number' && typeof returnedBytes === 'number' && returnedBytes < budgetBytes)
     return withActivity({
       mode: 'read_paths',
-      files
+      files,
+      ...(skipped.length > 0 ? { skipped } : {}),
+      ...(nextBatch ? { nextBatch } : {}),
+      ...(typeof budgetBytes === 'number' ? { budgetBytes } : {}),
+      ...(typeof returnedBytes === 'number' ? { returnedBytes } : {})
     }, makeActivity({
       operationId: 'readBuildFlowContext',
       phase: 'completed',
       actionLabel: 'Read repo files',
-      userMessage: `Read ${countLabel(files.length, 'file')}${truncatedCount > 0 ? `; ${countLabel(truncatedCount, 'file')} truncated` : ''}.`,
+      userMessage: budgeted
+        ? `Read ${countLabel(files.length, 'file')}${skipped.length > 0 ? `; split ${countLabel(skipped.length, 'file')} into nextBatch` : ''}${truncatedCount > 0 ? `; ${countLabel(truncatedCount, 'file')} truncated` : ''}.`
+        : `Read ${countLabel(files.length, 'file')}${truncatedCount > 0 ? `; ${countLabel(truncatedCount, 'file')} truncated` : ''}.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       readPaths: files.map(file => typeof file.path === 'string' ? file.path : '').filter(Boolean).slice(0, 10),
       targetPaths: files.map(file => typeof file.path === 'string' ? file.path : '').filter(Boolean).slice(0, 10),
       riskLevel: 'low',
       requiresConfirmation: false,
       verified: true,
-      nextStep: 'Review the returned file contents.'
+      whatRemains: skipped.length > 0 ? ['Continue with nextBatch.', 'Review the returned file contents.'] : undefined,
+      nextActions: nextBatch ? ['Continue with nextBatch.', 'Review the returned file contents.'] : undefined,
+      nextStep: nextBatch ? 'Continue with nextBatch.' : 'Review the returned file contents.'
     }))
   }
   if (mode === 'search_and_read') {
@@ -795,7 +809,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     const sourceIds = Array.from(new Set(pathEntries.map(entry => entry.sourceId).filter((id): id is string => typeof id === 'string' && id.length > 0)))
     const readPayload: Record<string, unknown> = {
       paths: pathEntries.map(entry => entry.path),
-      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : 30000
+      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : DEFAULT_MULTI_FILE_READ_MAX_BYTES_PER_FILE
     }
     if (sourceIds.length > 0) {
       readPayload.sourceIds = sourceIds
@@ -807,6 +821,8 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     const files = Array.isArray((readResult as { files?: unknown }).files)
       ? ((readResult as { files: Array<Record<string, unknown>> }).files || [])
       : []
+    const skipped = Array.isArray((readResult as { skipped?: unknown }).skipped) ? (readResult as { skipped: Array<Record<string, unknown>> }).skipped : []
+    const nextBatch = (readResult as { nextBatch?: Record<string, unknown> }).nextBatch
 
     const fileMap = new Map<string, Record<string, unknown>>()
     for (const file of files) {
@@ -841,14 +857,18 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
       operationId: 'readBuildFlowContext',
       phase: 'completed',
       actionLabel: 'Read repo files',
-      userMessage: `Found ${countLabel(pathEntries.length, 'matching file')} and read the available contents.`,
+      userMessage: skipped.length > 0
+        ? `Found ${countLabel(pathEntries.length, 'matching file')} and read a budgeted subset; continue with nextBatch.`
+        : `Found ${countLabel(pathEntries.length, 'matching file')} and read the available contents.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       readPaths: pathEntries.map(entry => entry.path).slice(0, 10),
       targetPaths: pathEntries.map(entry => entry.path).slice(0, 10),
       riskLevel: 'low',
       requiresConfirmation: false,
       verified: true,
-      nextStep: 'Summarize the matching files.'
+      whatRemains: skipped.length > 0 ? ['Continue with nextBatch.', 'Summarize the matching files.'] : undefined,
+      nextActions: nextBatch ? ['Continue with nextBatch.', 'Summarize the matching files.'] : undefined,
+      nextStep: nextBatch ? 'Continue with nextBatch.' : 'Summarize the matching files.'
     }))
   }
   throw new Error('Invalid mode')

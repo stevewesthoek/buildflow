@@ -2025,7 +2025,7 @@
                   "maxBytesPerFile": {
                     "type": "integer",
                     "description": "Max bytes per file.",
-                    "default": 30000,
+                    "default": 12000,
                     "minimum": 1000,
                     "maximum": 60000
                   }
@@ -2100,6 +2100,68 @@
                           "path"
                         ]
                       }
+                    },
+                    "skipped": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "sourceId": {
+                            "type": "string"
+                          },
+                          "sizeBytes": {
+                            "type": "integer"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "enum": [
+                              "response_budget_exceeded",
+                              "file_too_large"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "reason"
+                        ]
+                      }
+                    },
+                    "nextBatch": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "paths": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "sourceId": {
+                          "type": "string"
+                        },
+                        "sourceIds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "maxBytesPerFile": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "paths"
+                      ]
+                    },
+                    "budgetBytes": {
+                      "type": "integer"
+                    },
+                    "returnedBytes": {
+                      "type": "integer"
                     },
                     "results": {
                       "type": "array",

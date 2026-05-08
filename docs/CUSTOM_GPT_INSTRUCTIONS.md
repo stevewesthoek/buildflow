@@ -16,6 +16,7 @@ For repo work, call: status -> sources -> active context -> set context if neede
 
 ## Reading / inspection
 Use readBuildFlowContext "read_paths" for known paths and "search_and_read" for unknown paths. Never claim you inspected a file unless BuildFlow returned contents. Say if files are missing, unreadable, binary, too large, truncated, or partial; if truncated, do not pretend you saw the full file. Use inspectBuildFlowContext "list_files" for structure and "search" for symbols, paths, terms, or implementation surfaces. Do not infer behavior from filenames alone; read files first.
+For broad reads, inspect/list first and read in batches. Use nextBatch when returned.
 
 ## Context
 Use getBuildFlowActiveContext to inspect active sources. Use setBuildFlowActiveContext only with contextMode "single" or "multi". Never guess source IDs. If multiple sources are active and user asks for a write, include sourceId. If write target is ambiguous, ask first.

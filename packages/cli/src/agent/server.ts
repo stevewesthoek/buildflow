@@ -24,6 +24,8 @@ try {
 
 export async function startLocalServer(port: number = 3052): Promise<void> {
   const fastify = Fastify({ logger: true })
+  const READ_FILES_RESPONSE_BUDGET_BYTES = 90_000
+  const DEFAULT_READ_FILES_MAX_BYTES_PER_FILE = 12_000
 
   const indexer = new Indexer()
 
@@ -402,14 +404,22 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; sourceIds?: string[]; paths: string[]; maxBytesPerFile?: number } }>('/api/read-files', async (request, reply) => {
     try {
-      const { sourceId, sourceIds, paths: relPaths, maxBytesPerFile = 30000 } = request.body
+      const { sourceId, sourceIds, paths: relPaths, maxBytesPerFile = DEFAULT_READ_FILES_MAX_BYTES_PER_FILE } = request.body
       if (!Array.isArray(relPaths) || relPaths.length === 0) return reply.code(400).send({ error: 'Paths required' })
       const resolvedSourceIds = sourceIds && sourceIds.length > 0 ? sourceIds : sourceId ? [sourceId] : getActiveSourceContext().activeSourceIds
       const targets = getResolvedActiveSources(resolvedSourceIds.length > 0 ? resolvedSourceIds : undefined)
-      const files = []
-      for (const relPath of relPaths.slice(0, 10)) {
+      const files: Array<Record<string, unknown>> = []
+      const skipped: Array<Record<string, unknown>> = []
+      const normalizedPaths = relPaths.slice(0, 10)
+      let returnedBytes = 0
+
+      const approxResponseBytes = (file: { sourceId?: string; path: string; content?: string; truncated?: boolean; sizeBytes?: number; modifiedAt?: string }) =>
+        Buffer.byteLength(JSON.stringify(file), 'utf8')
+
+      for (const relPath of normalizedPaths) {
         let found = false
         const pathErrors: string[] = []
+        let bestCandidate: { sourceId: string; content: string; sizeBytes: number; modifiedAt: string; truncated: boolean; responseBytes: number } | null = null
         for (const source of targets) {
           try {
             const result = await readFile(relPath, source.id)
@@ -417,16 +427,65 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
             const truncated = truncateContent(content, maxBytesPerFile)
             const fullPath = path.join(source.path, path.normalize(relPath))
             const stat = fs.statSync(fullPath)
-            files.push({ sourceId: source.id, path: relPath, content: truncated.content, truncated: truncated.truncated, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString() })
+            const candidate = {
+              sourceId: source.id,
+              path: relPath,
+              content: truncated.content,
+              truncated: truncated.truncated,
+              sizeBytes: stat.size,
+              modifiedAt: stat.mtime.toISOString()
+            }
+            bestCandidate = {
+              ...candidate,
+              responseBytes: approxResponseBytes(candidate)
+            }
             found = true
             break
           } catch (err) {
             pathErrors.push(`${source.id}: ${String(err)}`)
           }
         }
-        if (!found) files.push({ path: relPath, error: 'File not found in active sources', sourceErrors: pathErrors.length > 0 ? pathErrors : undefined })
+        if (!found || !bestCandidate) {
+          files.push({ path: relPath, error: 'File not found in active sources', sourceErrors: pathErrors.length > 0 ? pathErrors : undefined })
+          continue
+        }
+
+        const wouldExceedBudget = returnedBytes + bestCandidate.responseBytes > READ_FILES_RESPONSE_BUDGET_BYTES
+        const fileTooLarge = bestCandidate.sizeBytes > maxBytesPerFile
+        if (wouldExceedBudget) {
+          skipped.push({
+            path: relPath,
+            sourceId: bestCandidate.sourceId,
+            sizeBytes: bestCandidate.sizeBytes,
+            reason: fileTooLarge ? 'file_too_large' : 'response_budget_exceeded'
+          })
+          continue
+        }
+
+        files.push({
+          sourceId: bestCandidate.sourceId,
+          path: relPath,
+          content: bestCandidate.content,
+          truncated: bestCandidate.truncated,
+          sizeBytes: bestCandidate.sizeBytes,
+          modifiedAt: bestCandidate.modifiedAt
+        })
+        returnedBytes += bestCandidate.responseBytes
       }
-      return { files }
+      const nextBatch = skipped.length > 0
+        ? {
+            paths: skipped.map(item => item.path).filter((value): value is string => typeof value === 'string' && value.length > 0),
+            maxBytesPerFile,
+            ...(sourceIds && sourceIds.length > 0 ? { sourceIds } : sourceId ? { sourceId } : resolvedSourceIds.length > 0 ? { sourceIds: resolvedSourceIds } : {})
+          }
+        : undefined
+      return {
+        files,
+        skipped: skipped.length > 0 ? skipped : undefined,
+        nextBatch,
+        budgetBytes: READ_FILES_RESPONSE_BUDGET_BYTES,
+        returnedBytes
+      }
     } catch (err) {
       return reply.code(400).send({ error: String(err) })
     }
