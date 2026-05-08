@@ -35,6 +35,18 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   }
   reconcileIndexStateFromDocs(indexer.getDocs(), getSourcesSafe())
 
+  // Ensure pending enabled sources are queued for immediate auto-index at startup
+  const queuePendingSourcesAtStartup = (): void => {
+    const sources = getSourcesSafe()
+    for (const source of sources) {
+      if (!source.enabled || source.indexStatus !== 'pending' || indexingSources.has(source.id)) continue
+      console.log(`[Startup] Queuing pending source for auto-index: ${source.id}`)
+      reindexSourceInBackground(source.id, source.path, 'auto')
+      break // Only start one at a time; others will be picked up by the sweep
+    }
+  }
+  setTimeout(queuePendingSourcesAtStartup, 1000)
+
   let searcher = new VaultSearcher(indexer.getDocs())
   const config = loadConfig()
   const indexingSources = new Set<string>()
@@ -210,12 +222,28 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       .filter(({ state }) => !!state && state.indexStatus !== 'ready')
 
     if (blocked.length > 0) {
+      const messages = blocked.map(item => {
+        if (item.state?.indexStatus === 'pending' || item.state?.indexStatus === 'indexing') {
+          return `${item.sourceId} is being indexed. Try again in a moment.`
+        }
+        if (item.state?.indexStatus === 'failed') {
+          return `${item.sourceId} failed to index: ${item.state.indexError || 'unknown error'}. Reindex it from the dashboard.`
+        }
+        return `${item.sourceId} is not ready for search.`
+      })
+
       return reply.code(409).send({
         error: `Source(s) not ready for search: ${blocked.map(item => item.sourceId).join(', ')}`,
+        message: messages.join(' '),
         details: blocked.map(item => ({
           sourceId: item.sourceId,
           indexStatus: item.state?.indexStatus || 'unknown',
-          indexError: item.state?.indexError
+          indexError: item.state?.indexError,
+          recoveryAction: item.state?.indexStatus === 'pending' || item.state?.indexStatus === 'indexing'
+            ? 'Wait for indexing to complete'
+            : item.state?.indexStatus === 'failed'
+              ? 'Reindex from dashboard or choose a ready source'
+              : 'Choose a ready source'
         }))
       })
     }
@@ -400,6 +428,16 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const { mode, activeSourceIds = [] } = request.body
       const result = setActiveSourceContext(mode, activeSourceIds)
       const sources = getSourcesSafe().map(source => ({ ...source, active: result.activeSourceIds.includes(source.id), type: (source as any).type || 'unknown' }))
+
+      // Trigger auto-index for any pending active sources to recover them
+      for (const sourceId of result.activeSourceIds) {
+        const source = sources.find(s => s.id === sourceId)
+        if (source && source.indexStatus === 'pending' && !indexingSources.has(sourceId)) {
+          console.log(`[SetActiveContext] Queuing pending active source for auto-index: ${sourceId}`)
+          setImmediate(() => reindexSourceInBackground(sourceId, source.path, 'auto'))
+        }
+      }
+
       return { status: 'ok', mode: result.mode, activeSourceIds: result.activeSourceIds, sources }
     } catch (err) {
       return reply.code(400).send({ error: String(err) })
