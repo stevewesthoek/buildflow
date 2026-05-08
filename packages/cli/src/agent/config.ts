@@ -4,7 +4,7 @@ import { getConfigPath, expandTilde } from '../utils/paths'
 import type { Workspace, KnowledgeSource, ActiveSourcesMode, WriteMode, DiscoveredRepository, SourceDiscoverySettings } from '@buildflow/shared'
 import { getIndexRecord, upsertIndexState, type SourceIndexStatus } from './index-state'
 
-export const DEFAULT_AUTO_INDEX_ENABLED = true
+export const DEFAULT_AUTO_INDEX_ENABLED = false
 export const DEFAULT_AUTO_INDEX_INTERVAL_MINUTES = 5
 export const MIN_AUTO_INDEX_INTERVAL_MINUTES = 1
 export const MAX_AUTO_INDEX_INTERVAL_MINUTES = 60
@@ -53,7 +53,26 @@ export function loadConfig(): AgentConfig | null {
 
   try {
     const content = fs.readFileSync(configPath, 'utf-8')
-    return JSON.parse(content)
+    const config = JSON.parse(content) as AgentConfig
+
+    // Normalize: migrate existing sources with auto-index enabled to disabled by default
+    // Rationale: prevent surprise background reindexing of existing sources
+    if (config.sources) {
+      let changed = false
+      config.sources = config.sources.map(source => {
+        if (source.autoIndexEnabled === true) {
+          changed = true
+          return { ...source, autoIndexEnabled: false }
+        }
+        return source
+      })
+      if (changed) {
+        console.log('[Config] Migrating existing sources to autoIndexEnabled=false (prevent surprise background indexing)')
+        saveConfig(config)
+      }
+    }
+
+    return config
   } catch (err) {
     return null
   }

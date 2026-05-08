@@ -12,6 +12,10 @@ const sourceItemSchema = {
     active: { type: 'boolean' },
     indexStatus: { type: 'string' },
     searchable: { type: 'boolean' },
+    indexedFileCount: { type: 'integer' },
+    autoIndexEnabled: { type: 'boolean' },
+    autoIndexIntervalMinutes: { type: 'integer' },
+    lastAutoIndexedAt: { type: 'string' },
     writable: { type: 'boolean' },
     writeProfile: { type: 'string' },
     writePolicy: {

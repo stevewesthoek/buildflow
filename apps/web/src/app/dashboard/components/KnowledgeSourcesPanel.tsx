@@ -44,7 +44,15 @@ type KnowledgeSourcesPanelProps = {
 
 const getStatusSummary = (source: KnowledgeSource) => {
   const fileCount = typeof source.indexedFileCount === 'number' ? `${source.indexedFileCount.toLocaleString()} files` : 'files unknown'
-  return `${source.indexStatus || 'unknown'} · ${fileCount}`
+  const status = source.indexStatus || 'unknown'
+
+  // Distinguish between first-time indexing and reindexing
+  if (status === 'indexing') {
+    const hasIndexedBefore = (source.indexedFileCount ?? 0) > 0
+    return `${hasIndexedBefore ? 'reindexing' : 'indexing'} · ${fileCount}`
+  }
+
+  return `${status} · ${fileCount}`
 }
 
 export function KnowledgeSourcesPanel({
@@ -263,7 +271,9 @@ export function KnowledgeSourcesPanel({
                               <span className="font-medium text-bf-text dark:text-slate-100">{getStatusSummary(source)}</span>
                             </div>
                             <div className="mt-1 text-bf-muted dark:text-slate-400">
-                              {source.enabled ? 'Enabled' : 'Disabled'} · {isActive ? 'Active context' : 'Idle'} · Auto {source.autoIndexEnabled === false ? 'off' : `${source.autoIndexIntervalMinutes || 5}m`}
+                              {source.enabled ? 'Enabled' : 'Disabled'} · {isActive ? 'Active context' : 'Idle'}
+                              {source.indexStatus === 'indexing' && (source.indexedFileCount ?? 0) > 0 ? ' · Searchable' : ''}
+                              {source.autoIndexEnabled === false ? ' · Auto off' : ` · Auto ${source.autoIndexIntervalMinutes || 5}m`}
                             </div>
                           </div>
                           <details className="relative justify-self-end">

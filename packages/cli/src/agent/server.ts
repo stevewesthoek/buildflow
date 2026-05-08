@@ -35,12 +35,17 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   }
   reconcileIndexStateFromDocs(indexer.getDocs(), getSourcesSafe())
 
-  // Ensure pending enabled sources are queued for immediate auto-index at startup
+  // Ensure pending enabled sources without usable index are queued for immediate indexing at startup
   const queuePendingSourcesAtStartup = (): void => {
     const sources = getSourcesSafe()
     for (const source of sources) {
       if (!source.enabled || source.indexStatus !== 'pending' || indexingSources.has(source.id)) continue
-      console.log(`[Startup] Queuing pending source for auto-index: ${source.id}`)
+      // Only auto-index if source has no previous index (indexedFileCount is 0 or undefined)
+      if ((source.indexedFileCount ?? 0) > 0) {
+        console.log(`[Startup] Skipping startup reindex for ${source.id} (has usable previous index with ${source.indexedFileCount} files)`)
+        continue
+      }
+      console.log(`[Startup] Queuing pending source for initial indexing: ${source.id}`)
       reindexSourceInBackground(source.id, source.path, 'auto')
       break // Only start one at a time; others will be picked up by the sweep
     }
@@ -219,12 +224,21 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   const rejectUnindexedSources = (sourceIds: string[], reply: any) => {
     const blocked = sourceIds
       .map(sourceId => ({ sourceId, state: getSourceIndexState(sourceId) }))
-      .filter(({ state }) => !!state && state.indexStatus !== 'ready')
+      .filter(({ state }) => {
+        if (!state) return true
+        if (state.indexStatus === 'ready') return false
+        // Allow search to proceed with older index if currently reindexing and has indexed documents
+        if (state.indexStatus === 'indexing' && (state.indexedFileCount ?? 0) > 0) return false
+        return true
+      })
 
     if (blocked.length > 0) {
       const messages = blocked.map(item => {
-        if (item.state?.indexStatus === 'pending' || item.state?.indexStatus === 'indexing') {
-          return `${item.sourceId} is being indexed. Try again in a moment.`
+        if (item.state?.indexStatus === 'pending') {
+          return `${item.sourceId} has not been indexed yet. Reindex it from the dashboard first.`
+        }
+        if (item.state?.indexStatus === 'indexing') {
+          return `${item.sourceId} is being reindexed. Searching using the older index.`
         }
         if (item.state?.indexStatus === 'failed') {
           return `${item.sourceId} failed to index: ${item.state.indexError || 'unknown error'}. Reindex it from the dashboard.`
@@ -239,8 +253,9 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           sourceId: item.sourceId,
           indexStatus: item.state?.indexStatus || 'unknown',
           indexError: item.state?.indexError,
-          recoveryAction: item.state?.indexStatus === 'pending' || item.state?.indexStatus === 'indexing'
-            ? 'Wait for indexing to complete'
+          indexedFileCount: item.state?.indexedFileCount,
+          recoveryAction: item.state?.indexStatus === 'pending'
+            ? 'Reindex from dashboard'
             : item.state?.indexStatus === 'failed'
               ? 'Reindex from dashboard or choose a ready source'
               : 'Choose a ready source'
@@ -428,15 +443,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const { mode, activeSourceIds = [] } = request.body
       const result = setActiveSourceContext(mode, activeSourceIds)
       const sources = getSourcesSafe().map(source => ({ ...source, active: result.activeSourceIds.includes(source.id), type: (source as any).type || 'unknown' }))
-
-      // Trigger auto-index for any pending active sources to recover them
-      for (const sourceId of result.activeSourceIds) {
-        const source = sources.find(s => s.id === sourceId)
-        if (source && source.indexStatus === 'pending' && !indexingSources.has(sourceId)) {
-          console.log(`[SetActiveContext] Queuing pending active source for auto-index: ${sourceId}`)
-          setImmediate(() => reindexSourceInBackground(sourceId, source.path, 'auto'))
-        }
-      }
 
       return { status: 'ok', mode: result.mode, activeSourceIds: result.activeSourceIds, sources }
     } catch (err) {

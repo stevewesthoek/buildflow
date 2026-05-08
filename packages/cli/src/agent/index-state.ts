@@ -45,6 +45,16 @@ export function loadIndexState(): SourceIndexState {
         }
         changed = true
       }
+      // Normalize: if pending but has indexed files and timestamp, set to ready
+      if (record.indexStatus === 'pending' && (record.indexedFileCount ?? 0) > 0 && record.lastIndexedAt) {
+        state[sourceId] = {
+          ...record,
+          indexed: true,
+          indexStatus: 'ready',
+          indexError: undefined
+        }
+        changed = true
+      }
     }
     if (changed) saveIndexState(state)
     return state
