@@ -10,6 +10,6 @@ export async function POST(request: NextRequest) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-    timeoutMs: 10000
+    timeoutMs: 120000
   })
 }

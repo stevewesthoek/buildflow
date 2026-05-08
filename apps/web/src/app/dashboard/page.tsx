@@ -722,7 +722,7 @@ export default function Dashboard() {
     }
   }
 
-  const waitForTerminalIndexStatus = async (sourceId: string, timeoutMs = 60000) => {
+  const waitForTerminalIndexStatus = async (sourceId: string, timeoutMs = 300000) => {
     const startedAt = Date.now()
 
     while (Date.now() - startedAt < timeoutMs) {
@@ -733,7 +733,7 @@ export default function Dashboard() {
       } catch (err) {
         const remaining = timeoutMs - (Date.now() - startedAt)
         if (remaining <= 0) break
-        setMutationNotice('Reindex is still running; source refresh was temporarily unavailable.')
+        setMutationNotice('Indexing is still running. Refresh source state in a moment.')
         await sleep(Math.min(1500, remaining))
         continue
       }
@@ -742,7 +742,7 @@ export default function Dashboard() {
         if ([502, 503, 504].includes(response.status)) {
           const remaining = timeoutMs - (Date.now() - startedAt)
           if (remaining <= 0) break
-          setMutationNotice('Reindex is still running; source refresh was temporarily unavailable.')
+          setMutationNotice('Indexing is still running. Refresh source state in a moment.')
           await sleep(Math.min(1500, remaining))
           continue
         }
@@ -771,7 +771,7 @@ export default function Dashboard() {
       await sleep(1500)
     }
 
-    throw new Error(`Reindex timed out after ${Math.round(timeoutMs / 1000)}s for source ${sourceId}`)
+    throw new Error(`Indexing is still running. Refresh source state in a moment.`)
   }
 
   const handleReindexSource = async (source: KnowledgeSource) => {

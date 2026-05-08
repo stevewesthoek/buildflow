@@ -22,7 +22,13 @@ const DEFAULT_IGNORE_PATTERNS = [
   '**/.npm/**',
   '**/.yarn/**',
   '**/.pnpm-store/**',
-  '**/.*/**'
+  '**/.*/**',
+  '**/pnpm-lock.yaml',
+  '**/package-lock.json',
+  '**/yarn.lock',
+  '**/bun.lockb',
+  '**/*.tsbuildinfo',
+  '**/docs/openapi.chatgpt.json'
 ]
 
 const MAX_INDEXABLE_BYTES = 1024 * 1024
