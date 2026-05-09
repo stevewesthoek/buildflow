@@ -21,6 +21,7 @@ assert.equal(policy.recursiveDeleteRequiresConfirmation, true)
 assert.equal(policy.maxRecursiveDeleteFilesWithoutConfirmation, 0)
 assert(policy.allowedRoots.includes('src/**'))
 assert(policy.allowedRoots.includes('app/**'))
+assert(policy.allowedRoots.includes('ai/skills/**'))
 assert(policy.allowedRoots.includes('*.md'))
 assert(policy.blockedGlobs.includes('.env'))
 assert(policy.confirmationRequiredGlobs.includes('LICENSE'))
@@ -43,6 +44,20 @@ if (safe.ok) {
 
 const appSafe = validateWriteTarget({ requestedPath: 'src/lib/example.ts', changeType: 'create', sourceRoot: root, content: 'export const example = 1\n' })
 assert.equal(appSafe.ok, true)
+const aiSkillsSafe = validateWriteTarget({ requestedPath: 'ai/skills/example.md', changeType: 'create', sourceRoot: root, content: '# skill example\n' })
+assert.equal(aiSkillsSafe.ok, true)
+const aiSkillsNestedSafe = validateWriteTarget({ requestedPath: 'ai/skills/custom/foo/SKILL.md', changeType: 'create', sourceRoot: root, content: '# skill example\n' })
+assert.equal(aiSkillsNestedSafe.ok, true)
+const aiSecretsBlocked = validateWriteTarget({ requestedPath: 'ai/secrets/example.md', changeType: 'create', sourceRoot: root, content: '# secret example\n' })
+assert.equal(aiSecretsBlocked.ok, false)
+if (!aiSecretsBlocked.ok) {
+  assert.equal(aiSecretsBlocked.error.code, 'SECRET_PATH_BLOCKED')
+}
+const aiPrivateBlocked = validateWriteTarget({ requestedPath: 'ai/private/example.md', changeType: 'create', sourceRoot: root, content: '# private example\n' })
+assert.equal(aiPrivateBlocked.ok, false)
+if (!aiPrivateBlocked.ok) {
+  assert.equal(aiPrivateBlocked.error.code, 'SECRET_PATH_BLOCKED')
+}
 const envTemplate = validateWriteTarget({ requestedPath: '.env.example', changeType: 'create', sourceRoot: root, content: 'API_KEY=<your-api-key>\n' })
 assert.equal(envTemplate.ok, true)
 
@@ -107,6 +122,7 @@ assert.equal(generatedDelete.ok, true)
 const blockedCases = [
   { requestedPath: '.env', code: 'SECRET_PATH_BLOCKED' },
   { requestedPath: '.env.local', code: 'SECRET_PATH_BLOCKED' },
+  { requestedPath: 'ai/private/example.md', code: 'SECRET_PATH_BLOCKED' },
   { requestedPath: '../outside.md', code: 'PATH_TRAVERSAL_BLOCKED' },
   { requestedPath: '/tmp/outside.md', code: 'ABSOLUTE_PATH_BLOCKED' },
   { requestedPath: 'secrets.pem', code: 'SECRET_PATH_BLOCKED' },

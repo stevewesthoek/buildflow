@@ -231,6 +231,7 @@ const SAFE_WRITE_ROOTS = [
   'scripts',
   'bin',
   'tools',
+  'ai/skills',
   'docs',
   'docs/product',
   'docs/product/releases',
@@ -276,9 +277,9 @@ export function getDefaultWritePolicy(): WritePolicySummary {
     allowRmdir: true,
     recursiveDeleteRequiresConfirmation: true,
     maxRecursiveDeleteFilesWithoutConfirmation: 0,
-    allowedRoots: ['src/**', 'app/**', 'components/**', 'lib/**', 'pages/**', 'server/**', 'client/**', 'shared/**', 'features/**', 'modules/**', 'utils/**', 'hooks/**', 'services/**', 'styles/**', 'types/**', 'test/**', 'tests/**', '__tests__/**', 'e2e/**', 'playwright/**', 'cypress/**', 'prisma/**', 'scripts/**', 'bin/**', 'tools/**', '*.md', '*.mdx', 'docs/**', 'plans/**', 'notes/**', 'artifacts/**', '.buildflow/**', 'README.md', 'CHANGELOG.md', 'CLAUDE.md', 'decision-log.md', 'LICENSE', 'package.json', 'docker-compose.yml', 'Dockerfile', 'next.config.*', 'vite.config.*', 'nuxt.config.*', 'remix.config.*', 'astro.config.*', 'tsconfig.json', 'jsconfig.json', 'tailwind.config.*', 'postcss.config.*', 'components.json', 'eslint.config.*', 'prettier.config.*', '.prettierrc', '.prettierrc.*', 'vitest.config.*', 'jest.config.*', 'playwright.config.*', 'cypress.config.*', 'nixpacks.toml', 'turbo.json', 'pnpm-workspace.yaml', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'],
-    blockedGlobs: ['.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa', '**/id_ed25519', '.git/**', 'node_modules/**', '.next/**', 'dist/**', 'build/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**'],
-    blockedWriteGlobs: ['.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**'],
+    allowedRoots: ['src/**', 'app/**', 'components/**', 'lib/**', 'pages/**', 'server/**', 'client/**', 'shared/**', 'features/**', 'modules/**', 'utils/**', 'hooks/**', 'services/**', 'styles/**', 'types/**', 'test/**', 'tests/**', '__tests__/**', 'e2e/**', 'playwright/**', 'cypress/**', 'prisma/**', 'scripts/**', 'bin/**', 'tools/**', 'ai/skills/**', '*.md', '*.mdx', 'docs/**', 'plans/**', 'notes/**', 'artifacts/**', '.buildflow/**', 'README.md', 'CHANGELOG.md', 'CLAUDE.md', 'decision-log.md', 'LICENSE', 'package.json', 'docker-compose.yml', 'Dockerfile', 'next.config.*', 'vite.config.*', 'nuxt.config.*', 'remix.config.*', 'astro.config.*', 'tsconfig.json', 'jsconfig.json', 'tailwind.config.*', 'postcss.config.*', 'components.json', 'eslint.config.*', 'prettier.config.*', '.prettierrc', '.prettierrc.*', 'vitest.config.*', 'jest.config.*', 'playwright.config.*', 'cypress.config.*', 'nixpacks.toml', 'turbo.json', 'pnpm-workspace.yaml', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'],
+    blockedGlobs: ['.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa', '**/id_ed25519', '.git/**', 'node_modules/**', '.next/**', 'dist/**', 'build/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**', 'ai/private/**', 'ai/secrets/**'],
+    blockedWriteGlobs: ['.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**', 'ai/private/**', 'ai/secrets/**'],
     generatedDeleteAllowedGlobs: ['tsconfig.tsbuildinfo', '.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**'],
     confirmationRequiredGlobs: CONFIRMATION_REQUIRED_GLOBS,
     protectedWriteGlobs: ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'Dockerfile', 'docker-compose.yml', 'LICENSE', 'prisma/migrations/**', 'public/**', 'assets/**', 'static/**', 'scripts/**', 'bin/**', 'tools/**'],
@@ -312,6 +313,9 @@ function classifyBlockedPath(normalized: string): { code: WriteValidationErrorCo
   }
   if (/(\.env(\..*)?)$/i.test(normalized) || /(^|\/)\.env(\..*)?$/i.test(normalized)) {
     return { code: 'SECRET_PATH_BLOCKED', reason: 'secret_path', message: 'Files that may contain secrets are blocked.', hint: 'Choose a documentation path instead of an environment file.' }
+  }
+  if (/(^|\/)ai\/(private|secrets)(\/|$)/i.test(normalized)) {
+    return { code: 'SECRET_PATH_BLOCKED', reason: 'secret_path', message: 'Private or secret AI paths are blocked.', hint: 'Use ai/skills/** for skill content and keep private notes elsewhere.' }
   }
   if (normalized.split('/').some(part => part === '.next' || part === 'dist' || part === 'build' || part === 'coverage' || part === '.cache' || part === '.turbo' || part === '.vercel' || part === '.npm' || part === '.yarn' || part === '.pnpm-store' || part === 'generated' || part === '.prisma')) {
     return { code: 'GENERATED_WRITE_BLOCKED', reason: 'generated_write', message: 'Generated or build output paths are blocked.', hint: 'Write to the source file or a repo note instead.' }
