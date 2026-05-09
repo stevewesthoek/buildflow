@@ -160,6 +160,25 @@ const writeResultSchema = {
   required: ['verified', 'verifiedAt', 'bytesOnDisk', 'contentHash', 'contentPreview']
 }
 
+const commandResultSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    status: { type: 'string', enum: ['completed', 'failed', 'timed_out'] },
+    commandKind: { type: 'string' },
+    command: { type: 'array', items: { type: 'string' } },
+    cwd: { type: 'string' },
+    exitCode: { type: ['integer', 'null'] },
+    signal: { type: ['string', 'null'] },
+    stdout: { type: 'string' },
+    stderr: { type: 'string' },
+    outputTruncated: { type: 'boolean' },
+    durationMs: { type: 'integer' },
+    activity: activitySchema
+  },
+  required: ['status', 'commandKind', 'command', 'cwd', 'outputTruncated', 'durationMs']
+}
+
 const errorSchema = {
   type: 'object',
   additionalProperties: false,
@@ -465,6 +484,51 @@ const openapi = {
                     activity: activitySchema
                   }
                 }
+              }
+            }
+          },
+          ...errorResponses
+        }
+      }
+    },
+    '/api/actions/run-command': {
+      post: {
+        operationId: 'runBuildFlowCommand',
+        summary: 'Run safe command',
+        description: 'Run an allowlisted read-only git/status or validation command inside a selected source.',
+        'x-openai-isConsequential': false,
+        security: [bearer],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  sourceId: { type: 'string', description: 'Target source id.' },
+                  commandKind: {
+                    type: 'string',
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'verify_public_scope', 'type_check_web', 'type_check_cli', 'verify_write_policy', 'verify_source_reindex_resilience'],
+                    description: 'Allowlisted command to run.'
+                  },
+                  timeoutMs: { type: 'integer', description: 'Optional timeout in milliseconds.', minimum: 1000, maximum: 300000 }
+                },
+                required: ['sourceId', 'commandKind']
+              },
+              examples: {
+                status: { value: { sourceId: 'buildflow', commandKind: 'git_status_short' } },
+                typeCheck: { value: { sourceId: 'buildflow', commandKind: 'type_check_web', timeoutMs: 120000 } }
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Command result',
+            content: {
+              'application/json': {
+                schema: commandResultSchema
               }
             }
           },

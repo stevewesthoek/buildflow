@@ -13,6 +13,7 @@ import { listWorkspaceTree, grepWorkspace, getWorkspaceInfo, resolveWorkspacePat
 import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot, isBlockedWritePath, redactSecrets, resolveTargetSourceId, resolveWithinSource, shouldIncludeEntry, truncateContent, getDefaultWritePolicy, validateWriteTarget, normalizeRepoRelativePath } from './safe-access'
 import type { Workspace } from '@buildflow/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
+import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -302,6 +303,27 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       return reply.code(500).header('Cache-Control', 'no-store').send({
         error: String(err)
       })
+    }
+  })
+
+  fastify.get('/api/commands/allowed', async (request, reply) => {
+    return reply.header('Cache-Control', 'no-store').send({
+      status: 'ok',
+      commandKinds: getAllowedCommandKinds()
+    })
+  })
+
+  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; timeoutMs?: number } }>('/api/commands/run', async (request, reply) => {
+    try {
+      const { sourceId, commandKind, timeoutMs } = request.body
+      if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
+      if (!commandKind || !getAllowedCommandKinds().includes(commandKind)) return reply.code(400).send({ error: 'commandKind is not allowlisted' })
+      const source = getSourcesSafe().find(item => item.id === sourceId)
+      if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs })
+      return reply.header('Cache-Control', 'no-store').send(result)
+    } catch (err) {
+      return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }
   })
 

@@ -874,6 +874,53 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
   throw new Error('Invalid mode')
 }
 
+const SAFE_COMMAND_KINDS = new Set([
+  'git_status_short',
+  'git_diff_stat',
+  'git_diff_name_only',
+  'git_diff',
+  'git_log_latest',
+  'git_branch_current',
+  'verify_public_scope',
+  'type_check_web',
+  'type_check_cli',
+  'verify_write_policy',
+  'verify_source_reindex_resilience'
+])
+
+// Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
+export async function dispatchBuildFlowCommand(body: Record<string, unknown>, userToken?: string) {
+  const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
+  const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''
+  if (!sourceId) throw new Error('sourceId is required')
+  if (!SAFE_COMMAND_KINDS.has(commandKind)) throw new Error('commandKind is not allowlisted')
+  const result = await executeAction('/api/commands/run', {
+    sourceId,
+    commandKind,
+    timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined
+  }, userToken)
+  const status = typeof (result as Record<string, unknown>).status === 'string' ? (result as Record<string, unknown>).status : 'failed'
+  const exitCode = typeof (result as Record<string, unknown>).exitCode === 'number' ? (result as Record<string, unknown>).exitCode : null
+  const outputTruncated = (result as Record<string, unknown>).outputTruncated === true
+  return withActivity(result as Record<string, unknown>, makeActivity({
+    operationId: 'runBuildFlowCommand',
+    phase: status === 'completed' ? 'completed' : 'failed',
+    actionLabel: 'Ran safe validation command',
+    userMessage: `BuildFlow ran ${commandKind} in ${sourceId} and finished with ${status}${exitCode !== null ? ` (exit ${exitCode})` : ''}.`,
+    sourceId,
+    riskLevel: 'medium',
+    requiresConfirmation: false,
+    verified: status === 'completed',
+    provenFacts: compactList([
+      `Command kind: ${commandKind}`,
+      `Status: ${status}`,
+      exitCode !== null ? `Exit code: ${exitCode}` : undefined,
+      outputTruncated ? 'Output was truncated.' : undefined
+    ]),
+    nextStep: status === 'completed' ? 'Use the command result as validation evidence.' : 'Inspect stderr/stdout and decide the next repair step.'
+  }))
+}
+
 // Create an artifact (personal note) in vault; supports preflight and dry-run; enforces write policy; returns activity narration.
 export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, userToken?: string) {
   const artifactPath = composeArtifactRelativePath({
