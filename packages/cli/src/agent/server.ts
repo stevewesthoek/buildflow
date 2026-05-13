@@ -313,14 +313,14 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     })
   })
 
-  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; timeoutMs?: number } }>('/api/commands/run', async (request, reply) => {
+  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; timeoutMs?: number; targetPath?: string; marker?: string; paths?: string[]; message?: string } }>('/api/commands/run', async (request, reply) => {
     try {
-      const { sourceId, commandKind, timeoutMs } = request.body
+      const { sourceId, commandKind, timeoutMs, targetPath, marker, paths, message } = request.body
       if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
       if (!commandKind || !getAllowedCommandKinds().includes(commandKind)) return reply.code(400).send({ error: 'commandKind is not allowlisted' })
       const source = getSourcesSafe().find(item => item.id === sourceId)
       if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
-      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs })
+      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs, targetPath, marker, paths, message })
       return reply.header('Cache-Control', 'no-store').send(result)
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })

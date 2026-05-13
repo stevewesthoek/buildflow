@@ -885,7 +885,17 @@ const SAFE_COMMAND_KINDS = new Set([
   'type_check_web',
   'type_check_cli',
   'verify_write_policy',
-  'verify_source_reindex_resilience'
+  'verify_source_reindex_resilience',
+  'vo_json_tool',
+  'probot_typecheck',
+  'probot_test',
+  'probot_test_grep_marker',
+  'vo_security_scan_changed',
+  'git_add_files',
+  'git_commit',
+  'git_push_origin_main',
+  'git_diff_cached_name_only',
+  'git_diff_cached_stat'
 ])
 
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
@@ -897,7 +907,11 @@ export async function dispatchBuildFlowCommand(body: Record<string, unknown>, us
   const result = await executeAction('/api/commands/run', {
     sourceId,
     commandKind,
-    timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined
+    timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
+    targetPath: typeof body.targetPath === 'string' ? body.targetPath : undefined,
+    marker: typeof body.marker === 'string' ? body.marker : undefined,
+    paths: Array.isArray(body.paths) ? body.paths : undefined,
+    message: typeof body.message === 'string' ? body.message : undefined
   }, userToken)
   const status = typeof (result as Record<string, unknown>).status === 'string' ? (result as Record<string, unknown>).status : 'failed'
   const exitCode = typeof (result as Record<string, unknown>).exitCode === 'number' ? (result as Record<string, unknown>).exitCode : null

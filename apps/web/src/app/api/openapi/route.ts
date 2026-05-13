@@ -495,8 +495,8 @@ const openapi = {
       post: {
         operationId: 'runBuildFlowCommand',
         summary: 'Run safe command',
-        description: 'Run an allowlisted read-only git/status or validation command inside a selected source.',
-        'x-openai-isConsequential': false,
+        description: 'Run an allowlisted git/status, validation, or explicit git workflow command inside a selected source.',
+        'x-openai-isConsequential': true,
         security: [bearer],
         requestBody: {
           required: true,
@@ -509,10 +509,14 @@ const openapi = {
                   sourceId: { type: 'string', description: 'Target source id.' },
                   commandKind: {
                     type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'verify_public_scope', 'type_check_web', 'type_check_cli', 'verify_write_policy', 'verify_source_reindex_resilience'],
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'verify_public_scope', 'type_check_web', 'type_check_cli', 'verify_write_policy', 'verify_source_reindex_resilience', 'vo_json_tool', 'probot_typecheck', 'probot_test', 'probot_test_grep_marker', 'vo_security_scan_changed', 'git_add_files', 'git_commit', 'git_push_origin_main', 'git_diff_cached_name_only', 'git_diff_cached_stat'],
                     description: 'Allowlisted command to run.'
                   },
-                  timeoutMs: { type: 'integer', description: 'Optional timeout in milliseconds.', minimum: 1000, maximum: 300000 }
+                  timeoutMs: { type: 'integer', description: 'Optional timeout in milliseconds.', minimum: 1000, maximum: 300000 },
+                  targetPath: { type: 'string', description: 'Required for vo_json_tool; must be operations/specs/video-orchestrator/**/*.json.' },
+                  marker: { type: 'string', description: 'Required for probot_test_grep_marker.' },
+                  paths: { type: 'array', description: 'Explicit file list for git_add_files.', items: { type: 'string' }, minItems: 1, maxItems: 50 },
+                  message: { type: 'string', description: 'Single-line git commit message for git_commit.' }
                 },
                 required: ['sourceId', 'commandKind']
               },
