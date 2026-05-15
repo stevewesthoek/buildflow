@@ -160,11 +160,39 @@ const writeResultSchema = {
   required: ['verified', 'verifiedAt', 'bytesOnDisk', 'contentHash', 'contentPreview']
 }
 
+const agentJobSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string' },
+    sourceId: { type: 'string' },
+    goal: { type: 'string' },
+    mode: { type: 'string', enum: ['repo_agent'] },
+    status: { type: 'string', enum: ['queued', 'running', 'needs_confirmation', 'blocked', 'completed', 'failed'] },
+    createdAt: { type: 'string' },
+    updatedAt: { type: 'string' },
+    maxIterations: { type: 'integer' },
+    currentIteration: { type: 'integer' },
+    autonomyLevel: { type: 'string', enum: ['supervised', 'hands_off_safe'] },
+    documentationPath: { type: 'string' },
+    reviewEveryStep: { type: 'boolean' },
+    autoCommit: { type: 'boolean' },
+    autoPush: { type: 'boolean' },
+    requiresConfirmation: { type: 'boolean' },
+    confirmationReason: { type: 'string' },
+    blockedReason: { type: 'string' },
+    steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    nextActions: { type: 'array', items: { type: 'string' } },
+    summary: { type: 'string' }
+  },
+  required: ['id', 'sourceId', 'goal', 'mode', 'status', 'createdAt', 'updatedAt', 'maxIterations', 'currentIteration', 'autonomyLevel', 'documentationPath', 'reviewEveryStep', 'autoCommit', 'autoPush', 'requiresConfirmation', 'steps', 'nextActions', 'summary']
+}
+
 const commandResultSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    status: { type: 'string', enum: ['completed', 'failed', 'timed_out'] },
+    status: { type: 'string', enum: ['completed', 'failed', 'timed_out', 'needs_confirmation'] },
     commandKind: { type: 'string' },
     command: { type: 'array', items: { type: 'string' } },
     cwd: { type: 'string' },
@@ -174,6 +202,10 @@ const commandResultSchema = {
     stderr: { type: 'string' },
     outputTruncated: { type: 'boolean' },
     durationMs: { type: 'integer' },
+    requiresConfirmation: { type: 'boolean' },
+    confirmationToken: { type: 'string' },
+    reason: { type: 'string' },
+    details: { type: 'object', additionalProperties: true },
     activity: activitySchema
   },
   required: ['status', 'commandKind', 'command', 'cwd', 'outputTruncated', 'durationMs']
@@ -509,14 +541,21 @@ const openapi = {
                   sourceId: { type: 'string', description: 'Target source id.' },
                   commandKind: {
                     type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'verify_public_scope', 'type_check_web', 'type_check_cli', 'verify_write_policy', 'verify_source_reindex_resilience', 'vo_json_tool', 'probot_typecheck', 'probot_test', 'probot_test_grep_marker', 'vo_security_scan_changed', 'git_add_files', 'git_commit', 'git_push_origin_main', 'git_diff_cached_name_only', 'git_diff_cached_stat'],
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'verify_public_scope', 'type_check_web', 'type_check_cli', 'verify_write_policy', 'verify_source_reindex_resilience', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths'],
                     description: 'Allowlisted command to run.'
                   },
                   timeoutMs: { type: 'integer', description: 'Optional timeout in milliseconds.', minimum: 1000, maximum: 300000 },
-                  targetPath: { type: 'string', description: 'Required for vo_json_tool; must be operations/specs/video-orchestrator/**/*.json.' },
-                  marker: { type: 'string', description: 'Required for probot_test_grep_marker.' },
-                  paths: { type: 'array', description: 'Explicit file list for git_add_files.', items: { type: 'string' }, minItems: 1, maxItems: 50 },
-                  message: { type: 'string', description: 'Single-line git commit message for git_commit.' }
+                  paths: { type: 'array', description: 'Source-relative explicit paths for git_add_paths, validate_json_files, and security_scan_paths.', items: { type: 'string' }, minItems: 1, maxItems: 50 },
+                  packageDir: { type: 'string', description: 'Source-relative package directory containing package.json.' },
+                  scriptName: { type: 'string', description: 'Safe package script name for run_package_script.' },
+                  marker: { type: 'string', description: 'Safe marker for run_package_test_marker.' },
+                  patternSet: { type: 'string', enum: ['forbidden_runtime_execution', 'forbidden_secret_material', 'forbidden_upload_network', 'forbidden_all_high_risk'], description: 'Named security scan pattern set.' },
+                  message: { type: 'string', description: 'Single-line git commit message for git_commit.' },
+                  body: { type: 'string', description: 'Optional git commit body for git_commit.' },
+                  remote: { type: 'string', description: 'Safe remote name for git_push. Defaults to origin.' },
+                  branch: { type: 'string', description: 'Safe branch name for git_push. Defaults to current branch.' },
+                  confirmedByUser: { type: 'boolean', description: 'Confirm confirmation-gated command execution.' },
+                  confirmationToken: { type: 'string', description: 'Confirmation token returned by a prior needs_confirmation response.' }
                 },
                 required: ['sourceId', 'commandKind']
               },
@@ -533,6 +572,108 @@ const openapi = {
             content: {
               'application/json': {
                 schema: commandResultSchema
+              }
+            }
+          },
+          ...errorResponses
+        }
+      }
+    },
+    '/api/actions/agent/start': {
+      post: {
+        operationId: 'startBuildFlowAgentJob',
+        summary: 'Start Agent Mode job',
+        description: 'Start a repo-agnostic hands-off implementation loop for one source. The GPT continues the loop with existing read/write/command actions and stops only for policy blocks or confirmations.',
+        'x-openai-isConsequential': true,
+        security: [bearer],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  sourceId: { type: 'string', description: 'Target source id.' },
+                  goal: { type: 'string', description: 'Implementation goal for the repo-agent loop.' },
+                  maxIterations: { type: 'integer', description: 'Maximum repair/validation iterations.', minimum: 1, maximum: 20 },
+                  autonomyLevel: { type: 'string', enum: ['supervised', 'hands_off_safe'], description: 'Agentic execution mode. hands_off_safe continues without user interaction until blocked or confirmation is required.' },
+                  documentationPath: { type: 'string', description: 'Repo-relative progress document path for the goal/task/review loop.' },
+                  reviewEveryStep: { type: 'boolean', description: 'Review changed files and validation output after every task before continuing.' },
+                  autoCommit: { type: 'boolean', description: 'Request commit flow when work is complete; confirmation still required.' },
+                  autoPush: { type: 'boolean', description: 'Request push flow when work is complete; confirmation still required.' }
+                },
+                required: ['sourceId', 'goal']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Agent Mode job',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    status: { type: 'string' },
+                    job: agentJobSchema,
+                    activity: activitySchema
+                  },
+                  required: ['status', 'job']
+                }
+              }
+            }
+          },
+          ...errorResponses
+        }
+      }
+    },
+    '/api/actions/agent/status': {
+      post: {
+        operationId: 'getBuildFlowAgentJob',
+        summary: 'Get or update Agent Mode job',
+        description: 'Return Agent Mode job state or update safe progress fields after a step in the hands-off loop.',
+        'x-openai-isConsequential': false,
+        security: [bearer],
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  jobId: { type: 'string', description: 'Agent job id. Omit to list jobs.' },
+                  status: { type: 'string', enum: ['queued', 'running', 'needs_confirmation', 'blocked', 'completed', 'failed'] },
+                  currentIteration: { type: 'integer' },
+                  blockedReason: { type: 'string' },
+                  requiresConfirmation: { type: 'boolean' },
+                  confirmationReason: { type: 'string' },
+                  nextActions: { type: 'array', items: { type: 'string' } },
+                  summary: { type: 'string' }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Agent Mode job status',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    status: { type: 'string' },
+                    job: agentJobSchema,
+                    jobs: { type: 'array', items: agentJobSchema },
+                    activity: activitySchema
+                  },
+                  required: ['status']
+                }
               }
             }
           },

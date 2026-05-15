@@ -886,16 +886,16 @@ const SAFE_COMMAND_KINDS = new Set([
   'type_check_cli',
   'verify_write_policy',
   'verify_source_reindex_resilience',
-  'vo_json_tool',
-  'probot_typecheck',
-  'probot_test',
-  'probot_test_grep_marker',
-  'vo_security_scan_changed',
-  'git_add_files',
-  'git_commit',
-  'git_push_origin_main',
+  'git_diff_cached_stat',
   'git_diff_cached_name_only',
-  'git_diff_cached_stat'
+  'git_add_paths',
+  'git_commit',
+  'git_push',
+  'validate_json_files',
+  'run_package_script',
+  'run_package_test',
+  'run_package_test_marker',
+  'security_scan_paths'
 ])
 
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
@@ -908,10 +908,17 @@ export async function dispatchBuildFlowCommand(body: Record<string, unknown>, us
     sourceId,
     commandKind,
     timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
-    targetPath: typeof body.targetPath === 'string' ? body.targetPath : undefined,
-    marker: typeof body.marker === 'string' ? body.marker : undefined,
     paths: Array.isArray(body.paths) ? body.paths : undefined,
-    message: typeof body.message === 'string' ? body.message : undefined
+    packageDir: typeof body.packageDir === 'string' ? body.packageDir : undefined,
+    scriptName: typeof body.scriptName === 'string' ? body.scriptName : undefined,
+    marker: typeof body.marker === 'string' ? body.marker : undefined,
+    message: typeof body.message === 'string' ? body.message : undefined,
+    body: typeof body.body === 'string' ? body.body : undefined,
+    remote: typeof body.remote === 'string' ? body.remote : undefined,
+    branch: typeof body.branch === 'string' ? body.branch : undefined,
+    patternSet: typeof body.patternSet === 'string' ? body.patternSet : undefined,
+    confirmedByUser: typeof body.confirmedByUser === 'boolean' ? body.confirmedByUser : undefined,
+    confirmationToken: typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
   }, userToken)
   const status = typeof (result as Record<string, unknown>).status === 'string' ? (result as Record<string, unknown>).status : 'failed'
   const exitCode = typeof (result as Record<string, unknown>).exitCode === 'number' ? (result as Record<string, unknown>).exitCode : null
@@ -1235,4 +1242,59 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
   }
 
   throw new Error('Invalid changeType')
+}
+
+
+export async function startBuildFlowAgentJob(body: Record<string, unknown>, userToken?: string) {
+  const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
+  const goal = typeof body.goal === 'string' ? body.goal : ''
+  if (!sourceId) throw new ActionTransportError('sourceId is required', 400)
+  if (!goal.trim()) throw new ActionTransportError('goal is required', 400)
+  const result = await executeAction('/api/agent-jobs/start', {
+    sourceId,
+    goal,
+    maxIterations: typeof body.maxIterations === 'number' ? body.maxIterations : undefined,
+    autonomyLevel: body.autonomyLevel === 'supervised' ? 'supervised' : body.autonomyLevel === 'hands_off_safe' ? 'hands_off_safe' : undefined,
+    documentationPath: typeof body.documentationPath === 'string' ? body.documentationPath : undefined,
+    reviewEveryStep: typeof body.reviewEveryStep === 'boolean' ? body.reviewEveryStep : undefined,
+    autoCommit: typeof body.autoCommit === 'boolean' ? body.autoCommit : undefined,
+    autoPush: typeof body.autoPush === 'boolean' ? body.autoPush : undefined
+  }, userToken)
+  const job = (result as { job?: { id?: string; sourceId?: string; requiresConfirmation?: boolean } }).job
+  return withActivity(result as Record<string, unknown>, makeActivity({
+    operationId: 'startBuildFlowAgentJob',
+    phase: job?.requiresConfirmation ? 'waiting_for_confirmation' : 'planning',
+    actionLabel: 'Started Agent Mode job',
+    userMessage: job?.id ? `Agent Mode job started for ${job.sourceId || sourceId}.` : 'Agent Mode job start returned no job id.',
+    sourceId,
+    riskLevel: job?.requiresConfirmation ? 'medium' : 'low',
+    requiresConfirmation: job?.requiresConfirmation === true,
+    verified: Boolean(job?.id),
+    nextStep: 'Continue hands-off: inspect, plan, write, validate, repair, and report unless BuildFlow blocks or asks for confirmation.'
+  }))
+}
+
+export async function getBuildFlowAgentJob(body: Record<string, unknown>, userToken?: string) {
+  const payload: Record<string, unknown> = {}
+  if (typeof body.jobId === 'string') payload.jobId = body.jobId
+  if (typeof body.status === 'string') payload.status = body.status
+  if (typeof body.currentIteration === 'number') payload.currentIteration = body.currentIteration
+  if (typeof body.blockedReason === 'string') payload.blockedReason = body.blockedReason
+  if (typeof body.requiresConfirmation === 'boolean') payload.requiresConfirmation = body.requiresConfirmation
+  if (typeof body.confirmationReason === 'string') payload.confirmationReason = body.confirmationReason
+  if (Array.isArray(body.nextActions)) payload.nextActions = body.nextActions
+  if (typeof body.summary === 'string') payload.summary = body.summary
+  const result = await executeAction('/api/agent-jobs/status', payload, userToken)
+  const job = (result as { job?: { id?: string; sourceId?: string; status?: string; requiresConfirmation?: boolean } }).job
+  return withActivity(result as Record<string, unknown>, makeActivity({
+    operationId: 'getBuildFlowAgentJob',
+    phase: job?.status === 'completed' ? 'completed' : job?.requiresConfirmation ? 'waiting_for_confirmation' : 'checking',
+    actionLabel: 'Checked Agent Mode job',
+    userMessage: job?.id ? `Agent Mode job ${job.id} is ${job.status || 'active'}.` : 'Returned Agent Mode jobs.',
+    sourceId: job?.sourceId,
+    riskLevel: job?.requiresConfirmation ? 'medium' : 'low',
+    requiresConfirmation: job?.requiresConfirmation === true,
+    verified: true,
+    nextStep: job?.requiresConfirmation ? 'Stop and ask for explicit confirmation.' : 'Continue the hands-off implementation loop.'
+  }))
 }

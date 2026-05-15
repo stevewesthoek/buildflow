@@ -14,6 +14,7 @@ import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot
 import type { Workspace } from '@buildflow/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
 import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
+import { getAgentJob, listAgentJobs, startAgentJob, updateAgentJob } from './agent-jobs'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -313,14 +314,40 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     })
   })
 
-  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; timeoutMs?: number; targetPath?: string; marker?: string; paths?: string[]; message?: string } }>('/api/commands/run', async (request, reply) => {
+  fastify.post<{ Body: { sourceId: string; goal: string; maxIterations?: number; autonomyLevel?: 'supervised' | 'hands_off_safe'; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean } }>('/api/agent-jobs/start', async (request, reply) => {
     try {
-      const { sourceId, commandKind, timeoutMs, targetPath, marker, paths, message } = request.body
+      const { sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush } = request.body
+      if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
+      const source = getSourcesSafe().find(item => item.id === sourceId)
+      if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+      if (source.indexStatus !== 'ready') return reply.code(409).send({ error: `Source is not ready for Agent Mode: ${sourceId}`, indexStatus: source.indexStatus })
+      const job = startAgentJob({ sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush })
+      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job })
+    } catch (err) {
+      return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
+    }
+  })
+
+  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string } }>('/api/agent-jobs/status', async (request, reply) => {
+    try {
+      const { jobId, ...patch } = request.body || {}
+      if (!jobId) return reply.header('Cache-Control', 'no-store').send({ status: 'ok', jobs: listAgentJobs() })
+      const job = Object.keys(patch).length > 0 ? updateAgentJob(jobId, patch) : getAgentJob(jobId)
+      if (!job) return reply.code(404).send({ error: `Agent job not found: ${jobId}` })
+      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job })
+    } catch (err) {
+      return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
+    }
+  })
+
+  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; timeoutMs?: number; paths?: string[]; packageDir?: string; scriptName?: string; marker?: string; message?: string; body?: string; remote?: string; branch?: string; patternSet?: 'forbidden_runtime_execution' | 'forbidden_secret_material' | 'forbidden_upload_network' | 'forbidden_all_high_risk'; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/commands/run', async (request, reply) => {
+    try {
+      const { sourceId, commandKind, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, confirmedByUser, confirmationToken } = request.body
       if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
       if (!commandKind || !getAllowedCommandKinds().includes(commandKind)) return reply.code(400).send({ error: 'commandKind is not allowlisted' })
       const source = getSourcesSafe().find(item => item.id === sourceId)
       if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
-      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs, targetPath, marker, paths, message })
+      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, confirmedByUser, confirmationToken })
       return reply.header('Cache-Control', 'no-store').send(result)
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })

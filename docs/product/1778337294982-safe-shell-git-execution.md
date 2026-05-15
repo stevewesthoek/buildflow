@@ -138,3 +138,27 @@ Commit target:
 - Never run commands outside the selected source root.
 - Never add arbitrary shell execution to the GPT action surface.
 - Every mutating command needs a policy gate and, when appropriate, confirmation tokens.
+
+
+## Repo-agnostic command model
+
+BuildFlow command execution is source-relative and allowlisted. It does not expose arbitrary shell execution.
+
+Supported repo-agnostic command groups:
+
+- Git status and diffs: normal and staged diff views.
+- Explicit staging: `git_add_paths` stages only a non-empty list of source-relative paths.
+- Confirmation-gated commit and push: `git_commit` and `git_push` require explicit confirmation flow.
+- JSON validation: `validate_json_files` runs `python3 -m json.tool` for explicit `.json` paths.
+- Package scripts: `run_package_script`, `run_package_test`, and `run_package_test_marker` run from a source-relative package directory containing `package.json`.
+- Security scans: `security_scan_paths` uses named pattern sets only; users cannot provide arbitrary regex.
+
+Safety boundaries:
+
+- No `git add .`, `git add -A`, or `git add --all`.
+- No absolute paths or path traversal.
+- No arbitrary shell, installers, force push, tags, or refspec pushes.
+- No `.env`, `.git`, `node_modules`, build outputs, generated outputs, runtime outputs, logs, or binary paths.
+- Secret-looking output is redacted before it is returned.
+
+After changing the OpenAPI command schema, regenerate `docs/openapi.chatgpt.json`, update the Custom GPT schema in the GPT editor, save the GPT, and start a new chat.
