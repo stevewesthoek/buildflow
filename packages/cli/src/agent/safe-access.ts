@@ -253,7 +253,7 @@ const SAFE_WRITE_ROOTS = [
 const PROTECTED_FILES = new Set(['docker-compose.yml'])
 const BLOCKED_DIRECTORY_NAMES = new Set(['node_modules', '.next', 'dist', 'build', 'coverage', '.git'])
 const ALLOWED_DOTFILES = new Set(['.github', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example', '.gitignore', '.buildflow', '.nvmrc', '.prettierrc', '.eslintrc'])
-const CONFIRMATION_REQUIRED_GLOBS = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'LICENSE', 'prisma/migrations/**', 'Dockerfile', 'docker-compose.yml', 'public/**', 'assets/**', 'static/**', 'scripts/**', 'bin/**', 'tools/**']
+const CONFIRMATION_REQUIRED_GLOBS = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'LICENSE']
 const BLOCKED_CONTENT_PATTERNS = ['BEGIN RSA PRIVATE KEY', 'BEGIN OPENSSH PRIVATE KEY', 'BEGIN EC PRIVATE KEY', 'ghp_', 'github_pat_', 'sk_live_', 'rk_live_', 'xoxb-', 'AKIA', 'AIza']
 
 export function isSafeRelativePath(relativePath: string): boolean {
@@ -285,8 +285,8 @@ export function getDefaultWritePolicy(): WritePolicySummary {
     blockedWriteGlobs: ['.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**', 'ai/private/**', 'ai/secrets/**'],
     generatedDeleteAllowedGlobs: ['tsconfig.tsbuildinfo', '.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**'],
     confirmationRequiredGlobs: CONFIRMATION_REQUIRED_GLOBS,
-    protectedWriteGlobs: ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'Dockerfile', 'docker-compose.yml', 'LICENSE', 'prisma/migrations/**', 'public/**', 'assets/**', 'static/**', 'scripts/**', 'bin/**', 'tools/**'],
-    protectedGlobs: ['package.json', 'docker-compose.yml'],
+    protectedWriteGlobs: ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'LICENSE'],
+    protectedGlobs: [],
     blockedContentPatterns: BLOCKED_CONTENT_PATTERNS,
     binaryWriteBlocked: true,
     binaryDeleteAllowedWithConfirmation: true,
@@ -429,16 +429,6 @@ export function validateWriteTarget(params: {
   }
 
   if (normalizedPath === 'package.json') {
-    if (typeof params.content === 'string' && isDependencyChange(params.content) && !hasValidConfirmation({
-      sourceId: params.sourceId,
-      changeType: params.changeType,
-      normalizedPath,
-      toPath: params.toPath,
-      confirmedByUser: params.confirmedByUser,
-      confirmationToken: params.confirmationToken
-    })) {
-      return { ok: false, requestedPath, normalizedPath, sourceRootRelativePath, policy, error: buildConfirmationError('dependency_change', 'Explicitly confirm dependency changes before editing package.json.') }
-    }
     if (typeof params.content === 'string') {
       try {
         JSON.parse(params.content)

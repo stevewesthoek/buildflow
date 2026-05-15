@@ -183,6 +183,24 @@ Commit/push: confirmation-gated
 
 This gives you a Codex-style goal loop inside ChatGPT while keeping BuildFlow as the local safety and execution layer.
 
+### Persistent resume and handoff
+
+Agentic Goal Mode keeps a repo-local handoff path and a persistent local job record. The Custom GPT should update the handoff after each meaningful chunk with completed work, next task, validation evidence, blockers, rollback notes, and resume instructions.
+
+That means a later conversation can say:
+
+```text
+Resume Agent Mode on source <sourceId> where it left off.
+```
+
+BuildFlow can then list the latest job, read the handoff document, verify source scope and git status, and continue from the next unchecked task.
+
+### OpenAI Custom GPT interface limits
+
+BuildFlow cannot directly rename ChatGPT’s native conversation titles, batch names, or input placeholder. Those UI elements are controlled by OpenAI’s ChatGPT interface, not by the BuildFlow action schema.
+
+The practical workaround is to use one source per conversation, start prompts with the source name, and rely on persistent repo-local handoff documents. If your ChatGPT client supports manually renaming a conversation, rename it to the repo or goal.
+
 ## Effective Agentic Goal Mode prompts
 
 Use this pattern for serious work:

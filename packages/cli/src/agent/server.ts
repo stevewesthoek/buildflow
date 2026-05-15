@@ -328,7 +328,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string } }>('/api/agent-jobs/status', async (request, reply) => {
+  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string; lastKnownGitStatus?: string } }>('/api/agent-jobs/status', async (request, reply) => {
     try {
       const { jobId, ...patch } = request.body || {}
       if (!jobId) return reply.header('Cache-Control', 'no-store').send({ status: 'ok', jobs: listAgentJobs() })

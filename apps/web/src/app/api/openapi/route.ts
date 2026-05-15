@@ -183,7 +183,10 @@ const agentJobSchema = {
     blockedReason: { type: 'string' },
     steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
     nextActions: { type: 'array', items: { type: 'string' } },
-    summary: { type: 'string' }
+    summary: { type: 'string' },
+    handoffPath: { type: 'string' },
+    resumeInstructions: { type: 'array', items: { type: 'string' } },
+    lastKnownGitStatus: { type: 'string' }
   },
   required: ['id', 'sourceId', 'goal', 'mode', 'status', 'createdAt', 'updatedAt', 'maxIterations', 'currentIteration', 'autonomyLevel', 'documentationPath', 'reviewEveryStep', 'autoCommit', 'autoPush', 'requiresConfirmation', 'steps', 'nextActions', 'summary']
 }
@@ -652,7 +655,8 @@ const openapi = {
                   requiresConfirmation: { type: 'boolean' },
                   confirmationReason: { type: 'string' },
                   nextActions: { type: 'array', items: { type: 'string' } },
-                  summary: { type: 'string' }
+                  summary: { type: 'string' },
+                  lastKnownGitStatus: { type: 'string' }
                 }
               }
             }

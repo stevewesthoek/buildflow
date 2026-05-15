@@ -302,9 +302,6 @@ function classifyBlockedWrite(path: string, policy?: WritePolicy, content?: stri
       }
     }
   }
-  if (normalized === 'package.json' && isDependencyChange(content)) {
-    return { code: 'REQUIRES_EXPLICIT_CONFIRMATION', message: 'This change requires explicit confirmation.', userMessage: 'BuildFlow needs explicit confirmation before making this change.', reason: 'dependency_change', hint: 'Explicitly confirm dependency changes before editing package.json.' }
-  }
   if (matchesAny(policy?.confirmationRequiredGlobs, normalized)) {
     return { code: 'REQUIRES_EXPLICIT_CONFIRMATION', message: 'This change requires explicit confirmation.', userMessage: 'BuildFlow needs explicit confirmation before making this change.', reason: 'confirmation_required_path', hint: 'Explicitly confirm before editing lockfiles, GitHub workflows, LICENSE, or Prisma migrations.' }
   }

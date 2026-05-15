@@ -1,15 +1,34 @@
 import crypto from 'crypto'
+import fs from 'fs'
+import path from 'path'
+import { getConfigDir } from '../utils/paths'
 
 export type AgentJobStatus = 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'
 export type AgentJobMode = 'repo_agent'
-
 export type AgentAutonomyLevel = 'supervised' | 'hands_off_safe'
+
+export type AgentJobAction =
+  | 'select_source'
+  | 'requirements'
+  | 'roadmap'
+  | 'implementation_plan'
+  | 'phase_plan'
+  | 'execute_task'
+  | 'review_task'
+  | 'hardening'
+  | 'update_docs'
+  | 'validate'
+  | 'repair'
+  | 'cleanup'
+  | 'git_status'
+  | 'commit_review'
+  | 'final_handoff'
 
 export type AgentJobStep = {
   id: string
   title: string
   status: 'pending' | 'running' | 'completed' | 'blocked'
-  action: 'inspect' | 'document_goal' | 'plan' | 'execute_task' | 'review_task' | 'update_docs' | 'validate' | 'repair' | 'git_status' | 'final_report'
+  action: AgentJobAction
   description: string
 }
 
@@ -34,11 +53,15 @@ export type AgentJob = {
   steps: AgentJobStep[]
   nextActions: string[]
   summary: string
+  handoffPath: string
+  resumeInstructions: string[]
+  lastKnownGitStatus?: string
 }
 
 const jobs = new Map<string, AgentJob>()
 const MAX_GOAL_LENGTH = 4000
-const MAX_ITERATIONS = 20
+const MAX_ITERATIONS = 40
+const JOB_STORE_PATH = path.join(getConfigDir(), 'agent-jobs.json')
 const SECRET_LIKE_PATTERNS = [
   'BEGIN RSA' + ' PRIVATE KEY',
   'BEGIN OPENSSH' + ' PRIVATE KEY',
@@ -60,28 +83,115 @@ function sanitizeGoal(goal: string): string {
   return cleaned
 }
 
+function normalizeDocumentationPath(value?: string): string {
+  const normalized = String(value || 'docs/product/agent-mode-progress.md')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .trim()
+  if (!normalized || normalized.includes('..') || normalized.startsWith('/')) return 'docs/product/agent-mode-progress.md'
+  return normalized
+}
+
 function buildSteps(): AgentJobStep[] {
   return [
-    { id: 'inspect', title: 'Inspect repository', status: 'pending', action: 'inspect', description: 'Read source status, active context, file tree, package metadata, and relevant implementation surfaces.' },
-    { id: 'document_goal', title: 'Document goal', status: 'pending', action: 'document_goal', description: 'Create or update an implementation note with the goal, assumptions, constraints, task list, and validation plan.' },
-    { id: 'plan', title: 'Plan next tasks', status: 'pending', action: 'plan', description: 'Break the goal into small executable tasks with expected files, risks, and validation commands.' },
-    { id: 'execute_task', title: 'Execute next task', status: 'pending', action: 'execute_task', description: 'Apply verified repo-local changes only inside allowed roots and stop for no-access or confirmation-required paths.' },
-    { id: 'review_task', title: 'Review task output', status: 'pending', action: 'review_task', description: 'Inspect changed files, command output, failures, and policy results before proceeding.' },
-    { id: 'update_docs', title: 'Update progress documentation', status: 'pending', action: 'update_docs', description: 'Record completed work, open issues, validation evidence, and the next task before continuing.' },
-    { id: 'validate', title: 'Run validation', status: 'pending', action: 'validate', description: 'Use allowlisted package, JSON, security, type-check, test, and git commands.' },
-    { id: 'repair', title: 'Repair and repeat', status: 'pending', action: 'repair', description: 'Inspect validation failures, patch again, update documentation, and repeat until clean or blocked.' },
-    { id: 'git_status', title: 'Review git state', status: 'pending', action: 'git_status', description: 'Report changed files, staged files, and remaining validation status. Commit/push only if explicitly configured and confirmed.' },
-    { id: 'final_report', title: 'Final report', status: 'pending', action: 'final_report', description: 'Summarize what changed, validations, remaining risks, schema/instruction refresh needs, and git state.' }
+    { id: 'select_source', title: 'Lock source scope', status: 'pending', action: 'select_source', description: 'Confirm the sourceId and use it explicitly for every inspect, read, write, command, and Agent Mode call.' },
+    { id: 'requirements', title: 'Capture requirements', status: 'pending', action: 'requirements', description: 'Extract goals, constraints, acceptance criteria, risks, assumptions, and no-access boundaries from the prompt and repo evidence.' },
+    { id: 'roadmap', title: 'Create roadmap', status: 'pending', action: 'roadmap', description: 'Turn requirements into phases with value, dependencies, validation strategy, and stopping conditions.' },
+    { id: 'implementation_plan', title: 'Write implementation plan', status: 'pending', action: 'implementation_plan', description: 'Create or update the handoff document with tasks, files, validation commands, rollback notes, and current status.' },
+    { id: 'phase_plan', title: 'Plan current phase', status: 'pending', action: 'phase_plan', description: 'Choose the next small task from the roadmap, inspect needed files, and define expected changes before editing.' },
+    { id: 'execute_task', title: 'Execute task', status: 'pending', action: 'execute_task', description: 'Apply verified repo-local changes inside allowed roots. Backup or document rollback before risky refactors.' },
+    { id: 'review_task', title: 'Review task', status: 'pending', action: 'review_task', description: 'Inspect changed files, command output, errors, security scan results, and acceptance criteria before continuing.' },
+    { id: 'update_docs', title: 'Update handoff', status: 'pending', action: 'update_docs', description: 'Persist progress, completed tasks, next task, validation evidence, blockers, and resume instructions after each meaningful chunk.' },
+    { id: 'validate', title: 'Validate', status: 'pending', action: 'validate', description: 'Run allowlisted typecheck, tests, JSON validation, package tests, security scans, and git status as applicable.' },
+    { id: 'repair', title: 'Repair loop', status: 'pending', action: 'repair', description: 'Investigate failures, patch, update handoff, and repeat until validation is clean or policy blocks progress.' },
+    { id: 'hardening', title: 'Harden implementation', status: 'pending', action: 'hardening', description: 'Add edge-case handling, tests, cleanup, docs, security checks, and maintainability improvements.' },
+    { id: 'cleanup', title: 'Clean up', status: 'pending', action: 'cleanup', description: 'Remove temporary files inside allowed paths, simplify code, ensure docs are accurate, and preserve useful rollback notes.' },
+    { id: 'git_status', title: 'Review git state', status: 'pending', action: 'git_status', description: 'Report changed and staged files. Stage explicit files only. Commit/push only when configured and confirmed.' },
+    { id: 'commit_review', title: 'Commit review', status: 'pending', action: 'commit_review', description: 'Prepare commit message and verify staged file list, cached diff, and validation evidence before committing.' },
+    { id: 'final_handoff', title: 'Final handoff', status: 'pending', action: 'final_handoff', description: 'Summarize delivered value, validation results, changed files, risks, follow-ups, and exact resume point if unfinished.' }
   ]
 }
+
+function ensureJobStoreDir(): void {
+  fs.mkdirSync(path.dirname(JOB_STORE_PATH), { recursive: true })
+}
+
+function coerceJob(raw: unknown): AgentJob | null {
+  if (!raw || typeof raw !== 'object') return null
+  const item = raw as Partial<AgentJob>
+  if (!item.id || !item.sourceId || !item.goal || !item.createdAt) return null
+  const documentationPath = normalizeDocumentationPath(item.documentationPath)
+  return {
+    id: String(item.id),
+    sourceId: String(item.sourceId),
+    goal: String(item.goal),
+    mode: 'repo_agent',
+    status: item.status || 'running',
+    createdAt: String(item.createdAt),
+    updatedAt: String(item.updatedAt || item.createdAt),
+    maxIterations: Math.min(MAX_ITERATIONS, Math.max(1, Number(item.maxIterations || 12))),
+    currentIteration: Math.max(0, Number(item.currentIteration || 0)),
+    autonomyLevel: item.autonomyLevel === 'supervised' ? 'supervised' : 'hands_off_safe',
+    documentationPath,
+    reviewEveryStep: item.reviewEveryStep !== false,
+    autoCommit: item.autoCommit === true,
+    autoPush: item.autoPush === true,
+    requiresConfirmation: item.requiresConfirmation === true,
+    confirmationReason: item.confirmationReason,
+    blockedReason: item.blockedReason,
+    steps: Array.isArray(item.steps) && item.steps.length > 0 ? item.steps : buildSteps(),
+    nextActions: Array.isArray(item.nextActions) ? item.nextActions : [],
+    summary: item.summary || 'Agent Mode job loaded from persistent handoff state.',
+    handoffPath: item.handoffPath || documentationPath,
+    resumeInstructions: Array.isArray(item.resumeInstructions) ? item.resumeInstructions : buildResumeInstructions(documentationPath),
+    lastKnownGitStatus: item.lastKnownGitStatus
+  }
+}
+
+function loadJobsFromDisk(): void {
+  try {
+    if (!fs.existsSync(JOB_STORE_PATH)) return
+    const parsed = JSON.parse(fs.readFileSync(JOB_STORE_PATH, 'utf8')) as { jobs?: unknown[] }
+    for (const raw of parsed.jobs || []) {
+      const job = coerceJob(raw)
+      if (job) jobs.set(job.id, job)
+    }
+  } catch {
+    // Ignore corrupted job state; repo-local handoff docs remain the recovery source of truth.
+  }
+}
+
+function persistJobs(): void {
+  ensureJobStoreDir()
+  const payload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    jobs: Array.from(jobs.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  }
+  fs.writeFileSync(JOB_STORE_PATH, JSON.stringify(payload), 'utf8')
+}
+
+function buildResumeInstructions(documentationPath: string): string[] {
+  return [
+    `Read ${documentationPath} first; treat it as the resume handoff and current source of truth.`,
+    'Verify the locked sourceId before inspecting, writing, or running commands.',
+    'Run git_status_short and inspect changed files before continuing.',
+    'Continue with the next unchecked task, then update the handoff after each meaningful chunk.',
+    'Stop only for blocked/no-access paths, failed validation that needs user choice, or confirmation-gated commit/push/destructive operations.'
+  ]
+}
+
+loadJobsFromDisk()
 
 export function startAgentJob(params: { sourceId: string; goal: string; maxIterations?: number; autonomyLevel?: AgentAutonomyLevel; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean }): AgentJob {
   const sourceId = String(params.sourceId || '').trim()
   if (!sourceId) throw new Error('sourceId is required')
   const goal = sanitizeGoal(params.goal)
   const autonomyLevel: AgentAutonomyLevel = params.autonomyLevel === 'supervised' ? 'supervised' : 'hands_off_safe'
-  const documentationPath = String(params.documentationPath || 'docs/product/agent-mode-progress.md').replace(/\\/g, '/').replace(/^\/+/, '').trim() || 'docs/product/agent-mode-progress.md'
+  const documentationPath = normalizeDocumentationPath(params.documentationPath)
   const now = new Date().toISOString()
+  const resumeInstructions = buildResumeInstructions(documentationPath)
   const job: AgentJob = {
     id: `agent-${crypto.randomUUID()}`,
     sourceId,
@@ -90,7 +200,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     status: 'running',
     createdAt: now,
     updatedAt: now,
-    maxIterations: Math.min(MAX_ITERATIONS, Math.max(1, params.maxIterations || 12)),
+    maxIterations: Math.min(MAX_ITERATIONS, Math.max(1, params.maxIterations || 20)),
     currentIteration: 0,
     autonomyLevel,
     documentationPath,
@@ -101,33 +211,41 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     confirmationReason: params.autoCommit || params.autoPush ? 'git_commit_or_push_requires_confirmation' : undefined,
     steps: buildSteps(),
     nextActions: [
-      'Call listBuildFlowSources and confirm source is writable/searchable.',
-      `Create or update ${documentationPath} with the goal, task list, progress, validation evidence, and next task.`,
-      'Execute one task, review changed files and validation output, update documentation, then continue to the next task.',
-      'Do not ask the user unless BuildFlow returns needs_confirmation or blocked for protected/no-access paths.'
+      'Lock this conversation to sourceId and pass sourceId explicitly on every action.',
+      `Create or update ${documentationPath} with requirements, roadmap, phases, tasks, progress, validation evidence, rollback notes, and next resume step.`,
+      'Execute one meaningful chunk, review it, validate it, update the handoff, then continue until done or blocked.',
+      'Give compact progress summaries; do not ask the user unless policy requires confirmation, source scope is ambiguous, or validation needs a human choice.'
     ],
-    summary: 'Agentic Goal Mode job started. Continue hands-off through document, plan, execute, review, document, validate, repair, and final report.'
+    summary: 'Agent Mode started with persistent handoff. Continue requirements → roadmap → plan → execute → review → docs → validate → repair → harden → cleanup → git review → final handoff.',
+    handoffPath: documentationPath,
+    resumeInstructions
   }
   jobs.set(job.id, job)
+  persistJobs()
   return job
 }
 
 export function getAgentJob(jobId: string): AgentJob | undefined {
+  if (jobs.size === 0) loadJobsFromDisk()
   return jobs.get(jobId)
 }
 
-export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'status' | 'currentIteration' | 'blockedReason' | 'requiresConfirmation' | 'confirmationReason' | 'nextActions' | 'summary'>>): AgentJob {
-  const job = jobs.get(jobId)
+export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'status' | 'currentIteration' | 'blockedReason' | 'requiresConfirmation' | 'confirmationReason' | 'nextActions' | 'summary' | 'lastKnownGitStatus'>>): AgentJob {
+  const job = getAgentJob(jobId)
   if (!job) throw new Error(`Agent job not found: ${jobId}`)
   const updated: AgentJob = {
     ...job,
     ...patch,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    resumeInstructions: job.resumeInstructions && job.resumeInstructions.length > 0 ? job.resumeInstructions : buildResumeInstructions(job.documentationPath),
+    handoffPath: job.handoffPath || job.documentationPath
   }
   jobs.set(jobId, updated)
+  persistJobs()
   return updated
 }
 
 export function listAgentJobs(): AgentJob[] {
-  return Array.from(jobs.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  if (jobs.size === 0) loadJobsFromDisk()
+  return Array.from(jobs.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }

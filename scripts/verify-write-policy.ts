@@ -34,7 +34,10 @@ assert(policy.allowedRoots.includes('runbooks/**'))
 assert(policy.allowedRoots.includes('*.md'))
 assert(policy.blockedGlobs.includes('.env'))
 assert(policy.confirmationRequiredGlobs.includes('LICENSE'))
-assert(policy.protectedGlobs.includes('package.json'))
+assert(!policy.confirmationRequiredGlobs.includes('package.json'))
+assert(!policy.protectedGlobs.includes('package.json'))
+assert(!policy.protectedWriteGlobs.includes('scripts/**'))
+assert(!policy.protectedWriteGlobs.includes('public/**'))
 assert(policy.blockedWriteGlobs?.includes('generated/**'))
 assert(policy.generatedDeleteAllowedGlobs?.includes('tsconfig.tsbuildinfo'))
 assert(policy.blockedContentPatterns.includes('BEGIN OPENSSH PRIVATE KEY'))
@@ -147,8 +150,6 @@ const blockedCases = [
   { requestedPath: 'package-lock.json', code: 'REQUIRES_EXPLICIT_CONFIRMATION' },
   { requestedPath: '.github/workflows/build.yml', code: 'REQUIRES_EXPLICIT_CONFIRMATION' },
   { requestedPath: 'LICENSE', code: 'REQUIRES_EXPLICIT_CONFIRMATION' },
-  { requestedPath: 'prisma/migrations/20260428_test/migration.sql', code: 'REQUIRES_EXPLICIT_CONFIRMATION' },
-  { requestedPath: 'package.json', code: 'REQUIRES_EXPLICIT_CONFIRMATION', content: JSON.stringify({ name: 'demo', version: '1.0.0', dependencies: { lodash: '^4.17.21' } }, null, 2) },
   { requestedPath: 'dist/output.js', code: 'GENERATED_WRITE_BLOCKED' },
   { requestedPath: 'build/output.js', code: 'GENERATED_WRITE_BLOCKED' }
 ]

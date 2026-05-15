@@ -290,8 +290,8 @@ function assertNoSecretLikeText(text: string, label: string): void {
 
 function assertPackageDir(sourceRoot: string, packageDir: string | undefined): string {
   if (!packageDir) throw new Error('packageDir is required')
-  const normalized = assertSafeRepoPath(packageDir, 'packageDir')
-  const cwd = resolveSafePath(sourceRoot, normalized)
+  const raw = String(packageDir).trim()
+  const cwd = raw === '.' ? path.resolve(sourceRoot) : resolveSafePath(sourceRoot, assertSafeRepoPath(raw, 'packageDir'))
   if (!fs.existsSync(path.join(cwd, 'package.json'))) throw new Error('packageDir must contain package.json')
   return cwd
 }
