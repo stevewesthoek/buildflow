@@ -123,6 +123,8 @@ It supports:
 - confirmation-required operations
 - verified write results with `verified:true`
 
+The current repo-maintainer profile is intentionally practical for Agentic Goal Mode. It can edit normal app code, tests, docs, scripts, package manifests, framework config, Docker files, Prisma files, migrations, and source-controlled project assets without stopping for every routine change.
+
 A write is not considered successful unless BuildFlow verifies it on disk.
 
 ### Safe command runner
@@ -137,12 +139,12 @@ Supported command families include:
 - confirmation-gated commit and push flows
 - JSON validation with `python3 -m json.tool`
 - package type checks and tests
-- safe package scripts by name
+- safe package scripts by name, including scripts from the repo root
 - marker-based test runs where supported
 - named security scans
 - BuildFlow verification scripts
 
-BuildFlow does **not** expose arbitrary shell execution.
+BuildFlow does **not** expose arbitrary shell execution. More command capability should be added as named, source-relative command kinds instead of unrestricted terminal access.
 
 ### Agentic Goal Mode
 
@@ -185,7 +187,9 @@ This gives you a Codex-style goal loop inside ChatGPT while keeping BuildFlow as
 
 ### Persistent resume and handoff
 
-Agentic Goal Mode keeps a repo-local handoff path and a persistent local job record. The Custom GPT should update the handoff after each meaningful chunk with completed work, next task, validation evidence, blockers, rollback notes, and resume instructions.
+Agentic Goal Mode keeps a repo-local handoff path and a persistent local job record. Jobs are stored outside the chat process, so a new Custom GPT conversation can list or resume them after an interruption, browser refresh, or local service restart.
+
+The Custom GPT should update the handoff after each meaningful chunk with completed work, next task, validation evidence, blockers, rollback notes, and resume instructions.
 
 That means a later conversation can say:
 
@@ -299,6 +303,7 @@ BuildFlow Local currently includes:
 - read batching for large files and large response budgets
 - safe write mode controls
 - dry-run and preflight write checks
+- practical repo-maintainer write permissions for app, docs, scripts, config, migrations, assets, and package manifests
 - confirmation-gated sensitive writes
 - verified file operations
 - local activity feedback for Custom GPT actions
@@ -308,6 +313,8 @@ BuildFlow Local currently includes:
 - dynamic handoff prompts for Codex and Claude Code
 - safe command runner for validation and git workflow checks
 - Agentic Goal Mode for long-running implementation loops
+- persistent Agent Mode jobs with handoff and resume instructions
+- conversation source-locking guidance for multiple simultaneous GPT chats
 - first-run setup checklist
 - user-owned Custom GPT OpenAPI endpoint setup
 
@@ -322,8 +329,10 @@ BuildFlow is powerful because it connects ChatGPT to your local workspace. That 
 - Long implementation work can be planned, executed, reviewed, and validated in one ChatGPT workflow.
 - Writes are policy-checked and verified.
 - Commands are allowlisted instead of arbitrary.
+- Routine repo-maintainer work can continue without constant confirmation stops.
 - Sensitive paths require confirmation or remain blocked.
 - You can keep project planning, implementation notes, and final reports together.
+- Interrupted Agent Mode work can resume from persisted job state and repo-local handoff docs.
 
 ### Risks
 
@@ -338,6 +347,8 @@ BuildFlow is powerful because it connects ChatGPT to your local workspace. That 
 
 BuildFlow does not silently edit real `.env` files, expose secrets, run arbitrary shell commands, force-push, or deploy with unrestricted terminal access.
 
+Routine app work is intentionally less interrupted now: package manifests, framework config, Docker files, scripts, migrations, and source-controlled assets can be edited under the repo-maintainer policy. The hard boundary is secrets, generated/runtime output, unsafe paths, and irreversible operations.
+
 These actions are intentionally blocked or confirmation-gated:
 
 - `.env` and `.env.*`
@@ -348,7 +359,9 @@ These actions are intentionally blocked or confirmation-gated:
 - generated/runtime/log output
 - path traversal and absolute paths outside a source
 - binary writes unless explicitly supported
-- dependency and lockfile changes where confirmation is required
+- lockfile changes
+- GitHub workflow changes
+- license changes
 - destructive deletes
 - git commit and push flows
 - deployment-like operations unless a future allowlisted command supports them
