@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 
 const bearer = { bearerAuth: [] }
+const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` })
 
 const sourceItemSchema = {
   type: 'object',
@@ -218,6 +219,29 @@ const errorResponses = {
   }
 }
 
+const schemaRefs = new Map<object, string>([
+  [activitySchema, 'Activity'],
+  [sourceItemSchema, 'Source'],
+  [fileResultSchema, 'FileResult'],
+  [skippedReadFileSchema, 'SkippedReadFile'],
+  [nextBatchSchema, 'NextBatch'],
+  [writeResultSchema, 'WriteResult'],
+  [agentJobSchema, 'AgentJob'],
+  [commandResultSchema, 'CommandResult'],
+  [errorSchema, 'Error']
+])
+
+function compactOpenApiDoc<T>(value: T, path: string[] = []): T {
+  if (!value || typeof value !== 'object') return value
+  const currentComponent = path[0] === 'components' && path[1] === 'schemas' ? path[2] : undefined
+  const refName = schemaRefs.get(value as object)
+  if (refName && refName !== currentComponent) return ref(refName) as T
+  if (Array.isArray(value)) return value.map((item, index) => compactOpenApiDoc(item, [...path, String(index)])) as T
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, child]) => [key, compactOpenApiDoc(child, [...path, key])])
+  ) as T
+}
+
 const openapi = {
   openapi: '3.1.0',
   info: {
@@ -232,7 +256,17 @@ const openapi = {
     }
   ],
   components: {
-    schemas: {},
+    schemas: {
+      Activity: activitySchema,
+      Source: sourceItemSchema,
+      FileResult: fileResultSchema,
+      SkippedReadFile: skippedReadFileSchema,
+      NextBatch: nextBatchSchema,
+      WriteResult: writeResultSchema,
+      AgentJob: agentJobSchema,
+      CommandResult: commandResultSchema,
+      Error: errorSchema
+    },
     securitySchemes: {
       bearerAuth: { type: 'http', scheme: 'bearer' }
     }
@@ -751,6 +785,8 @@ const openapi = {
   }
 }
 
+const compactOpenapi = compactOpenApiDoc(openapi)
+
 export async function GET() {
-  return NextResponse.json(openapi)
+  return NextResponse.json(compactOpenapi)
 }

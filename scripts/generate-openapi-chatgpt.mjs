@@ -16,8 +16,9 @@ async function main() {
     throw new Error(`Expected JSON schema, got ${contentType}`)
   }
   const schema = await response.json()
-  fs.writeFileSync(OUTPUT_FILE, `${JSON.stringify(schema, null, 2)}\n`)
-  console.log(`Wrote ${path.relative(process.cwd(), OUTPUT_FILE)}`)
+  const serialized = `${JSON.stringify(schema)}\n`
+  fs.writeFileSync(OUTPUT_FILE, serialized)
+  console.log(`Wrote ${path.relative(process.cwd(), OUTPUT_FILE)} (${Buffer.byteLength(serialized, 'utf8')} bytes)`)
 }
 
 main().catch((error) => {

@@ -19,6 +19,9 @@ const EXPECTED_OPERATION_IDS = [
   'setBuildFlowActiveContext',
   'inspectBuildFlowContext',
   'readBuildFlowContext',
+  'runBuildFlowCommand',
+  'startBuildFlowAgentJob',
+  'getBuildFlowAgentJob',
   'writeBuildFlowArtifact',
   'applyBuildFlowFileChange'
 ]
@@ -108,6 +111,22 @@ function collectOperations(schema) {
   return ops
 }
 
+function resolveSchemaRef(schema, node) {
+  if (!node || typeof node !== 'object' || typeof node.$ref !== 'string') return node
+  const prefix = '#/components/schemas/'
+  if (!node.$ref.startsWith(prefix)) return node
+  return schema.components?.schemas?.[node.$ref.slice(prefix.length)] || node
+}
+
+function responseSchema(schema, pathName) {
+  return resolveSchemaRef(schema, schema.paths?.[pathName]?.post?.responses?.['200']?.content?.['application/json']?.schema || schema.paths?.[pathName]?.get?.responses?.['200']?.content?.['application/json']?.schema || {})
+}
+
+function ensureHasActivity(schema, pathName, label) {
+  const resolved = responseSchema(schema, pathName)
+  assert(Object.prototype.hasOwnProperty.call(resolved.properties || {}, 'activity'), `${label} response must expose activity`)
+}
+
 function ensureSchemaRules(schema) {
   const ops = collectOperations(schema)
   const ids = ops.map(op => op.operationId)
@@ -149,14 +168,16 @@ function ensureSchemaRules(schema) {
     assert(Object.prototype.hasOwnProperty.call(applyChangeSchema, key), `applyBuildFlowFileChange must accept ${key}`)
   }
 
-  const statusResponseSchema = schema.paths?.['/api/actions/status']?.get?.responses?.['200']?.content?.['application/json']?.schema || {}
-  assert(Object.prototype.hasOwnProperty.call(statusResponseSchema.properties || {}, 'activity'), 'status response must expose activity')
-  assert(Object.prototype.hasOwnProperty.call(schema.paths?.['/api/actions/sources']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties || {}, 'activity'), 'sources response must expose activity')
-  assert(Object.prototype.hasOwnProperty.call(schema.paths?.['/api/actions/context/active']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties || {}, 'activity'), 'active context response must expose activity')
-  assert(Object.prototype.hasOwnProperty.call(schema.paths?.['/api/actions/read-context']?.post?.responses?.['200']?.content?.['application/json']?.schema?.properties || {}, 'activity'), 'read-context response must expose activity')
-  assert(Object.prototype.hasOwnProperty.call(schema.paths?.['/api/actions/inspect']?.post?.responses?.['200']?.content?.['application/json']?.schema?.properties || {}, 'activity'), 'inspect response must expose activity')
-  assert(Object.prototype.hasOwnProperty.call(schema.paths?.['/api/actions/write-artifact']?.post?.responses?.['200']?.content?.['application/json']?.schema?.properties || {}, 'activity'), 'write-artifact response must expose activity')
-  assert(Object.prototype.hasOwnProperty.call(schema.paths?.['/api/actions/apply-file-change']?.post?.responses?.['200']?.content?.['application/json']?.schema?.properties || {}, 'activity'), 'apply-file-change response must expose activity')
+  ensureHasActivity(schema, '/api/actions/status', 'status')
+  ensureHasActivity(schema, '/api/actions/sources', 'sources')
+  ensureHasActivity(schema, '/api/actions/context/active', 'active context')
+  ensureHasActivity(schema, '/api/actions/read-context', 'read-context')
+  ensureHasActivity(schema, '/api/actions/inspect', 'inspect')
+  ensureHasActivity(schema, '/api/actions/run-command', 'run-command')
+  ensureHasActivity(schema, '/api/actions/agent/start', 'agent-start')
+  ensureHasActivity(schema, '/api/actions/agent/status', 'agent-status')
+  ensureHasActivity(schema, '/api/actions/write-artifact', 'write-artifact')
+  ensureHasActivity(schema, '/api/actions/apply-file-change', 'apply-file-change')
 }
 
 function ensureConsequentialFlags(schema) {
@@ -166,9 +187,12 @@ function ensureConsequentialFlags(schema) {
     ['getBuildFlowActiveContext', false],
     ['inspectBuildFlowContext', false],
     ['readBuildFlowContext', false],
+    ['runBuildFlowCommand', false],
+    ['getBuildFlowAgentJob', false],
     ['setBuildFlowActiveContext', true],
-    ['writeBuildFlowArtifact', true],
-    ['applyBuildFlowFileChange', true]
+    ['startBuildFlowAgentJob', true],
+    ['writeBuildFlowArtifact', false],
+    ['applyBuildFlowFileChange', false]
   ])
   for (const op of collectOperations(schema)) {
     assert(op['x-openai-isConsequential'] === expectedFlags.get(op.operationId), `${op.operationId} consequential flag mismatch`)

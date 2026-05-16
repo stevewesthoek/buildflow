@@ -246,6 +246,36 @@ force_release_port() {
   sleep 1
 }
 
+# Detached process launcher for pnpm/tsx/next services.
+# Uses Python so the child survives this script without keeping shell job state attached.
+launch_detached() {
+  local log_path="$1"
+  local workdir="$2"
+  shift 2
+
+  python3 - "$log_path" "$workdir" "$@" <<'PY'
+import subprocess
+import sys
+
+log_path = sys.argv[1]
+workdir = sys.argv[2]
+command = sys.argv[3:]
+if not command:
+    raise SystemExit('missing command')
+
+with open(log_path, 'ab', buffering=0) as log_file:
+    subprocess.Popen(
+        command,
+        cwd=workdir,
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=log_file,
+        start_new_session=True,
+        close_fds=True,
+    )
+PY
+}
+
 # Start service
 start_service() {
   local service=$1
@@ -269,17 +299,13 @@ start_service() {
 
   case $service_type in
     tsx)
-      cd "$dir"
-      nohup pnpm exec tsx $cmd > "$BUILDFLOW_CONFIG_DIR/${service}.log" 2>&1 &
-      local new_pid=$!
-      log_debug "Started $service with PID $new_pid (via pnpm tsx)"
+      launch_detached "$BUILDFLOW_CONFIG_DIR/${service}.log" "$dir" pnpm exec tsx $cmd
+      log_debug "Started $service via detached launcher: pnpm exec tsx $cmd"
       ;;
 
     next)
-      cd "$dir"
-      nohup pnpm dev > "$BUILDFLOW_CONFIG_DIR/${service}.log" 2>&1 &
-      local new_pid=$!
-      log_debug "Started $service with PID $new_pid (via pnpm dev)"
+      launch_detached "$BUILDFLOW_CONFIG_DIR/${service}.log" "$dir" pnpm dev
+      log_debug "Started $service via detached launcher: pnpm dev"
       ;;
 
     docker)
