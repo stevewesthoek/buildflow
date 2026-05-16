@@ -17,40 +17,7 @@ const sourceItemSchema = {
     autoIndexIntervalMinutes: { type: 'integer' },
     lastAutoIndexedAt: { type: 'string' },
     writable: { type: 'boolean' },
-    writeProfile: { type: 'string' },
-    writePolicy: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        allowCreate: { type: 'boolean' },
-        allowOverwrite: { type: 'boolean' },
-        allowAppend: { type: 'boolean' },
-        allowPatch: { type: 'boolean' },
-        allowCreateParentDirectories: { type: 'boolean' },
-        allowDelete: { type: 'boolean' },
-        allowDeleteDirectory: { type: 'boolean' },
-        allowMove: { type: 'boolean' },
-        allowRename: { type: 'boolean' },
-        allowMkdir: { type: 'boolean' },
-        allowRmdir: { type: 'boolean' },
-        recursiveDeleteRequiresConfirmation: { type: 'boolean' },
-        maxRecursiveDeleteFilesWithoutConfirmation: { type: 'integer' },
-        allowedRoots: { type: 'array', items: { type: 'string' } },
-        blockedGlobs: { type: 'array', items: { type: 'string' } },
-        blockedWriteGlobs: { type: 'array', items: { type: 'string' } },
-        generatedDeleteAllowedGlobs: { type: 'array', items: { type: 'string' } },
-        confirmationRequiredGlobs: { type: 'array', items: { type: 'string' } },
-        protectedWriteGlobs: { type: 'array', items: { type: 'string' } },
-        protectedGlobs: { type: 'array', items: { type: 'string' } },
-        blockedContentPatterns: { type: 'array', items: { type: 'string' } },
-        binaryWriteBlocked: { type: 'boolean' },
-        binaryDeleteAllowedWithConfirmation: { type: 'boolean' },
-        maxWriteBytes: { type: 'integer' },
-        maxCreateBytes: { type: 'integer' },
-        maxOverwriteBytes: { type: 'integer' },
-        maxPatchTargetBytes: { type: 'integer' }
-      }
-    }
+    writeProfile: { type: 'string' }
   },
   required: ['id', 'label', 'enabled', 'active', 'indexStatus', 'searchable']
 }

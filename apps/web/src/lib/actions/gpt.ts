@@ -177,26 +177,25 @@ function summarizeActivityOutput(input: ActivityInput): string {
   return parts.join('; ')
 }
 
-// Build a structured activity object for ChatGPT narration; synthesizes user message, proven facts, next actions, and risk level from operation context.
+// Build a compact structured activity object for ChatGPT narration.
+// Keep this intentionally small: action payload size directly affects GPT latency.
 export function makeActivity(input: ActivityInput): ActionActivity {
-  const nextActions = input.nextActions || compactList([
-    input.nextStep,
-    input.requiresConfirmation ? 'Ask the user for explicit confirmation before retrying.' : undefined,
-    input.verified ? 'Continue with the next scoped step.' : undefined
-  ], 3)
   return {
     version: '1.2.13-beta',
-    safeInputSummary: input.safeInputSummary || summarizeActivityInput(input),
-    safeOutputSummary: input.safeOutputSummary || summarizeActivityOutput(input),
-    whatHappened: input.whatHappened || compactList([input.userMessage]),
-    whatRemains: input.whatRemains || (input.phase === 'completed' ? compactList([input.nextStep]) : nextActions),
-    provenFacts: input.provenFacts || compactList([
-      input.verified ? 'BuildFlow verified this result.' : 'BuildFlow did not verify a write result.',
-      input.readPaths && input.readPaths.length > 0 ? `Read paths: ${summaryList(input.readPaths)}` : undefined,
-      input.changedPaths && input.changedPaths.length > 0 ? `Changed paths: ${summaryList(input.changedPaths)}` : undefined
-    ]),
-    nextActions,
-    ...input
+    operationId: input.operationId,
+    phase: input.phase,
+    actionLabel: input.actionLabel,
+    userMessage: input.userMessage,
+    ...(input.sourceId ? { sourceId: input.sourceId } : {}),
+    ...(input.sourceLabel ? { sourceLabel: input.sourceLabel } : {}),
+    ...(input.targetPaths && input.targetPaths.length > 0 ? { targetPaths: input.targetPaths.slice(0, 5) } : {}),
+    ...(input.readPaths && input.readPaths.length > 0 ? { readPaths: input.readPaths.slice(0, 5) } : {}),
+    ...(input.changedPaths && input.changedPaths.length > 0 ? { changedPaths: input.changedPaths.slice(0, 5) } : {}),
+    riskLevel: input.riskLevel,
+    requiresConfirmation: input.requiresConfirmation,
+    verified: input.verified,
+    ...(input.safeOutputSummary ? { safeOutputSummary: input.safeOutputSummary } : {}),
+    ...(input.nextStep ? { nextStep: input.nextStep } : {})
   }
 }
 
@@ -390,8 +389,7 @@ function normalizeContextResult(sourcesPayload: unknown, activePayload: unknown,
     active: activeIds.has(source.id) || source.active === true,
     ...(source.type ? { type: source.type } : {}),
     ...(source.writable !== undefined ? { writable: source.writable } : {}),
-    ...(source.writeProfile ? { writeProfile: source.writeProfile } : {}),
-    ...(source.writePolicy ? { writePolicy: source.writePolicy } : {})
+    ...(source.writeProfile ? { writeProfile: source.writeProfile } : {})
   }))
 
   return {
@@ -587,8 +585,7 @@ export async function listBuildFlowSources(userToken?: string) {
     autoIndexIntervalMinutes: source.autoIndexIntervalMinutes,
     writable: source.writable === true,
     writeProfile: source.writeProfile,
-    operations: ['create', 'patch', 'overwrite', 'append', 'deleteFile', 'deleteDirectory', 'move', 'rename', 'mkdir', 'rmdir'],
-    writePolicy: source.writePolicy
+    operations: ['create', 'patch', 'overwrite', 'append', 'deleteFile', 'deleteDirectory', 'move', 'rename', 'mkdir', 'rmdir']
   }))
   return withActivity({
     status: 'ok' as const,
