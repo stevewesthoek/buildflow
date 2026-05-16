@@ -688,15 +688,15 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { sourceId?: string; path: string; find: string; replace: string; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/patch-file', async (request, reply) => {
+  fastify.post<{ Body: { sourceId?: string; path: string; find: string; replace: string; allowMultiple?: boolean; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/patch-file', async (request, reply) => {
     try {
-      const { sourceId, path: relPath, find, replace } = request.body
+      const { sourceId, path: relPath, find, replace, allowMultiple = false } = request.body
       assertWriteMode(false, relPath)
       if (!relPath || typeof find !== 'string' || find.length === 0) return reply.code(400).send({ error: 'Path and find required' })
       if (typeof replace !== 'string') return reply.code(400).send({ error: 'Replace required' })
       const resolvedSourceId = resolveTargetSourceId(sourceId)
       const sourceRoot = getResolvedActiveSources([resolvedSourceId])[0]?.path
-      const validation = validateWriteTarget({ sourceId: resolvedSourceId, requestedPath: relPath, changeType: 'patch', sourceRoot, confirmedByUser: request.body.confirmedByUser, confirmationToken: request.body.confirmationToken })
+      const validation = validateWriteTarget({ sourceId: resolvedSourceId, requestedPath: relPath, changeType: 'patch', sourceRoot, content: replace, confirmedByUser: request.body.confirmedByUser, confirmationToken: request.body.confirmationToken })
       if (!validation.ok) {
         const blocked = validation as Extract<typeof validation, { ok: false }>
         return writeError(reply, 403, {
@@ -730,7 +730,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           }
         })
       }
-      if (matches !== 1) {
+      if (matches !== 1 && allowMultiple !== true) {
         return writeError(reply, 409, {
           sourceId: resolvedSourceId,
           path: relPath,
@@ -748,9 +748,9 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           }
         })
       }
-      const updated = original.replace(find, replace)
+      const updated = allowMultiple === true ? original.split(find).join(replace) : original.replace(find, replace)
       fs.writeFileSync(validation.fullPath, updated, 'utf-8')
-      return { status: 'updated', sourceId: resolvedSourceId, requestedPath: relPath, normalizedPath: validation.normalizedPath, path: relPath, changeType: 'patch', replacements: 1, matchCount: matches, bytesBefore: Buffer.byteLength(original, 'utf8'), bytesAfter: Buffer.byteLength(updated, 'utf8'), ...verifiedWrite(validation.fullPath) }
+      return { status: 'updated', sourceId: resolvedSourceId, requestedPath: relPath, normalizedPath: validation.normalizedPath, path: relPath, changeType: 'patch', replacements: allowMultiple === true ? matches : 1, matchCount: matches, bytesBefore: Buffer.byteLength(original, 'utf8'), bytesAfter: Buffer.byteLength(updated, 'utf8'), ...verifiedWrite(validation.fullPath) }
     } catch (err) {
       return reply.code(400).send({ error: String(err) })
     }

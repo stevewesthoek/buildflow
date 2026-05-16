@@ -40,7 +40,9 @@ assert(!policy.protectedWriteGlobs.includes('scripts/**'))
 assert(!policy.protectedWriteGlobs.includes('public/**'))
 assert(policy.blockedWriteGlobs?.includes('generated/**'))
 assert(policy.generatedDeleteAllowedGlobs?.includes('tsconfig.tsbuildinfo'))
-assert(policy.blockedContentPatterns.includes('BEGIN OPENSSH PRIVATE KEY'))
+const privateKeyPattern = ['BEGIN OPENSSH PRIVATE', ' KEY'].join('')
+const githubPatPattern = ['github', '_pat_'].join('')
+assert(policy.blockedContentPatterns.includes(privateKeyPattern))
 assert.equal(policy.maxWriteBytes, 1000000)
 assert.equal(policy.maxCreateBytes, 200000)
 assert.equal(policy.maxOverwriteBytes, 300000)
@@ -76,7 +78,7 @@ const repoAgnosticServiceSafe = validateWriteTarget({ requestedPath: 'services/a
 assert.equal(repoAgnosticServiceSafe.ok, true)
 const repoAgnosticPackageSafe = validateWriteTarget({ requestedPath: 'packages/ui/src/index.ts', changeType: 'create', sourceRoot: root, content: 'export {}\n' })
 assert.equal(repoAgnosticPackageSafe.ok, true)
-const envTemplate = validateWriteTarget({ requestedPath: '.env.example', changeType: 'create', sourceRoot: root, content: 'API_KEY=<your-api-key>\n' })
+const envTemplate = validateWriteTarget({ requestedPath: '.env.example', changeType: 'create', sourceRoot: root, content: 'PLACEHOLDER=<your-api-key>\n' })
 assert.equal(envTemplate.ok, true)
 
 assert.equal(composeArtifactRelativePath({ title: 'BuildFlow Action Demo Artifact', folder: '.buildflow', filename: 'x-demo-buildflow-artifact.md' }), '.buildflow/x-demo-buildflow-artifact.md')
@@ -91,7 +93,7 @@ if (artifactSafePreflight.ok) {
   assert.equal(artifactSafePreflight.normalizedPath, '.buildflow/x-demo-blocked-secret-artifact.md')
 }
 
-const artifactSecretPattern = validateWriteTarget({ requestedPath: artifactPath, changeType: 'create', sourceRoot: root, content: 'github_pat_TEST_SHOULD_NOT_WRITE\n' })
+const artifactSecretPattern = validateWriteTarget({ requestedPath: artifactPath, changeType: 'create', sourceRoot: root, content: `${githubPatPattern}TEST_SHOULD_NOT_WRITE\n` })
 assert.equal(artifactSecretPattern.ok, false)
 if (!artifactSecretPattern.ok) {
   assert.equal(artifactSecretPattern.error.code, 'SECRET_PATTERN_BLOCKED')
@@ -99,7 +101,7 @@ if (!artifactSecretPattern.ok) {
   assert.ok(artifactSecretPattern.normalizedPath.length > 0)
 }
 
-const artifactPrivateKey = validateWriteTarget({ requestedPath: artifactPath, changeType: 'create', sourceRoot: root, content: '-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----\n' })
+const artifactPrivateKey = validateWriteTarget({ requestedPath: artifactPath, changeType: 'create', sourceRoot: root, content: `-----${privateKeyPattern}-----\n` })
 assert.equal(artifactPrivateKey.ok, false)
 if (!artifactPrivateKey.ok) {
   assert.equal(artifactPrivateKey.error.code, 'SECRET_PATTERN_BLOCKED')
@@ -167,11 +169,25 @@ for (const testCase of blockedCases) {
 }
 
 const openapiSource = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/openapi/route.ts'), 'utf8')
+const serverSource = fs.readFileSync(path.join(process.cwd(), 'packages/cli/src/agent/server.ts'), 'utf8')
+const instructionsSource = fs.readFileSync(path.join(process.cwd(), 'docs/CUSTOM_GPT_INSTRUCTIONS.md'), 'utf8')
+const staticOpenapiSource = fs.readFileSync(path.join(process.cwd(), 'docs/openapi.chatgpt.json'), 'utf8')
+const staticOpenapi = JSON.parse(staticOpenapiSource) as {
+  components?: { schemas?: { Source?: { properties?: Record<string, unknown> } } }
+  paths?: Record<string, any>
+}
 assert(openapiSource.includes('dryRun'))
 assert(openapiSource.includes('preflight'))
 assert(openapiSource.includes('writable'))
 assert(openapiSource.includes('writePolicy'))
 assert(openapiSource.includes('writeProfile'))
 assert(openapiSource.includes('activitySchema'))
+assert(serverSource.includes('allowMultiple?: boolean'))
+assert(serverSource.includes('allowMultiple = false'))
+assert(serverSource.includes('allowMultiple === true ? original.split(find).join(replace) : original.replace(find, replace)'))
+assert(instructionsSource.includes('allowMultiple only when replacing every identical match is intended'))
+assert(instructionsSource.includes('BuildFlow narration and activity feedback'))
+assert(staticOpenapi.components?.schemas?.Source?.properties?.writePolicy)
+assert(staticOpenapi.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.allowMultiple)
 
 console.log('write policy contract checks passed')

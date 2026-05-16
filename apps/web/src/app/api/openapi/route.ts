@@ -18,7 +18,8 @@ const sourceItemSchema = {
     autoIndexIntervalMinutes: { type: 'integer' },
     lastAutoIndexedAt: { type: 'string' },
     writable: { type: 'boolean' },
-    writeProfile: { type: 'string' }
+    writeProfile: { type: 'string' },
+    writePolicy: { type: 'object', additionalProperties: true }
   },
   required: ['id', 'label', 'enabled', 'active', 'indexStatus', 'searchable']
 }
