@@ -112,22 +112,19 @@ const ENV_TEMPLATE_FILES = new Set([
   '.env.production.example'
 ])
 
-// Validate that a sourceId is provided or exactly one source is active; returns error if sourceId is required but missing.
-export async function requireExplicitSourceId(body: Record<string, unknown>, userToken?: string) {
+// Enforce conversation isolation: repo-specific actions must pass an explicit sourceId.
+// Do not fall back to global active context; it is shared across chats and can drift.
+export async function requireExplicitSourceId(body: Record<string, unknown>, _userToken?: string) {
   if (typeof body.sourceId === 'string' && body.sourceId.length > 0) {
     return null
   }
+  return { error: 'Target sourceId is required. BuildFlow does not fall back to global active context for repo-specific actions because other conversations may change it.', status: 400 }
+}
 
-  const active = await executeAction('/api/get-active-sources', {}, userToken)
-  const activeIds = Array.isArray((active as { activeSourceIds?: unknown }).activeSourceIds)
-    ? ((active as { activeSourceIds: string[] }).activeSourceIds || [])
-    : []
-
-  if (activeIds.length === 1) {
-    return null
-  }
-
-  return { error: 'Target sourceId required when multiple sources are active.', status: 400 }
+function requireExplicitReadScope(body: Record<string, unknown>) {
+  if (typeof body.sourceId === 'string' && body.sourceId.length > 0) return null
+  if (Array.isArray(body.sourceIds) && body.sourceIds.length > 0 && body.sourceIds.every(id => typeof id === 'string' && id.length > 0)) return null
+  return { error: 'sourceId or sourceIds is required. BuildFlow does not use global active context for inspect/read because other conversations may change it.', status: 400 }
 }
 
 function normalizePath(input: string): string {
@@ -674,6 +671,8 @@ export async function dispatchBuildFlowContext(body: Record<string, unknown>, us
 
 // Inspect vault structure or search; supports list_files and search modes; returns results with activity narration.
 export async function dispatchBuildFlowInspect(body: Record<string, unknown>, userToken?: string) {
+  const scopeError = requireExplicitReadScope(body)
+  if (scopeError) return scopeError
   const mode = body.mode
   if (mode === 'list_files') {
     const payload: Record<string, unknown> = {
@@ -733,6 +732,8 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
 
 // Read files from vault; supports read_paths and search_and_read modes; handles source routing and truncation; returns activity narration.
 export async function dispatchBuildFlowRead(body: Record<string, unknown>, userToken?: string) {
+  const scopeError = requireExplicitReadScope(body)
+  if (scopeError) return scopeError
   const mode = body.mode
   const DEFAULT_MULTI_FILE_READ_MAX_BYTES_PER_FILE = 12_000
   if (mode === 'read_paths') {

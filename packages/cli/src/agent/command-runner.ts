@@ -105,6 +105,7 @@ const SAFE_MARKER = /^[A-Za-z0-9 _:\-()|]+$/
 const SAFE_REMOTE = /^[A-Za-z0-9._-]+$/
 const SAFE_BRANCH = /^[A-Za-z0-9._/-]+$/
 const BLOCKED_PATH_PARTS = new Set(['.git', 'node_modules', '.next', 'dist', 'build', 'coverage', 'generated', 'runtime', 'logs', '.cache', '.turbo', '.vercel', '.npm', '.yarn', '.pnpm-store'])
+const ENV_TEMPLATE_FILES = new Set(['.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'])
 const BLOCKED_FILENAMES = new Set(['.env'])
 const BINARY_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.zip', '.gz', '.tar', '.tgz', '.mp4', '.mov', '.avi', '.woff', '.woff2', '.ttf', '.otf'])
 
@@ -141,7 +142,8 @@ function assertSafeRepoPath(input: string, label: string): string {
   if (!normalized || normalized === '.' || normalized === '-A' || normalized === '--all') throw new Error(`${label} must be an explicit source-relative path`)
   if (normalized.startsWith('-')) throw new Error(`${label} must not be an option`)
   if (normalized.split('/').includes('..')) throw new Error(`${label} must not contain path traversal`)
-  if (BLOCKED_FILENAMES.has(path.basename(normalized)) || /^\.env\./.test(path.basename(normalized))) throw new Error(`${label} points to a blocked env path`)
+  const basename = path.basename(normalized)
+  if (!ENV_TEMPLATE_FILES.has(basename) && (BLOCKED_FILENAMES.has(basename) || /^\.env\./.test(basename))) throw new Error(`${label} points to a blocked env path`)
   if (normalized.split('/').some(part => BLOCKED_PATH_PARTS.has(part))) throw new Error(`${label} points to a blocked runtime/generated path`)
   return normalized
 }

@@ -1729,7 +1729,8 @@
                   }
                 },
                 "required": [
-                  "mode"
+                  "mode",
+                  "sourceId"
                 ]
               }
             }
@@ -2067,7 +2068,8 @@
                   }
                 },
                 "required": [
-                  "mode"
+                  "mode",
+                  "sourceId"
                 ]
               },
               "examples": {

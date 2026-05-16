@@ -22,12 +22,14 @@ const expectReject = async (label: string, fn: () => Promise<unknown>) => {
   assert.equal(rejected, true, label)
 }
 
+async function main() {
 run('git', ['init'])
 run('git', ['config', 'user.email', 'buildflow@example.test'])
 run('git', ['config', 'user.name', 'BuildFlow Test'])
 write('src/a.ts', 'export const a = 1\n')
 write('src/config.json', '{"ok":true}\n')
 write('src/not-json.ts', 'export {}\n')
+write('.env.example', 'API_KEY=<token>\n')
 write('pkg/package.json', JSON.stringify({ scripts: { typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' } }, null, 2))
 write('src/scan.ts', `const token = "${'g' + 'hp_FAKE_TOKEN_FOR_REDACTION_ONLY'}"\n`)
 
@@ -49,7 +51,7 @@ await expectReject('git_add_paths rejects -A', () => runSafeCommand({ ...base, c
 await expectReject('git_add_paths rejects traversal', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['../outside.ts'] }))
 await expectReject('git_commit requires staged changes', () => runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test commit', confirmedByUser: true }))
 
-let result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['src/a.ts'] })
+let result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['src/a.ts', '.env.example'] })
 assert.equal(result.status, 'completed')
 result = await runSafeCommand({ ...base, commandKind: 'git_diff_cached_name_only' })
 assert.equal(result.status, 'completed')
@@ -83,3 +85,10 @@ for (const token of ['git_add_paths', 'git_commit', 'git_push', 'validate_json_f
 
 fs.rmSync(root, { recursive: true, force: true })
 console.log('command runner checks passed')
+}
+
+main().catch(error => {
+  fs.rmSync(root, { recursive: true, force: true })
+  console.error(error)
+  process.exit(1)
+})

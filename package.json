@@ -15,6 +15,7 @@
     "generate:openapi-chatgpt": "node scripts/generate-openapi-chatgpt.mjs",
     "verify:dashboard": "node scripts/verify-dashboard.mjs",
     "verify:public-scope": "node scripts/audit-public-scope.mjs",
+    "verify:command-runner": "./packages/cli/node_modules/.bin/tsx scripts/verify-command-runner.ts",
     "local:verify:dashboard-only": "LOCAL_DASHBOARD_ONLY=true node scripts/verify-dashboard.mjs",
     "verify:gpt-actions": "node scripts/verify-custom-gpt-actions.mjs",
     "verify:gpt-contract": "node scripts/verify-custom-gpt-actions.mjs",

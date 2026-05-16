@@ -442,7 +442,7 @@ const openapi = {
                   depth: { type: 'integer', description: 'Tree depth.', default: 3, minimum: 1, maximum: 8 },
                   limit: { type: 'integer', description: 'Max results.', default: 50, minimum: 1, maximum: 200 }
                 },
-                required: ['mode']
+                required: ['mode', 'sourceId']
               }
             }
           }
@@ -492,7 +492,7 @@ const openapi = {
                   limit: { type: 'integer', description: 'Max results.', default: 3, minimum: 1, maximum: 5 },
                   maxBytesPerFile: { type: 'integer', description: 'Max bytes per file.', default: 12000, minimum: 1000, maximum: 60000 }
                 },
-                required: ['mode']
+                required: ['mode', 'sourceId']
               },
               examples: {
                 readPaths: { value: { mode: 'read_paths', sourceId: 'buildflow', paths: ['README.md'] } },
