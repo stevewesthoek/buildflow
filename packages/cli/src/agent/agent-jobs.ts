@@ -55,6 +55,7 @@ export type AgentJob = {
   summary: string
   handoffPath: string
   resumeInstructions: string[]
+  fallbackPrompt?: string
   lastKnownGitStatus?: string
 }
 
@@ -145,6 +146,7 @@ function coerceJob(raw: unknown): AgentJob | null {
     summary: item.summary || 'Agent Mode job loaded from persistent handoff state.',
     handoffPath: item.handoffPath || documentationPath,
     resumeInstructions: Array.isArray(item.resumeInstructions) ? item.resumeInstructions : buildResumeInstructions(documentationPath),
+    fallbackPrompt: item.fallbackPrompt,
     lastKnownGitStatus: item.lastKnownGitStatus
   }
 }
@@ -178,8 +180,31 @@ function buildResumeInstructions(documentationPath: string): string[] {
     'Verify the locked sourceId before inspecting, writing, or running commands.',
     'Run git_status_short and inspect changed files before continuing.',
     'Continue with the next unchecked task, then update the handoff after each meaningful chunk.',
-    'Stop only for blocked/no-access paths, failed validation that needs user choice, or confirmation-gated commit/push/destructive operations.'
+    'Stop only for blocked/no-access paths, failed validation that needs user choice, or confirmation-gated push/destructive operations.'
   ]
+}
+
+function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'documentationPath' | 'handoffPath' | 'summary' | 'blockedReason' | 'confirmationReason' | 'lastKnownGitStatus'>): string {
+  return [
+    'You are continuing a BuildFlow Agent Mode job directly inside the local repo.',
+    '',
+    `Source ID: ${job.sourceId}`,
+    `Goal: ${job.goal}`,
+    `Handoff path: ${job.handoffPath || job.documentationPath}`,
+    `Current summary: ${job.summary || 'No summary recorded.'}`,
+    job.blockedReason ? `Blocked reason: ${job.blockedReason}` : undefined,
+    job.confirmationReason ? `Confirmation reason: ${job.confirmationReason}` : undefined,
+    job.lastKnownGitStatus ? `Last known git status:\n${job.lastKnownGitStatus}` : undefined,
+    '',
+    'Instructions:',
+    '1. Read the handoff path first and treat it as the resume state.',
+    '2. Verify the current repo, branch, and git status before editing.',
+    '3. Continue with the next unfinished task from the handoff.',
+    '4. Keep all changes source-relative and do not expose secrets.',
+    '5. Update the handoff after each meaningful chunk with completed work, validation evidence, next task, blockers, and resume notes.',
+    '6. Run the relevant tests/validation, repair failures, and continue until the goal is complete or a hard no-access boundary is reached.',
+    '7. If committing, stage explicit files only and write a clear commit message. Do not force-push.'
+  ].filter(Boolean).join('\n')
 }
 
 loadJobsFromDisk()
@@ -216,7 +241,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
       'Execute one meaningful chunk, review it, validate it, update the handoff, then continue until done or blocked.',
       'Give compact progress summaries; do not ask the user unless policy requires confirmation, source scope is ambiguous, or validation needs a human choice.'
     ],
-    summary: 'Agent Mode started with persistent handoff. Continue requirements → roadmap → plan → execute → review → docs → validate → repair → harden → cleanup → git review → final handoff.',
+    summary: 'Agent Mode started with persistent handoff. Continue requirements → roadmap → plan → execute → review → docs → validate → repair → harden → cleanup → git review → final handoff. Do not stop after one chunk; continue until complete, blocked, failed, or push/destructive confirmation is required.',
     handoffPath: documentationPath,
     resumeInstructions
   }
@@ -233,12 +258,17 @@ export function getAgentJob(jobId: string): AgentJob | undefined {
 export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'status' | 'currentIteration' | 'blockedReason' | 'requiresConfirmation' | 'confirmationReason' | 'nextActions' | 'summary' | 'lastKnownGitStatus'>>): AgentJob {
   const job = getAgentJob(jobId)
   if (!job) throw new Error(`Agent job not found: ${jobId}`)
-  const updated: AgentJob = {
+  const base: AgentJob = {
     ...job,
     ...patch,
     updatedAt: new Date().toISOString(),
     resumeInstructions: job.resumeInstructions && job.resumeInstructions.length > 0 ? job.resumeInstructions : buildResumeInstructions(job.documentationPath),
     handoffPath: job.handoffPath || job.documentationPath
+  }
+  const shouldRefreshFallback = base.status === 'blocked' || base.status === 'failed' || base.status === 'needs_confirmation' || Boolean(base.blockedReason || base.confirmationReason)
+  const updated: AgentJob = {
+    ...base,
+    fallbackPrompt: shouldRefreshFallback ? buildFallbackPrompt(base) : base.fallbackPrompt
   }
   jobs.set(jobId, updated)
   persistJobs()

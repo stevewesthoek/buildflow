@@ -186,6 +186,7 @@ const agentJobSchema = {
     summary: { type: 'string' },
     handoffPath: { type: 'string' },
     resumeInstructions: { type: 'array', items: { type: 'string' } },
+    fallbackPrompt: { type: 'string' },
     lastKnownGitStatus: { type: 'string' }
   },
   required: ['id', 'sourceId', 'goal', 'mode', 'status', 'createdAt', 'updatedAt', 'maxIterations', 'currentIteration', 'autonomyLevel', 'documentationPath', 'reviewEveryStep', 'autoCommit', 'autoPush', 'requiresConfirmation', 'steps', 'nextActions', 'summary']

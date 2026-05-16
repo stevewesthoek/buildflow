@@ -36,7 +36,7 @@ A high-quality Agent Mode loop is:
 14. stop for commit/push confirmation when needed
 15. produce a final handoff
 
-The goal is quality over speed. Long-running work should prefer small verified chunks, careful review, and persistent progress over chatty step-by-step narration.
+The goal is quality over speed, but Agent Mode should not stop after each chunk. Long-running work should prefer small verified chunks, careful review, persistent progress, compact streaming feedback, and immediate continuation to the next task until the goal is complete, blocked, failed, or hard confirmation-required.
 
 ## Conversation source locking
 
@@ -102,18 +102,22 @@ BuildFlow does not expose arbitrary shell by default. New command capability sho
 
 ## Confirmation boundaries
 
-Agent Mode must stop when BuildFlow returns `needs_confirmation` or `REQUIRES_EXPLICIT_CONFIRMATION`.
+Agent Mode should continue without asking for routine source-code, docs, tests, config, package manifest, script, migration, Docker, and commit work when BuildFlow policy allows it.
+
+It must stop when BuildFlow returns `needs_confirmation` or `REQUIRES_EXPLICIT_CONFIRMATION` for hard boundaries.
 
 Examples:
 
-- dependency and lockfile changes
-- migrations
+- lockfile changes
 - CI/CD and GitHub workflow files
-- Docker files
-- destructive deletes
+- license changes
+- real secrets or private key material
+- recursive or destructive deletes
 - protected binary assets
-- commit or push flows
+- git push flows
 - deployment-like operations unless a future allowlisted deploy command supports them
+
+When a job is blocked, failed, or needs confirmation, BuildFlow now exposes a `fallbackPrompt`. The Custom GPT should present that prompt proactively as the recovery path instead of only reporting that it is stuck.
 
 The GPT must not bypass policy.
 

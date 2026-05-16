@@ -422,7 +422,6 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
     if (body && body.length > 2000) throw new Error('body is too long')
     assertNoSecretLikeText(message, 'message')
     if (body) assertNoSecretLikeText(body, 'body')
-    if (!hasCommandConfirmation(request, 'git_commit_confirmation')) return needsConfirmationResult(request, 'git_commit_confirmation')
     return runAndAppendGitLog(request, ['git', 'commit', '-m', message, ...(body ? ['-m', body] : [])], sourceRoot)
   }
 

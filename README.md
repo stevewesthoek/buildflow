@@ -170,8 +170,9 @@ When started, BuildFlow creates a repo-agnostic goal job and guides the Custom G
 5. update progress documentation
 6. run validation
 7. repair failures
-8. repeat until complete, blocked, or confirmation-required
-9. produce a final report with validation evidence and git state
+8. continue immediately to the next task instead of stopping after a report
+9. repeat until complete, blocked, failed, or hard confirmation-required
+10. produce a final report with validation evidence and git state
 
 Default Agentic Goal Mode settings:
 
