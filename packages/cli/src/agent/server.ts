@@ -540,8 +540,11 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { sourceId?: string; mode?: 'single' | 'multi' | 'all'; activeSourceIds?: string[] } }>('/api/get-active-sources', async () => {
+  fastify.post<{ Body: { sourceId?: string; mode?: 'single' | 'multi' | 'all'; activeSourceIds?: string[] }; Querystring: { lite?: string } }>('/api/get-active-sources', async (request) => {
     const active = getActiveSourceContext()
+    if (request.query?.lite === '1' || request.query?.lite === 'true') {
+      return { mode: active.mode, activeSourceIds: active.activeSourceIds, sources: [] }
+    }
     const sources = getSourcesSafe().map(source => ({ ...source, active: active.activeSourceIds.includes(source.id), type: (source as any).type || 'unknown' }))
     return { mode: active.mode, activeSourceIds: active.activeSourceIds, sources }
   })
@@ -1044,9 +1047,10 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.get('/api/sources/list', async (request, reply) => {
+  fastify.get<{ Querystring: { lite?: string } }>('/api/sources/list', async (request, reply) => {
     try {
       const active = getActiveSourceContext()
+      const lite = request.query?.lite === '1' || request.query?.lite === 'true'
       const sources = getSourcesSafe().map(source => ({
         id: source.id,
         label: source.label,
@@ -1056,14 +1060,16 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         indexed: source.indexStatus === 'ready',
         indexStatus: source.indexStatus || 'unknown',
         indexedFileCount: source.indexedFileCount,
-        lastIndexedAt: source.lastIndexedAt,
-        indexError: source.indexError,
-        autoIndexEnabled: source.autoIndexEnabled,
-        autoIndexIntervalMinutes: source.autoIndexIntervalMinutes,
-        lastAutoIndexedAt: source.lastAutoIndexedAt,
+        ...(lite ? {} : {
+          lastIndexedAt: source.lastIndexedAt,
+          indexError: source.indexError,
+          autoIndexEnabled: source.autoIndexEnabled,
+          autoIndexIntervalMinutes: source.autoIndexIntervalMinutes,
+          lastAutoIndexedAt: source.lastAutoIndexedAt
+        }),
         writable: source.enabled !== false,
         writeProfile: 'repo_app_maintainer',
-        writePolicy: getDefaultWritePolicy()
+        ...(lite ? {} : { writePolicy: getDefaultWritePolicy() })
       }))
 
       return reply.header('Cache-Control', 'no-store').send({ sources })

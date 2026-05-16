@@ -572,7 +572,7 @@ export async function listBuildFlowSources(userToken?: string) {
   if (mode === 'relay-agent' && userToken) {
     headers['Authorization'] = `Bearer ${userToken}`
   }
-  const sourcesPayload = await fetchJson('/api/sources/list', { method: 'GET', headers })
+  const sourcesPayload = await fetchJson('/api/sources/list?lite=1', { method: 'GET', headers })
   const sources = normalizeSourcesList(sourcesPayload).map(source => ({
     id: source.id,
     label: source.label,
@@ -604,7 +604,7 @@ export async function listBuildFlowSources(userToken?: string) {
 
 // Get the currently active source context (single or multi-mode); returns activity narration.
 export async function getBuildFlowActiveContext(userToken?: string) {
-  const activePayload = await executeAction('/api/get-active-sources', {}, userToken)
+  const activePayload = await executeAction('/api/get-active-sources?lite=1', {}, userToken)
   const context = normalizeActiveContext(activePayload)
   return withActivity(context, makeActivity({
     operationId: 'getBuildFlowActiveContext',
@@ -630,13 +630,7 @@ export async function setBuildFlowActiveContext(body: Record<string, unknown>, u
     mode: body.contextMode,
     activeSourceIds: body.sourceIds
   }, userToken)
-  const mode = getBackendMode()
-  const headers: Record<string, string> = { method: 'GET' }
-  if (mode === 'relay-agent' && userToken) {
-    headers['Authorization'] = `Bearer ${userToken}`
-  }
-  const sourcesPayload = await fetchJson('/api/sources/list', { method: 'GET', headers })
-  const context = normalizeContextResult(sourcesPayload, result)
+  const context = normalizeContextResult(result, result)
   return withActivity(context, makeActivity({
     operationId: 'setBuildFlowActiveContext',
     phase: 'completed',
