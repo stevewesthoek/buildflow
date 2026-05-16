@@ -136,7 +136,7 @@ Supported command families include:
 - git status, diff, branch, and log checks
 - cached git diff checks
 - explicit `git add -- <paths>` only
-- confirmation-gated commit and push flows
+- hands-off commit and push flows when explicitly requested, with safe path, message, remote, branch, and force-push checks
 - JSON validation with `python3 -m json.tool`
 - package type checks and tests
 - safe package scripts by name, including scripts from the repo root
@@ -342,7 +342,7 @@ BuildFlow is powerful because it connects ChatGPT to your local workspace. That 
 - Long-running work can touch many files, so review diffs before committing.
 - Command execution must stay allowlisted; unrestricted shell would be unsafe.
 - Secrets and real environment values should not be exposed to ChatGPT.
-- Push and deployment flows should remain confirmation-gated.
+- Push flows should run only when explicitly requested or enabled by Agent Mode policy. Deployment flows should stay allowlisted rather than arbitrary shell.
 
 ### Important limitations
 
@@ -364,7 +364,6 @@ These actions are intentionally blocked or confirmation-gated:
 - GitHub workflow changes
 - license changes
 - destructive deletes
-- git commit and push flows
 - deployment-like operations unless a future allowlisted command supports them
 
 The goal is not to give a Custom GPT unlimited machine control. The goal is to give it enough structured local capability to build real software safely.

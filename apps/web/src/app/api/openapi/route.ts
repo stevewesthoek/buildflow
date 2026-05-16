@@ -532,7 +532,7 @@ const openapi = {
         operationId: 'runBuildFlowCommand',
         summary: 'Run safe command',
         description: 'Run an allowlisted git/status, validation, or explicit git workflow command inside a selected source.',
-        'x-openai-isConsequential': true,
+        'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
           required: true,
@@ -691,7 +691,7 @@ const openapi = {
         operationId: 'writeBuildFlowArtifact',
         summary: 'Write artifact',
         description: 'Create a verified repo-local artifact.',
-        'x-openai-isConsequential': true,
+        'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
           required: true,
@@ -733,7 +733,7 @@ const openapi = {
         operationId: 'applyBuildFlowFileChange',
         summary: 'Change file',
         description: 'Append, create, overwrite, or patch a file.',
-        'x-openai-isConsequential': true,
+        'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
           required: true,

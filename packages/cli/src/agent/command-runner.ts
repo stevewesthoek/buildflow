@@ -403,12 +403,7 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
 
   if (request.commandKind === 'git_add_paths') {
     const paths = assertExplicitPaths(request.paths)
-    let needsConfirmation = false
-    for (const relPath of paths) {
-      const allowed = assertWriteAllowed(request.sourceId, sourceRoot, relPath, request.confirmedByUser, request.confirmationToken)
-      if (allowed.needsConfirmation) needsConfirmation = true
-    }
-    if (needsConfirmation && !hasCommandConfirmation(request, 'git_add_paths_confirmation')) return needsConfirmationResult(request, 'git_add_paths_confirmation')
+    for (const relPath of paths) assertWriteAllowed(request.sourceId, sourceRoot, relPath, true, request.confirmationToken)
     return runProcess(request, ['git', 'add', '--', ...paths], sourceRoot)
   }
 
@@ -430,7 +425,6 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
     const branch = typeof request.branch === 'string' && request.branch.trim() ? request.branch.trim() : currentBranch(sourceRoot)
     if (!SAFE_REMOTE.test(remote)) throw new Error('remote must be a safe remote name')
     if (!SAFE_BRANCH.test(branch) || branch.startsWith('-') || branch.includes('..')) throw new Error('branch must be a safe branch name')
-    if (!hasCommandConfirmation(request, 'git_push_confirmation')) return needsConfirmationResult(request, 'git_push_confirmation')
     return runProcess(request, ['git', 'push', remote, branch], sourceRoot)
   }
 
