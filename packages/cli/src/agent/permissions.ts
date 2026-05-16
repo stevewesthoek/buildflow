@@ -9,7 +9,9 @@ const ALLOWED_DOTFILE_READS = new Set([
   '.env.production.example',
   '.gitignore',
   '.github',
-  '.buildflow'
+  '.buildflow',
+  '.kiro',
+  '.ai/current.md'
 ])
 
 export function isPathAllowed(relativePath: string): boolean {

@@ -22,7 +22,9 @@ const DEFAULT_IGNORE_PATTERNS = [
   '**/.npm/**',
   '**/.yarn/**',
   '**/.pnpm-store/**',
-  '**/.*/**',
+  '**/.DS_Store',
+  '**/.idea/**',
+  '**/.vscode/**',
   '**/pnpm-lock.yaml',
   '**/package-lock.json',
   '**/yarn.lock',
@@ -34,6 +36,16 @@ const DEFAULT_IGNORE_PATTERNS = [
 const MAX_INDEXABLE_BYTES = 1024 * 1024
 const YIELD_EVERY_FILES = 25
 const BUFFER_SAMPLE_BYTES = 4096
+const ALLOWED_HIDDEN_INDEX_PREFIXES = ['.kiro/']
+const ALLOWED_HIDDEN_INDEX_FILES = new Set(['.ai/current.md'])
+
+const shouldIndexRelativePath = (filePath: string): boolean => {
+  const normalized = filePath.replace(/\\/g, '/')
+  if (ALLOWED_HIDDEN_INDEX_FILES.has(normalized)) return true
+  if (ALLOWED_HIDDEN_INDEX_PREFIXES.some(prefix => normalized.startsWith(prefix))) return true
+  const parts = normalized.split('/')
+  return !parts.some(part => part.startsWith('.'))
+}
 
 const yieldToEventLoop = async (): Promise<void> => {
   await new Promise<void>(resolve => setImmediate(resolve))
@@ -96,6 +108,10 @@ export class Indexer {
 
       for (const filePath of sourceFiles) {
         try {
+          if (!shouldIndexRelativePath(filePath)) {
+            skippedFiles++
+            continue
+          }
           const fullPath = path.join(rootPath, filePath)
           const stat = await fsp.stat(fullPath)
           if (!stat.isFile()) {
