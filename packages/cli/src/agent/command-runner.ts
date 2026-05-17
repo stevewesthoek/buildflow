@@ -30,6 +30,28 @@ export type SafeCommandKind =
   | 'run_package_test'
   | 'run_package_test_marker'
   | 'security_scan_paths'
+  | 'diagnose_performance'
+  | 'local_cli_github_auth_status'
+  | 'local_cli_github_repo_view'
+
+export type LocalCliCapabilityProfile = {
+  name: 'github'
+  executable: 'gh'
+  allowedCommands: string[][]
+  requireConfirmationFor: string[][]
+}
+
+export const LOCAL_CLI_CAPABILITY_PROFILES: Record<'github', LocalCliCapabilityProfile> = {
+  github: {
+    name: 'github',
+    executable: 'gh',
+    allowedCommands: [
+      ['auth', 'status'],
+      ['repo', 'view', '--json', 'nameWithOwner,url,defaultBranchRef']
+    ],
+    requireConfirmationFor: []
+  }
+}
 
 export type SecurityPatternSet =
   | 'forbidden_runtime_execution'
@@ -82,8 +104,6 @@ const STATIC_COMMANDS: Partial<Record<SafeCommandKind, string[]>> = {
   verify_public_scope: ['pnpm', 'verify:public-scope'],
   type_check_web: ['pnpm', '--dir', 'apps/web', 'type-check'],
   type_check_cli: ['pnpm', '--dir', 'packages/cli', 'type-check'],
-  verify_write_policy: ['./packages/cli/node_modules/.bin/tsx', 'scripts/verify-write-policy.ts'],
-  verify_source_reindex_resilience: ['./packages/cli/node_modules/.bin/tsx', 'scripts/verify-source-reindex-resilience.ts'],
   git_diff_cached_stat: ['git', 'diff', '--cached', '--stat'],
   git_diff_cached_name_only: ['git', 'diff', '--cached', '--name-only']
 }
@@ -222,7 +242,9 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
         PATH: process.env.PATH || '',
         HOME: process.env.HOME || '',
         CI: '1',
-        NO_COLOR: '1'
+        NO_COLOR: '1',
+        GH_PROMPT_DISABLED: '1',
+        GIT_TERMINAL_PROMPT: '0'
       }
     })
 
@@ -296,6 +318,45 @@ function assertPackageDir(sourceRoot: string, packageDir: string | undefined): s
   const cwd = raw === '.' ? path.resolve(sourceRoot) : resolveSafePath(sourceRoot, assertSafeRepoPath(raw, 'packageDir'))
   if (!fs.existsSync(path.join(cwd, 'package.json'))) throw new Error('packageDir must contain package.json')
   return cwd
+}
+
+function structuredLocalResult(request: SafeCommandRequest, status: SafeCommandResult['status'], command: string[], stdout: unknown, stderr = '', exitCode: number | null = 0): SafeCommandResult {
+  return {
+    status,
+    commandKind: request.commandKind,
+    command,
+    cwd: path.resolve(request.sourceRoot),
+    exitCode,
+    signal: null,
+    stdout: typeof stdout === 'string' ? stdout : JSON.stringify(stdout, null, 2),
+    stderr,
+    outputTruncated: false,
+    durationMs: 0,
+    details: typeof stdout === 'string' ? undefined : stdout
+  }
+}
+
+async function runRepoLocalTsxScript(request: SafeCommandRequest, scriptPath: string): Promise<SafeCommandResult> {
+  const sourceRoot = path.resolve(request.sourceRoot)
+  const normalizedScript = assertSafeRepoPath(scriptPath, 'scriptPath')
+  const fullScriptPath = resolveSafePath(sourceRoot, normalizedScript)
+  if (!fs.existsSync(fullScriptPath)) {
+    return structuredLocalResult(request, 'completed', ['buildflow', request.commandKind, 'skipped'], {
+      skipped: true,
+      reason: 'script_not_found_in_selected_source',
+      scriptPath: normalizedScript,
+      message: `${request.commandKind} is only run when the selected source contains ${normalizedScript}.`
+    })
+  }
+  if (!fs.existsSync(path.join(sourceRoot, 'package.json'))) {
+    return structuredLocalResult(request, 'failed', ['buildflow', request.commandKind], {
+      skipped: false,
+      reason: 'package_json_missing',
+      scriptPath: normalizedScript,
+      message: `${request.commandKind} requires package.json in the selected source root.`
+    }, '', 1)
+  }
+  return runProcess(request, ['pnpm', 'exec', 'tsx', normalizedScript], sourceRoot)
 }
 
 function currentBranch(sourceRoot: string): string {
@@ -393,12 +454,21 @@ export function getAllowedCommandKinds(): SafeCommandKind[] {
     'run_package_script',
     'run_package_test',
     'run_package_test_marker',
-    'security_scan_paths'
+    'security_scan_paths',
+    'diagnose_performance',
+    'local_cli_github_auth_status',
+    'local_cli_github_repo_view'
   ]
 }
 
 export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeCommandResult> {
   const sourceRoot = path.resolve(request.sourceRoot)
+
+  if (request.commandKind === 'verify_write_policy') return runRepoLocalTsxScript(request, 'scripts/verify-write-policy.ts')
+  if (request.commandKind === 'verify_source_reindex_resilience') return runRepoLocalTsxScript(request, 'scripts/verify-source-reindex-resilience.ts')
+  if (request.commandKind === 'diagnose_performance') return runRepoLocalTsxScript(request, 'scripts/diagnose-performance.ts')
+  if (request.commandKind === 'local_cli_github_auth_status') return runProcess(request, ['gh', 'auth', 'status'], sourceRoot)
+  if (request.commandKind === 'local_cli_github_repo_view') return runProcess(request, ['gh', 'repo', 'view', '--json', 'nameWithOwner,url,defaultBranchRef'], sourceRoot)
 
   if (request.commandKind === 'validate_json_files') return validateJsonFiles(request)
   if (request.commandKind === 'security_scan_paths') return scanSecurityPaths(request)

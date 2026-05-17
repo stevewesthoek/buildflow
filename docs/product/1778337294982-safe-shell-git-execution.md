@@ -13,6 +13,7 @@ BuildFlow must not become an unrestricted shell. Commands are treated like write
 - Commands must be repo-local and auditable.
 - Read-only/status commands are easier than mutating commands.
 - Validation commands are allowed only from a safe allowlist.
+- Policy-gated local CLI profiles can expose narrow, audited commands from installed tools such as GitHub CLI.
 - Git write operations require explicit user intent.
 - Dangerous shell primitives are blocked by default.
 - No secrets, raw env dumps, arbitrary network installers, or destructive cleanup.
@@ -44,8 +45,11 @@ Allowed examples:
 - `pnpm verify:public-scope`
 - `pnpm --dir apps/web type-check`
 - `pnpm --dir packages/cli type-check`
-- `./packages/cli/node_modules/.bin/tsx scripts/verify-write-policy.ts`
-- `./packages/cli/node_modules/.bin/tsx scripts/verify-source-reindex-resilience.ts`
+- `pnpm exec tsx scripts/verify-write-policy.ts` when that script exists in the selected source
+- `pnpm exec tsx scripts/verify-source-reindex-resilience.ts` when that script exists in the selected source
+- `gh auth status`
+- `gh repo view --json nameWithOwner,url,defaultBranchRef`
+- `pnpm exec tsx scripts/diagnose-performance.ts` when that script exists in the selected source
 
 Blocked examples:
 
@@ -149,6 +153,7 @@ Supported repo-agnostic command groups:
 - Git status and diffs: normal and staged diff views.
 - Explicit staging: `git_add_paths` stages only a non-empty list of source-relative paths.
 - Confirmation-gated commit and push: `git_commit` and `git_push` require explicit confirmation flow.
+- Policy-gated local CLI profiles: `local_cli_github_auth_status` and `local_cli_github_repo_view` use the installed GitHub CLI without exposing arbitrary shell access.
 - JSON validation: `validate_json_files` runs `python3 -m json.tool` for explicit `.json` paths.
 - Package scripts: `run_package_script`, `run_package_test`, and `run_package_test_marker` run from a source-relative package directory containing `package.json`.
 - Security scans: `security_scan_paths` uses named pattern sets only; users cannot provide arbitrary regex.

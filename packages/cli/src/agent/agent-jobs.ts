@@ -32,6 +32,26 @@ export type AgentJobStep = {
   description: string
 }
 
+export type AgentTaskStatus = 'pending' | 'running' | 'completed' | 'blocked' | 'failed' | 'skipped'
+
+export type AgentJobTask = {
+  id: string
+  title: string
+  status: AgentTaskStatus
+  description: string
+  acceptanceCriteria: string[]
+  validation: string[]
+  completedAt?: string
+  blockedReason?: string
+}
+
+export type AgentJobPhase = {
+  id: string
+  title: string
+  status: AgentTaskStatus
+  tasks: AgentJobTask[]
+}
+
 export type AgentJob = {
   id: string
   sourceId: string
@@ -51,6 +71,9 @@ export type AgentJob = {
   confirmationReason?: string
   blockedReason?: string
   steps: AgentJobStep[]
+  roadmapPhases: AgentJobPhase[]
+  activeTaskId?: string
+  completedTaskCount: number
   nextActions: string[]
   summary: string
   handoffPath: string
@@ -114,6 +137,140 @@ function buildSteps(): AgentJobStep[] {
   ]
 }
 
+function buildDefaultRoadmap(goal: string): AgentJobPhase[] {
+  const goalSummary = goal.length > 180 ? `${goal.slice(0, 177)}...` : goal
+  return [
+    {
+      id: 'phase-1-discovery',
+      title: 'Discovery and implementation plan',
+      status: 'pending',
+      tasks: [
+        {
+          id: 'task-1-requirements-roadmap',
+          title: 'Capture requirements and roadmap',
+          status: 'pending',
+          description: `Inspect the repo and turn the goal into a concrete implementation roadmap: ${goalSummary}`,
+          acceptanceCriteria: ['Requirements, risks, phases, and validation strategy are written to the handoff.'],
+          validation: ['Read relevant files', 'Create or update the handoff document']
+        }
+      ]
+    },
+    {
+      id: 'phase-2-implementation',
+      title: 'Implementation loop',
+      status: 'pending',
+      tasks: [
+        {
+          id: 'task-2-implement-next-slice',
+          title: 'Implement the next roadmap slice',
+          status: 'pending',
+          description: 'Choose the next unchecked roadmap item, make a small verified change, review it, and update the handoff.',
+          acceptanceCriteria: ['One meaningful roadmap slice is implemented or explicitly blocked.', 'Changed files are reviewed.'],
+          validation: ['Run targeted checks for the changed area']
+        },
+        {
+          id: 'task-3-repair-and-continue',
+          title: 'Repair validation failures and continue',
+          status: 'pending',
+          description: 'If validation fails, repair the issue and continue with the next roadmap item without asking unless blocked by policy or confirmation.',
+          acceptanceCriteria: ['Validation failures are repaired or documented as blockers.'],
+          validation: ['Rerun failed validation commands']
+        }
+      ]
+    },
+    {
+      id: 'phase-3-hardening-handoff',
+      title: 'Hardening, cleanup, and final handoff',
+      status: 'pending',
+      tasks: [
+        {
+          id: 'task-4-final-validation',
+          title: 'Run final validation and cleanup',
+          status: 'pending',
+          description: 'Run appropriate final validation, clean up temporary work, review git state, and prepare final handoff.',
+          acceptanceCriteria: ['Validation evidence is recorded.', 'Git status and changed files are summarized.', 'Final handoff says what is complete and what remains.'],
+          validation: ['Run applicable type checks/tests', 'Run git_status_short']
+        }
+      ]
+    }
+  ]
+}
+
+function isTerminalTaskStatus(status: AgentTaskStatus): boolean {
+  return status === 'completed' || status === 'blocked' || status === 'failed' || status === 'skipped'
+}
+
+function normalizeTask(raw: unknown, fallbackId: string): AgentJobTask {
+  const item = raw && typeof raw === 'object' ? raw as Partial<AgentJobTask> : {}
+  const status: AgentTaskStatus = ['pending', 'running', 'completed', 'blocked', 'failed', 'skipped'].includes(String(item.status)) ? item.status as AgentTaskStatus : 'pending'
+  return {
+    id: String(item.id || fallbackId),
+    title: String(item.title || fallbackId),
+    status,
+    description: String(item.description || ''),
+    acceptanceCriteria: Array.isArray(item.acceptanceCriteria) ? item.acceptanceCriteria.filter(value => typeof value === 'string') : [],
+    validation: Array.isArray(item.validation) ? item.validation.filter(value => typeof value === 'string') : [],
+    completedAt: typeof item.completedAt === 'string' ? item.completedAt : undefined,
+    blockedReason: typeof item.blockedReason === 'string' ? item.blockedReason : undefined
+  }
+}
+
+function normalizeRoadmapPhases(raw: unknown, goal: string): AgentJobPhase[] {
+  if (!Array.isArray(raw) || raw.length === 0) return buildDefaultRoadmap(goal)
+  return raw.map((phase, phaseIndex) => {
+    const item = phase && typeof phase === 'object' ? phase as Partial<AgentJobPhase> : {}
+    const tasks = Array.isArray(item.tasks) && item.tasks.length > 0
+      ? item.tasks.map((task, taskIndex) => normalizeTask(task, `task-${phaseIndex + 1}-${taskIndex + 1}`))
+      : [normalizeTask({}, `task-${phaseIndex + 1}-1`)]
+    const allTerminal = tasks.every(task => isTerminalTaskStatus(task.status))
+    const anyBlocked = tasks.some(task => task.status === 'blocked' || task.status === 'failed')
+    const status: AgentTaskStatus = anyBlocked ? 'blocked' : allTerminal ? 'completed' : item.status === 'running' ? 'running' : 'pending'
+    return {
+      id: String(item.id || `phase-${phaseIndex + 1}`),
+      title: String(item.title || `Phase ${phaseIndex + 1}`),
+      status,
+      tasks
+    }
+  })
+}
+
+function findActiveTaskId(phases: AgentJobPhase[], requested?: string): string | undefined {
+  if (requested) {
+    const existing = phases.flatMap(phase => phase.tasks).find(task => task.id === requested && !isTerminalTaskStatus(task.status))
+    if (existing) return existing.id
+  }
+  return phases.flatMap(phase => phase.tasks).find(task => !isTerminalTaskStatus(task.status))?.id
+}
+
+function countCompletedTasks(phases: AgentJobPhase[]): number {
+  return phases.flatMap(phase => phase.tasks).filter(task => task.status === 'completed' || task.status === 'skipped').length
+}
+
+function describeActiveTask(phases: AgentJobPhase[], activeTaskId?: string): string | undefined {
+  if (!activeTaskId) return undefined
+  for (const phase of phases) {
+    const task = phase.tasks.find(item => item.id === activeTaskId)
+    if (task) return `${phase.title} → ${task.title}`
+  }
+  return undefined
+}
+
+function buildLoopNextActions(documentationPath: string, phases: AgentJobPhase[], activeTaskId?: string): string[] {
+  const activeTask = describeActiveTask(phases, activeTaskId)
+  if (!activeTask) {
+    return [
+      'All roadmap tasks are terminal. Run final validation, update the handoff, review git status, and mark the job completed.',
+      `Update ${documentationPath} with final validation evidence and remaining follow-ups.`
+    ]
+  }
+  return [
+    `Continue active roadmap task: ${activeTask}.`,
+    'Inspect only the files needed for this task, make the smallest verified change, then review the diff.',
+    `Update ${documentationPath} after the task with completed work, validation evidence, blockers, rollback notes, and the next active task.`,
+    'Continue to the next pending task until the roadmap is complete, blocked, failed, or confirmation is required.'
+  ]
+}
+
 function ensureJobStoreDir(): void {
   fs.mkdirSync(path.dirname(JOB_STORE_PATH), { recursive: true })
 }
@@ -123,6 +280,9 @@ function coerceJob(raw: unknown): AgentJob | null {
   const item = raw as Partial<AgentJob>
   if (!item.id || !item.sourceId || !item.goal || !item.createdAt) return null
   const documentationPath = normalizeDocumentationPath(item.documentationPath)
+  const roadmapPhases = normalizeRoadmapPhases(item.roadmapPhases, String(item.goal))
+  const activeTaskId = findActiveTaskId(roadmapPhases, item.activeTaskId)
+  const completedTaskCount = countCompletedTasks(roadmapPhases)
   return {
     id: String(item.id),
     sourceId: String(item.sourceId),
@@ -142,8 +302,11 @@ function coerceJob(raw: unknown): AgentJob | null {
     confirmationReason: item.confirmationReason,
     blockedReason: item.blockedReason,
     steps: Array.isArray(item.steps) && item.steps.length > 0 ? item.steps : buildSteps(),
-    nextActions: Array.isArray(item.nextActions) ? item.nextActions : [],
-    summary: item.summary || 'Agent Mode job loaded from persistent handoff state.',
+    roadmapPhases,
+    activeTaskId,
+    completedTaskCount,
+    nextActions: Array.isArray(item.nextActions) && item.nextActions.length > 0 ? item.nextActions : buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
+    summary: item.summary || 'Agent Mode job loaded from persistent roadmap state. Continue the active task, update the handoff, validate, repair, and advance until all roadmap tasks are complete or blocked.',
     handoffPath: item.handoffPath || documentationPath,
     resumeInstructions: Array.isArray(item.resumeInstructions) ? item.resumeInstructions : buildResumeInstructions(documentationPath),
     fallbackPrompt: item.fallbackPrompt,
@@ -184,7 +347,9 @@ function buildResumeInstructions(documentationPath: string): string[] {
   ]
 }
 
-function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'documentationPath' | 'handoffPath' | 'summary' | 'blockedReason' | 'confirmationReason' | 'lastKnownGitStatus'>): string {
+function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'documentationPath' | 'handoffPath' | 'summary' | 'blockedReason' | 'confirmationReason' | 'lastKnownGitStatus' | 'roadmapPhases' | 'activeTaskId' | 'completedTaskCount'>): string {
+  const activeTask = describeActiveTask(job.roadmapPhases, job.activeTaskId) || 'none'
+  const totalTasks = job.roadmapPhases.flatMap(phase => phase.tasks).length
   return [
     'You are continuing a BuildFlow Agent Mode job directly inside the local repo.',
     '',
@@ -192,6 +357,8 @@ function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'document
     `Goal: ${job.goal}`,
     `Handoff path: ${job.handoffPath || job.documentationPath}`,
     `Current summary: ${job.summary || 'No summary recorded.'}`,
+    `Roadmap progress: ${job.completedTaskCount}/${totalTasks} tasks completed.`,
+    `Active task: ${activeTask}`,
     job.blockedReason ? `Blocked reason: ${job.blockedReason}` : undefined,
     job.confirmationReason ? `Confirmation reason: ${job.confirmationReason}` : undefined,
     job.lastKnownGitStatus ? `Last known git status:\n${job.lastKnownGitStatus}` : undefined,
@@ -217,6 +384,9 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
   const documentationPath = normalizeDocumentationPath(params.documentationPath)
   const now = new Date().toISOString()
   const resumeInstructions = buildResumeInstructions(documentationPath)
+  const roadmapPhases = buildDefaultRoadmap(goal)
+  const activeTaskId = findActiveTaskId(roadmapPhases)
+  const completedTaskCount = countCompletedTasks(roadmapPhases)
   const job: AgentJob = {
     id: `agent-${crypto.randomUUID()}`,
     sourceId,
@@ -235,13 +405,11 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     requiresConfirmation: params.autoCommit === true || params.autoPush === true,
     confirmationReason: params.autoCommit || params.autoPush ? 'git_commit_or_push_requires_confirmation' : undefined,
     steps: buildSteps(),
-    nextActions: [
-      'Lock this conversation to sourceId and pass sourceId explicitly on every action.',
-      `Create or update ${documentationPath} with requirements, roadmap, phases, tasks, progress, validation evidence, rollback notes, and next resume step.`,
-      'Execute one meaningful chunk, review it, validate it, update the handoff, then continue until done or blocked.',
-      'Give compact progress summaries; do not ask the user unless policy requires confirmation, source scope is ambiguous, or validation needs a human choice.'
-    ],
-    summary: 'Agent Mode started with persistent handoff. Continue requirements → roadmap → plan → execute → review → docs → validate → repair → harden → cleanup → git review → final handoff. Do not stop after one chunk; continue until complete, blocked, failed, or push/destructive confirmation is required.',
+    roadmapPhases,
+    activeTaskId,
+    completedTaskCount,
+    nextActions: buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
+    summary: 'Agent Mode started with persistent roadmap state. Continue the active task, update the handoff, validate, repair, and advance task-by-task until all roadmap phases are complete, blocked, failed, or confirmation is required.',
     handoffPath: documentationPath,
     resumeInstructions
   }
@@ -255,12 +423,21 @@ export function getAgentJob(jobId: string): AgentJob | undefined {
   return jobs.get(jobId)
 }
 
-export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'status' | 'currentIteration' | 'blockedReason' | 'requiresConfirmation' | 'confirmationReason' | 'nextActions' | 'summary' | 'lastKnownGitStatus'>>): AgentJob {
+export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'status' | 'currentIteration' | 'blockedReason' | 'requiresConfirmation' | 'confirmationReason' | 'nextActions' | 'summary' | 'lastKnownGitStatus' | 'roadmapPhases' | 'activeTaskId' | 'completedTaskCount'>>): AgentJob {
   const job = getAgentJob(jobId)
   if (!job) throw new Error(`Agent job not found: ${jobId}`)
+  const roadmapPhases = normalizeRoadmapPhases(patch.roadmapPhases || job.roadmapPhases, job.goal)
+  const activeTaskId = findActiveTaskId(roadmapPhases, patch.activeTaskId || job.activeTaskId)
+  const completedTaskCount = countCompletedTasks(roadmapPhases)
   const base: AgentJob = {
     ...job,
     ...patch,
+    roadmapPhases,
+    activeTaskId,
+    completedTaskCount,
+    nextActions: Array.isArray(patch.nextActions) && patch.nextActions.length > 0
+      ? patch.nextActions
+      : buildLoopNextActions(job.documentationPath, roadmapPhases, activeTaskId),
     updatedAt: new Date().toISOString(),
     resumeInstructions: job.resumeInstructions && job.resumeInstructions.length > 0 ? job.resumeInstructions : buildResumeInstructions(job.documentationPath),
     handoffPath: job.handoffPath || job.documentationPath

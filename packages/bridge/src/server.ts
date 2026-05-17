@@ -187,6 +187,25 @@ function generateRequestId(): string {
   return `req-${++requestIdCounter}-${Date.now()}`
 }
 
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value ?? {}), 'utf8')
+}
+
+function attachRelayDiagnostics(result: unknown, diagnostics: Record<string, unknown>): unknown {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result
+  const record = result as Record<string, unknown>
+  const existingDiagnostics = record.diagnostics && typeof record.diagnostics === 'object' && !Array.isArray(record.diagnostics)
+    ? record.diagnostics as Record<string, unknown>
+    : {}
+  return {
+    ...record,
+    diagnostics: {
+      ...existingDiagnostics,
+      relay: diagnostics
+    }
+  }
+}
+
 // Rate limiter for device registration: max 5 registrations per IP per minute
 const registrationRateLimits = new Map<string, { count: number; resetAt: number }>()
 
@@ -524,10 +543,18 @@ const server = http.createServer(async (req, res) => {
         // Answer it directly so staging does not depend on the device command round-trip.
         if (relayCommand === 'action_proxy:status') {
           const duration = Date.now() - startTime
-          const result = {
+          const result = attachRelayDiagnostics({
             status: 'ok',
             deviceConnected: true
-          }
+          }, {
+            endpoint: agentEndpoint,
+            command: relayCommand,
+            requestId,
+            durationMs: duration,
+            requestBytes: jsonBytes(params),
+            responseBytesBeforeDiagnostics: jsonBytes({ status: 'ok', deviceConnected: true }),
+            pendingRequestCount: pendingRequests.size
+          })
 
           requestAudit.logRequest({
             requestId,
@@ -592,8 +619,17 @@ const server = http.createServer(async (req, res) => {
             clearTimeout(timeout)
             pendingRequests.delete(requestId)
             const duration = Date.now() - startTime
+            const responsePayload = attachRelayDiagnostics(result, {
+              endpoint: agentEndpoint,
+              command: relayCommand,
+              requestId,
+              durationMs: duration,
+              requestBytes: jsonBytes(params),
+              responseBytesBeforeDiagnostics: jsonBytes(result),
+              pendingRequestCount: pendingRequests.size
+            })
             res.writeHead(200)
-            res.end(JSON.stringify(result))
+            res.end(JSON.stringify(responsePayload))
 
             // Log success
             requestAudit.logRequest({

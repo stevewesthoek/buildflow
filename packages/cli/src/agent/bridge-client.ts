@@ -112,7 +112,7 @@ export class BridgeClient {
               const createInput = toolMessage.input as { path?: string; content: string }
               result = await createFile(createInput.path || '', createInput.content)
               await this.indexer.buildIndex()
-              this.searcher = new VaultSearcher(this.indexer.getDocs())
+              this.searcher.rebuild(this.indexer.getDocs())
               break
 
             case 'append_note':
@@ -123,7 +123,7 @@ export class BridgeClient {
             case 'export_claude_plan':
               result = await createExportPlan(toolMessage.input)
               await this.indexer.buildIndex()
-              this.searcher = new VaultSearcher(this.indexer.getDocs())
+              this.searcher.rebuild(this.indexer.getDocs())
               break
 
             default:

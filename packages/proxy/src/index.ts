@@ -23,6 +23,21 @@ const webProxy = HttpProxy.createProxyServer({
 let relayProcess: ChildProcess | null = null;
 let webProcess: ChildProcess | null = null;
 
+// Proxy timing headers help separate proxy overhead from web/relay/backend work.
+function markProxyStart(req: any) {
+  req.__buildflowProxyStartedAt = Date.now();
+}
+
+function attachProxyTimingHeader(proxyRes: any, req: any) {
+  const startedAt = typeof req.__buildflowProxyStartedAt === "number" ? req.__buildflowProxyStartedAt : undefined;
+  if (startedAt) {
+    proxyRes.headers["x-buildflow-proxy-duration-ms"] = String(Date.now() - startedAt);
+  }
+}
+
+relayProxy.on("proxyRes", attachProxyTimingHeader);
+webProxy.on("proxyRes", attachProxyTimingHeader);
+
 // Error handlers for proxies
 relayProxy.on("error", (err: Error, req: any, res: any) => {
   console.error(`[proxy] relay error:`, err.message);
@@ -101,6 +116,7 @@ const server = http.createServer(async (req, res) => {
     url.startsWith("/api/bridge/ws") ||
     url.startsWith("/api/admin")
   ) {
+    markProxyStart(req);
     relayProxy.web(req, res);
     return;
   }
@@ -111,11 +127,13 @@ const server = http.createServer(async (req, res) => {
     url.startsWith("/api/actions") ||
     url.startsWith("/dashboard")
   ) {
+    markProxyStart(req);
     webProxy.web(req, res);
     return;
   }
 
   // Default to web app
+  markProxyStart(req);
   webProxy.web(req, res);
 });
 

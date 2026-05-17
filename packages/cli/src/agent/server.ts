@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import crypto from 'crypto'
 import fs from 'fs'
+import { promises as fsp } from 'fs'
 import path from 'path'
 import { Indexer } from './indexer'
 import { VaultSearcher } from './search'
@@ -30,12 +31,14 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   const DEFAULT_READ_FILES_MAX_BYTES_PER_FILE = 12_000
 
   const indexer = new Indexer()
+  const config = loadConfig()
+  const indexingSources = new Set<string>()
+  let searcher = new VaultSearcher(indexer.getDocs())
 
-  // Build index if empty
+  // Do not block local server startup on a full index build. If no index is present,
+  // mark sources pending and let the background startup queue index one source at a time.
   if (indexer.getDocs().length === 0) {
-    console.log('[Indexer] Building index on startup...')
-    await indexer.buildIndex()
-    console.log(`[Indexer] Built index with ${indexer.getDocs().length} files`)
+    console.log('[Indexer] No existing index found; starting server and indexing pending sources in background.')
   }
   reconcileIndexStateFromDocs(indexer.getDocs(), getSourcesSafe())
 
@@ -55,10 +58,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   }
   setTimeout(queuePendingSourcesAtStartup, 1000)
-
-  let searcher = new VaultSearcher(indexer.getDocs())
-  const config = loadConfig()
-  const indexingSources = new Set<string>()
 
   const assertWriteMode = (isArtifact = false, relPath?: string): void => {
     const mode = getWriteMode()
@@ -152,8 +151,9 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   }
 
   const refreshSearcherFromDocs = (): void => {
-    reconcileIndexStateFromDocs(indexer.getDocs(), getSourcesSafe())
-    searcher = new VaultSearcher(indexer.getDocs())
+    const docs = indexer.getDocs()
+    reconcileIndexStateFromDocs(docs, getSourcesSafe())
+    searcher.rebuild(docs)
   }
 
   const reindexSourceInBackground = (sourceId: string, sourcePath: string, reason: 'manual' | 'auto' | 'add' = 'manual'): boolean => {
@@ -277,6 +277,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         port,
         vaultPath: config?.vaultPath || 'not configured',
         indexedFiles: indexer.getDocs().length,
+        indexingActive: indexingSources.size > 0,
+        indexingSourceIds: Array.from(indexingSources),
         version: cliVersion
       }
   })
@@ -298,7 +300,10 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       return reply.header('Cache-Control', 'no-store').send({
         connected: true,
         sourceCount,
-        sourcesAvailable: sourceCount > 0
+        sourcesAvailable: sourceCount > 0,
+        indexedFiles: indexer.getDocs().length,
+        indexingActive: indexingSources.size > 0,
+        indexingSourceIds: Array.from(indexingSources)
       })
     } catch (err) {
       return reply.code(500).header('Cache-Control', 'no-store').send({
@@ -328,7 +333,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string; lastKnownGitStatus?: string } }>('/api/agent-jobs/status', async (request, reply) => {
+  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string; lastKnownGitStatus?: string; roadmapPhases?: any[]; activeTaskId?: string; completedTaskCount?: number } }>('/api/agent-jobs/status', async (request, reply) => {
     try {
       const { jobId, ...patch } = request.body || {}
       if (!jobId) return reply.header('Cache-Control', 'no-store').send({ status: 'ok', jobs: listAgentJobs() })
@@ -356,12 +361,19 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   // Search endpoint
   fastify.post<{ Body: { query: string; limit?: number; sourceId?: string; sourceIds?: string[] } }>('/api/search', async (request, reply) => {
+    const startedAt = Date.now()
     try {
       const { query, limit = 10, sourceId, sourceIds } = request.body
+      const resolveStartedAt = Date.now()
       const resolvedSourceIds = sourceIds && sourceIds.length > 0 ? sourceIds : sourceId ? [sourceId] : getActiveSourceContext().activeSourceIds
+      const sourceResolveMs = Date.now() - resolveStartedAt
+      const readinessStartedAt = Date.now()
       const rejection = rejectUnindexedSources(resolvedSourceIds, reply)
+      const readinessMs = Date.now() - readinessStartedAt
       if (rejection) return rejection
+      const searchStartedAt = Date.now()
       const results = searcher.search(query, limit, resolvedSourceIds)
+      const searchMs = Date.now() - searchStartedAt
 
       logToFile({
         timestamp: new Date().toISOString(),
@@ -369,9 +381,19 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         status: 'success'
       })
 
-      return { results }
+      return {
+        results,
+        timings: {
+          totalMs: Date.now() - startedAt,
+          sourceResolveMs,
+          readinessMs,
+          searchMs,
+          sourceCount: resolvedSourceIds.length,
+          resultCount: results.length
+        }
+      }
     } catch (err) {
-      return reply.code(400).send({ error: String(err) })
+      return reply.code(400).send({ error: String(err), timings: { totalMs: Date.now() - startedAt } })
     }
   })
 
@@ -452,6 +474,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   })
 
   fastify.post<{ Body: { sourceId?: string; sourceIds?: string[]; paths: string[]; maxBytesPerFile?: number } }>('/api/read-files', async (request, reply) => {
+    const startedAt = Date.now()
     try {
       const { sourceId, sourceIds, paths: relPaths, maxBytesPerFile = DEFAULT_READ_FILES_MAX_BYTES_PER_FILE } = request.body
       if (!Array.isArray(relPaths) || relPaths.length === 0) return reply.code(400).send({ error: 'Paths required' })
@@ -475,7 +498,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
             const content = redactSecrets(result.content)
             const truncated = truncateContent(content, maxBytesPerFile)
             const fullPath = path.join(source.path, path.normalize(relPath))
-            const stat = fs.statSync(fullPath)
+            const stat = await fsp.stat(fullPath)
             const candidate = {
               sourceId: source.id,
               path: relPath,
@@ -533,10 +556,17 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         skipped: skipped.length > 0 ? skipped : undefined,
         nextBatch,
         budgetBytes: READ_FILES_RESPONSE_BUDGET_BYTES,
-        returnedBytes
+        returnedBytes,
+        timings: {
+          totalMs: Date.now() - startedAt,
+          sourceCount: targets.length,
+          requestedPathCount: normalizedPaths.length,
+          returnedFileCount: files.length,
+          skippedFileCount: skipped.length
+        }
       }
     } catch (err) {
-      return reply.code(400).send({ error: String(err) })
+      return reply.code(400).send({ error: String(err), timings: { totalMs: Date.now() - startedAt } })
     }
   })
 
@@ -618,6 +648,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   })
 
   fastify.post<{ Body: { sourceId?: string; sourceIds?: string[]; path?: string; depth?: number; limit?: number; cursor?: string } }>('/api/list-files', async (request, reply) => {
+    const startedAt = Date.now()
     try {
       const { sourceId, sourceIds, path: relPath = '', depth = 3, limit = 100, cursor } = request.body
       const resolvedSourceIds = sourceIds && sourceIds.length > 0 ? sourceIds : sourceId ? [sourceId] : getActiveSourceContext().activeSourceIds
@@ -627,18 +658,23 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       for (const source of targets) {
         const fullPath = path.resolve(path.join(source.path, path.normalize(relPath)))
         if (!fullPath.startsWith(path.resolve(source.path))) continue
-        if (!fs.existsSync(fullPath)) continue
-        const stat = fs.statSync(fullPath)
+        let stat: fs.Stats
+        try {
+          stat = await fsp.stat(fullPath)
+        } catch {
+          continue
+        }
         if (!stat.isDirectory()) continue
 
-        const walk = (dir: string, currentRel: string, currentDepth: number): void => {
+        const walk = async (dir: string, currentRel: string, currentDepth: number): Promise<void> => {
           if (entries.length >= limit || currentDepth > depth) return
-          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const dirEntries = await fsp.readdir(dir, { withFileTypes: true })
+          for (const entry of dirEntries) {
             if (entries.length >= limit) break
             if (!shouldIncludeEntry(entry.name)) continue
             const nextRel = currentRel ? `${currentRel}/${entry.name}` : entry.name
             const nextFull = path.join(dir, entry.name)
-            const nextStat = fs.statSync(nextFull)
+            const nextStat = await fsp.stat(nextFull)
             entries.push({
               sourceId: source.id,
               path: nextRel,
@@ -646,16 +682,29 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
               sizeBytes: nextStat.size,
               modifiedAt: nextStat.mtime.toISOString()
             })
-            if (entry.isDirectory() && currentDepth + 1 < depth) walk(nextFull, nextRel, currentDepth + 1)
+            if (entry.isDirectory() && currentDepth + 1 < depth) await walk(nextFull, nextRel, currentDepth + 1)
           }
         }
 
-        walk(fullPath, relPath, 0)
+        await walk(fullPath, relPath, 0)
       }
 
-      return { sourceId: targets[0]?.id, path: relPath, entries, nextCursor: undefined, cursor }
+      return {
+        sourceId: targets[0]?.id,
+        path: relPath,
+        entries,
+        nextCursor: undefined,
+        cursor,
+        timings: {
+          totalMs: Date.now() - startedAt,
+          sourceCount: targets.length,
+          entryCount: entries.length,
+          depth,
+          limit
+        }
+      }
     } catch (err) {
-      return reply.code(400).send({ error: String(err) })
+      return reply.code(400).send({ error: String(err), timings: { totalMs: Date.now() - startedAt } })
     }
   })
 
