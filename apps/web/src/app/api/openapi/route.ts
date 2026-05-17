@@ -66,7 +66,7 @@ const nextBatchSchema = {
 const diagnosticsSchema = {
   type: 'object',
   additionalProperties: true,
-  description: 'Compact timing and payload-size diagnostics for BuildFlow action routing, transport, relay, proxy, and local processing.'
+  description: 'Optional timing and payload-size diagnostics. Usually absent unless BUILDFLOW_ACTION_DIAGNOSTICS=1 is enabled.'
 }
 
 const activitySchema = {
@@ -259,7 +259,7 @@ const openapi = {
   info: {
     title: 'BuildFlow API',
     version: '3.0.0',
-    description: 'BuildFlow GPT actions for status, sources, context, inspection, reading, and verified writes.'
+    description: 'BuildFlow GPT actions for agentic repo status, sources, active context, inspection, reading, safe commands, Agent Mode, and verified writes.'
   },
   servers: [
     {
