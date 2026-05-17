@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { ActiveSourcesMode, KnowledgeSource } from '@buildflow/shared'
+import type { ActiveSourcesMode, DiscoveredRepository, KnowledgeSource } from '@buildflow/shared'
 
 const CACHE_KEY = 'buildflow-dashboard-source-snapshot'
+const DEFAULT_REPO_ROOT = '~/Repos'
 
 type SourceSnapshot = {
   sources: KnowledgeSource[]
@@ -98,6 +99,11 @@ export default function Dashboard() {
   const [sourcePath, setSourcePath] = useState('')
   const [sourceLabel, setSourceLabel] = useState('')
   const [sourceId, setSourceId] = useState('')
+  const [discoveryRootPath, setDiscoveryRootPath] = useState(DEFAULT_REPO_ROOT)
+  const [discoveredRepos, setDiscoveredRepos] = useState<DiscoveredRepository[]>([])
+  const [selectedDiscoveredRepoPath, setSelectedDiscoveredRepoPath] = useState('')
+  const [discoveryLoading, setDiscoveryLoading] = useState(false)
+  const [discoveryScanned, setDiscoveryScanned] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [activity, setActivity] = useState<ActivityLine[]>([])
@@ -107,6 +113,11 @@ export default function Dashboard() {
   const indexingCount = useMemo(() => sources.filter(source => source.enabled && source.indexStatus === 'indexing').length, [sources])
   const activeSources = useMemo(() => sources.filter(source => activeSourceIds.includes(source.id)), [sources, activeSourceIds])
   const enabledSources = useMemo(() => sources.filter(source => source.enabled), [sources])
+  const availableDiscoveredRepos = useMemo(() => discoveredRepos.filter(repo => !repo.alreadyAdded), [discoveredRepos])
+  const selectedDiscoveredRepo = useMemo(
+    () => discoveredRepos.find(repo => repo.path === selectedDiscoveredRepoPath) || null,
+    [discoveredRepos, selectedDiscoveredRepoPath]
+  )
 
   const pushActivity = (label: string, detail: string, tone: StatusTone = 'neutral') => {
     setActivity(current => [{ id: `${Date.now()}-${label}`, label, detail, tone }, ...current].slice(0, 3))
@@ -148,6 +159,36 @@ export default function Dashboard() {
     }
   }
 
+  const scanRepositories = async (rootPath = discoveryRootPath, silent = false) => {
+    try {
+      setDiscoveryLoading(true)
+      setError(null)
+      const data = await fetchJson('/api/agent/sources/discovery', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rootPath: rootPath || DEFAULT_REPO_ROOT })
+      })
+      const repositories = Array.isArray(data.repositories) ? data.repositories as DiscoveredRepository[] : []
+      const settings = data.settings as { rootPath?: string } | undefined
+      setDiscoveryRootPath(settings?.rootPath || rootPath || DEFAULT_REPO_ROOT)
+      setDiscoveredRepos(repositories)
+      setDiscoveryScanned(true)
+      setSelectedDiscoveredRepoPath(current => {
+        if (current && repositories.some(repo => repo.path === current && !repo.alreadyAdded)) return current
+        return repositories.find(repo => !repo.alreadyAdded)?.path || ''
+      })
+      if (!silent) pushActivity('Repos scanned', `${countLabel(repositories.length, 'repo')} found under ${settings?.rootPath || rootPath}.`, 'good')
+      return repositories
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      pushActivity('Repo scan failed', message, 'warn')
+      return []
+    } finally {
+      setDiscoveryLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (hydratedRef.current) return
     hydratedRef.current = true
@@ -161,6 +202,18 @@ export default function Dashboard() {
     }
     void refreshSources(Boolean(snapshot))
   }, [])
+
+  useEffect(() => {
+    if (!showAddSource) return
+    void scanRepositories(discoveryRootPath, true)
+  }, [showAddSource])
+
+  useEffect(() => {
+    if (!selectedDiscoveredRepo) return
+    setSourcePath(selectedDiscoveredRepo.path)
+    setSourceLabel(selectedDiscoveredRepo.label)
+    setSourceId(selectedDiscoveredRepo.id)
+  }, [selectedDiscoveredRepo])
 
   const mutate = async (label: string, source: KnowledgeSource | null, url: string, payload: Record<string, unknown>, successDetail: string) => {
     try {
@@ -234,22 +287,31 @@ export default function Dashboard() {
 
   const addSource = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const path = sourcePath.trim()
+    const selectedRepo = selectedDiscoveredRepo || discoveredRepos.find(repo => repo.path === sourcePath)
+    const path = (selectedRepo?.path || sourcePath).trim()
     if (!path) {
-      setError('Repository path is required.')
+      setError('Select a discovered repository first.')
       return
     }
+    const label = selectedRepo?.label || sourceLabel.trim()
+    const id = selectedRepo?.id || sourceId.trim()
     const ok = await mutate('Added', null, '/api/agent/sources/add', {
       path,
-      label: sourceLabel.trim() || undefined,
-      id: sourceId.trim() || undefined
-    }, `${sourceLabel.trim() || sourceId.trim() || path} added.`)
+      label: label || undefined,
+      id: id || undefined
+    }, `${label || id || path} added.`)
     if (ok) {
       setSourcePath('')
       setSourceLabel('')
       setSourceId('')
+      setSelectedDiscoveredRepoPath('')
       setShowAddSource(false)
+      void scanRepositories(discoveryRootPath, true)
     }
+  }
+
+  const toggleAddSource = () => {
+    setShowAddSource(current => !current)
   }
 
   return (
@@ -268,7 +330,7 @@ export default function Dashboard() {
             <button type="button" onClick={() => refreshSources(false)} disabled={loading || Boolean(busySourceId)} className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
               {loading ? 'Refreshing…' : 'Refresh'}
             </button>
-            <button type="button" onClick={() => setShowAddSource(value => !value)} className="rounded-full bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200">
+            <button type="button" onClick={toggleAddSource} className="rounded-full bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200">
               {showAddSource ? 'Close add' : 'Add repo'}
             </button>
           </div>
@@ -286,27 +348,55 @@ export default function Dashboard() {
             {notice ? <p className="text-sm text-emerald-700 dark:text-emerald-300">{notice}</p> : null}
             {error ? <p className="text-sm text-red-700 dark:text-red-300">{error}</p> : null}
             {showAddSource ? (
-              <form onSubmit={addSource} className="mt-3 grid gap-2 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
-                <input value={sourcePath} onChange={event => setSourcePath(event.target.value)} placeholder="Repo path" className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500" />
-                <input value={sourceLabel} onChange={event => setSourceLabel(event.target.value)} placeholder="Label optional" className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500" />
-                <input value={sourceId} onChange={event => setSourceId(event.target.value)} placeholder="ID optional" className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500" />
-                <button type="submit" disabled={busySourceId === 'new-source'} className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-slate-950">
-                  {busySourceId === 'new-source' ? 'Adding…' : 'Add'}
-                </button>
+              <form onSubmit={addSource} className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1.6fr)_auto]">
+                <label className="min-w-0">
+                  <span className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">Repo path</span>
+                  <select
+                    value={selectedDiscoveredRepoPath}
+                    onFocus={() => scanRepositories(discoveryRootPath, true)}
+                    onChange={event => setSelectedDiscoveredRepoPath(event.target.value)}
+                    disabled={discoveryLoading || busySourceId === 'new-source'}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500"
+                  >
+                    <option value="">{discoveryLoading ? 'Scanning repos…' : discoveryScanned ? 'Select a repository' : 'Click to scan repositories'}</option>
+                    {discoveredRepos.map(repo => (
+                      <option key={repo.path} value={repo.path} disabled={repo.alreadyAdded}>
+                        {repo.account} / {repo.label}{repo.alreadyAdded ? ' · already added' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                    <span className="truncate font-mono">{sourcePath || discoveryRootPath}</span>
+                    <span>{availableDiscoveredRepos.length} available</span>
+                    <button type="button" onClick={() => scanRepositories(discoveryRootPath, false)} disabled={discoveryLoading} className="font-medium text-slate-700 underline-offset-2 hover:underline disabled:opacity-50 dark:text-slate-200">
+                      Rescan
+                    </button>
+                  </div>
+                </label>
+                <div className="flex items-end">
+                  <button type="submit" disabled={busySourceId === 'new-source' || !sourcePath || Boolean(selectedDiscoveredRepo?.alreadyAdded)} className="w-full rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-slate-950 md:w-auto">
+                    {busySourceId === 'new-source' ? 'Adding…' : 'Add'}
+                  </button>
+                </div>
+                {selectedDiscoveredRepo ? (
+                  <div className="rounded-xl bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300 md:col-span-2">
+                    Label: <strong>{selectedDiscoveredRepo.label}</strong> · ID: <span className="font-mono">{selectedDiscoveredRepo.id}</span>
+                  </div>
+                ) : null}
               </form>
             ) : null}
           </section>
         ) : null}
 
-        <section className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-          <div className="min-h-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem_14rem] gap-3 border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:border-slate-800 dark:text-slate-400 max-md:hidden">
+        <section className="grid min-h-0 flex-1 gap-4 overflow-hidden lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_8rem_8rem_14rem] gap-3 border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:border-slate-800 dark:text-slate-400 max-md:hidden">
               <span>Source</span>
               <span>Status</span>
               <span>Connection</span>
               <span className="text-right">Actions</span>
             </div>
-            <div className="h-full min-h-0 overflow-y-auto pb-10 md:pb-0">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
               {loading && sources.length === 0 ? (
                 <div className="flex h-full items-center justify-center p-8 text-sm text-slate-500">Loading sources…</div>
               ) : sources.length === 0 ? (
@@ -317,7 +407,7 @@ export default function Dashboard() {
                   </div>
                 </div>
               ) : (
-                <div className="divide-y divide-slate-200 dark:divide-slate-800">
+                <div className="divide-y divide-slate-200 pb-4 dark:divide-slate-800">
                   {sources.map(source => {
                     const active = activeSourceIds.includes(source.id)
                     const busy = busySourceId === source.id
@@ -347,7 +437,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <aside className="grid min-h-0 gap-4 lg:grid-rows-[auto_minmax(0,1fr)]">
+          <aside className="grid min-h-0 gap-4 overflow-hidden lg:grid-rows-[auto_minmax(0,1fr)]">
             <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">Live conversation</p>
               <h2 className="mt-2 text-lg font-semibold">Current ChatGPT chat</h2>
