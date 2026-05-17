@@ -1,1106 +1,410 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import type { KnowledgeSource, WriteMode, ActiveSourcesMode, DiscoveredRepository } from '@buildflow/shared'
-import { DashboardTopBar } from './components/DashboardTopBar'
-import { DashboardShell } from './components/DashboardShell'
-import { DashboardOverview } from './components/DashboardOverview'
-import { PlanPlaceholderPanel } from './components/PlanPlaceholderPanel'
-import { ExecutionFlowPreview } from './components/ExecutionFlowPreview'
-import { ExecutionHandoffPanel } from './components/ExecutionHandoffPanel'
-import { KnowledgeSourcesPanel } from './components/KnowledgeSourcesPanel'
-import { ActiveContextPanel } from './components/ActiveContextPanel'
-import { InfoPanels } from './components/InfoPanels'
-import { InsightPanel } from './components/InsightPanel'
-import { DashboardRail } from './components/DashboardRail'
-import { DashboardActivityFeed } from './components/DashboardActivityFeed'
-import { SetupChecklistPanel } from './components/SetupChecklistPanel'
-import { DashboardButton } from './components/ui/DashboardButton'
-import { DashboardPanel } from './components/ui/DashboardPanel'
-import { DashboardCodeText } from './components/ui/DashboardCodeText'
-import { buildClaudeHandoffPrompt, buildCodexHandoffPrompt } from './handoffPrompts'
-import type { DashboardActivityEvent, DashboardLocalPlan, DashboardPlanTaskStatus, DashboardSection, DashboardSourceSnapshot } from './types'
+import type { ActiveSourcesMode, KnowledgeSource } from '@buildflow/shared'
 
-const TERMINAL_INDEX_STATUSES = new Set(['ready', 'failed', 'disabled'])
+const CACHE_KEY = 'buildflow-dashboard-source-snapshot'
 
-const DASHBOARD_SOURCE_CACHE_KEY = 'buildflow-dashboard-source-snapshot'
-const DASHBOARD_LOCAL_PLAN_CACHE_KEY = 'buildflow-dashboard-local-plan'
-type FetchSourcesOptions = {
-  blocking?: boolean
+type SourceSnapshot = {
+  sources: KnowledgeSource[]
+  activeMode: ActiveSourcesMode
+  activeSourceIds: string[]
+  savedAt: string
 }
 
-const SECTION_LABELS: Record<DashboardSection, string> = {
-  overview: 'Overview',
-  sources: 'Sources',
-  activity: 'Activity',
-  plan: 'Plans',
-  handoff: 'Handoff',
-  settings: 'Settings'
+type StatusTone = 'neutral' | 'good' | 'warn' | 'bad'
+
+type ActivityLine = {
+  id: string
+  label: string
+  detail: string
+  tone: StatusTone
 }
 
-const summarizeMode = (mode: ActiveSourcesMode) => {
-  switch (mode) {
-    case 'single':
-      return 'Single source'
-    case 'multi':
-      return 'Multi-source'
-    case 'all':
-      return 'All enabled'
-  }
+const terminalStatuses = new Set(['ready', 'failed', 'disabled'])
+
+const toneClass: Record<StatusTone, string> = {
+  neutral: 'bg-slate-100 text-slate-700 ring-slate-200 dark:bg-slate-900 dark:text-slate-300 dark:ring-slate-800',
+  good: 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-900/70',
+  warn: 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900/70',
+  bad: 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-900/70'
 }
 
-const summarizeWriteMode = (mode: WriteMode) => {
-  switch (mode) {
-    case 'readOnly':
-      return 'Read only'
-    case 'artifactsOnly':
-      return 'Artifacts only'
-    case 'safeWrites':
-      return 'Safe writes'
-  }
-}
-
-const sleep = (ms: number) => new Promise(resolve => globalThis.setTimeout(resolve, ms))
-
-const getAgentErrorMessage = (data: Record<string, unknown> | null | undefined, fallback: string) => {
-  const error = typeof data?.error === 'string' ? data.error : fallback
-  const detail = typeof data?.details === 'string' ? data.details : typeof data?.detail === 'string' ? data.detail : ''
-  return `${error}${detail ? ` ${detail}` : ''}`.trim()
-}
-
-const readSourceSnapshot = (): DashboardSourceSnapshot | null => {
+const readSnapshot = (): SourceSnapshot | null => {
   try {
-    const raw = window.localStorage.getItem(DASHBOARD_SOURCE_CACHE_KEY)
+    const raw = window.localStorage.getItem(CACHE_KEY)
     if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<DashboardSourceSnapshot>
+    const parsed = JSON.parse(raw) as Partial<SourceSnapshot>
     if (!Array.isArray(parsed.sources)) return null
     return {
       sources: parsed.sources,
       activeMode: parsed.activeMode || 'all',
       activeSourceIds: Array.isArray(parsed.activeSourceIds) ? parsed.activeSourceIds : [],
-      writeMode: parsed.writeMode || 'safeWrites',
-      savedAt: parsed.savedAt || new Date(0).toISOString()
+      savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : new Date(0).toISOString()
     }
   } catch {
     return null
   }
 }
 
-const saveSourceSnapshot = (snapshot: DashboardSourceSnapshot) => {
+const saveSnapshot = (snapshot: SourceSnapshot) => {
   try {
-    window.localStorage.setItem(DASHBOARD_SOURCE_CACHE_KEY, JSON.stringify(snapshot))
+    window.localStorage.setItem(CACHE_KEY, JSON.stringify(snapshot))
   } catch {
-    // Local storage is a convenience cache only. Ignore quota/private-mode failures.
+    // Cache is best-effort only.
   }
 }
 
-const readLocalPlan = (): DashboardLocalPlan | null => {
-  try {
-    const raw = window.localStorage.getItem(DASHBOARD_LOCAL_PLAN_CACHE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<DashboardLocalPlan>
-    if (!parsed.id || !parsed.title || !Array.isArray(parsed.tasks)) return null
-    return {
-      id: parsed.id,
-      title: parsed.title,
-      summary: parsed.summary || 'Local dashboard plan',
-      sourceId: parsed.sourceId || null,
-      createdAt: parsed.createdAt || new Date().toISOString(),
-      updatedAt: parsed.updatedAt || new Date().toISOString(),
-      tasks: parsed.tasks.map((task, index) => ({
-        id: task.id || `task-${index + 1}`,
-        title: task.title || `Task ${index + 1}`,
-        detail: task.detail || 'Review and complete this local task.',
-        status: task.status || 'pending'
-      }))
-    }
-  } catch {
-    return null
+const fetchJson = async (url: string, init?: RequestInit) => {
+  const response = await fetch(url, { cache: 'no-store', ...init })
+  const data = await response.json().catch(() => ({})) as Record<string, unknown>
+  if (!response.ok) {
+    const message = typeof data.userMessage === 'string'
+      ? data.userMessage
+      : typeof data.message === 'string'
+        ? data.message
+        : typeof data.error === 'string'
+          ? data.error
+          : `Request failed: ${response.status}`
+    throw new Error(message)
   }
+  return data
 }
 
-const saveLocalPlan = (plan: DashboardLocalPlan | null) => {
-  try {
-    if (!plan) {
-      window.localStorage.removeItem(DASHBOARD_LOCAL_PLAN_CACHE_KEY)
-      return
-    }
-    window.localStorage.setItem(DASHBOARD_LOCAL_PLAN_CACHE_KEY, JSON.stringify(plan))
-  } catch {
-    // Local plan persistence is convenience-only. Ignore storage failures.
-  }
+const statusTone = (source: KnowledgeSource): StatusTone => {
+  if (!source.enabled) return 'neutral'
+  if (source.indexStatus === 'failed') return 'bad'
+  if (source.indexStatus === 'indexing') return 'warn'
+  if (source.indexStatus === 'ready') return 'good'
+  return 'neutral'
 }
 
-const normalizeImportedPlan = (value: unknown): DashboardLocalPlan | null => {
-  if (!value || typeof value !== 'object') return null
-  const candidate = value as Partial<DashboardLocalPlan>
-  if (typeof candidate.title !== 'string' || !Array.isArray(candidate.tasks)) return null
-  const now = new Date().toISOString()
-  const tasks: DashboardLocalPlan['tasks'] = candidate.tasks
-    .filter(task => task && typeof task === 'object')
-    .map((task, index) => {
-      const item = task as Partial<DashboardLocalPlan['tasks'][number]>
-      const status: DashboardPlanTaskStatus =
-        item.status === 'active' || item.status === 'done' || item.status === 'blocked' ? item.status : 'pending'
-      return {
-        id: typeof item.id === 'string' && item.id.trim() ? item.id : `imported-task-${index + 1}`,
-        title: typeof item.title === 'string' && item.title.trim() ? item.title : `Imported task ${index + 1}`,
-        detail: typeof item.detail === 'string' && item.detail.trim() ? item.detail : 'Review and complete this imported local task.',
-        status
-      }
-    })
-  if (tasks.length === 0) return null
-  return {
-    id: typeof candidate.id === 'string' && candidate.id.trim() ? candidate.id : `imported-plan-${Date.now()}`,
-    title: candidate.title.trim(),
-    summary: typeof candidate.summary === 'string' && candidate.summary.trim() ? candidate.summary : 'Imported local dashboard plan',
-    sourceId: typeof candidate.sourceId === 'string' && candidate.sourceId.trim() ? candidate.sourceId : null,
-    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : now,
-    updatedAt: now,
-    tasks
-  }
+const statusLabel = (source: KnowledgeSource) => {
+  if (!source.enabled) return 'disabled'
+  return source.indexStatus || 'unknown'
 }
 
-const createDashboardPlan = (args: {
-  sources: KnowledgeSource[]
-  selectedSource: KnowledgeSource | null
-  agentConnected: boolean
-}): DashboardLocalPlan => {
-  const now = new Date().toISOString()
-  const scope = args.selectedSource || args.sources.find(source => source.enabled && source.indexStatus === 'ready') || args.sources[0] || null
-  const scopeLabel = scope?.label || 'workspace'
-  const readyCount = args.sources.filter(source => source.enabled && source.indexStatus === 'ready').length
-  const tasks = [
-    {
-      id: 'review-context',
-      title: `Review ${scopeLabel} context`,
-      detail: scope ? `Inspect ${scope.path} and confirm the next implementation target.` : 'Add or select a local source before implementation work.',
-      status: 'active' as const
-    },
-    {
-      id: 'draft-implementation',
-      title: 'Draft the next scoped implementation step',
-      detail: 'Use the current source state and recent activity to define one narrow BuildFlow Local task.',
-      status: 'pending' as const
-    },
-    {
-      id: 'prepare-handoff',
-      title: 'Prepare execution handoff',
-      detail: 'Copy the dynamic Codex or Claude prompt from the Handoff view with the current plan context.',
-      status: 'pending' as const
-    },
-    {
-      id: 'validate-result',
-      title: 'Validate and record outcome',
-      detail: 'Run type-checks, public-scope audit, and relevant dashboard/source validation before committing.',
-      status: 'pending' as const
-    }
-  ]
-
-  return {
-    id: `local-plan-${Date.now()}`,
-    title: scope ? `BuildFlow Local plan · ${scope.label}` : 'BuildFlow Local workspace plan',
-    summary: `${readyCount} ready sources · ${args.agentConnected ? 'agent connected' : 'agent offline'} · local-only workflow`,
-    sourceId: scope?.id || null,
-    createdAt: now,
-    updatedAt: now,
-    tasks
-  }
-}
-
-const buildActivityEntries = (args: {
-  loading: boolean
-  error: string | null
-  mutationError: string | null
-  mutationNotice: string | null
-  sources: KnowledgeSource[]
-  agentConnected: boolean
-  activeMode: ActiveSourcesMode
-  writeMode: WriteMode
-}): DashboardActivityEvent[] => {
-  const readyCount = args.sources.filter(source => source.enabled && source.indexStatus === 'ready').length
-  const indexingCount = args.sources.filter(source => source.enabled && source.indexStatus === 'indexing').length
-  const failedCount = args.sources.filter(source => source.enabled && source.indexStatus === 'failed').length
-  const now = new Date().toISOString()
-  const entries: DashboardActivityEvent[] = []
-  const makeEvent = (type: string, title: string, detail: string, tone: DashboardActivityEvent['tone']) => ({
-    id: `${type}-${detail}-${now}`,
-    type,
-    title,
-    detail,
-    timestamp: now,
-    tone
-  })
-
-  if (args.loading) {
-    entries.push(makeEvent('refresh-start', 'Loading workspace', 'BuildFlow is fetching the latest source, context, and write-mode state.', 'neutral'))
-  } else if (args.agentConnected) {
-    entries.push(makeEvent('agent-connected', 'Agent connected', 'The local agent is available and the dashboard can refresh source state.', 'good'))
-  } else {
-    entries.push(makeEvent('agent-unavailable', 'Agent unavailable', 'BuildFlow could not reach the local agent right now.', 'warn'))
-  }
-
-  const sourceSummary =
-    indexingCount > 0
-      ? 'Some sources are still indexing.'
-      : failedCount > 0
-        ? 'Some sources need attention.'
-        : readyCount > 0
-          ? 'Sources are ready.'
-          : 'No sources are connected yet.'
-  entries.push(makeEvent('source-summary', 'Source summary', sourceSummary, readyCount > 0 ? 'good' : indexingCount > 0 ? 'warn' : 'neutral'))
-  entries.push(makeEvent('context-mode', 'Context mode', `Active context is set to ${args.activeMode}.`, 'neutral'))
-  entries.push(makeEvent('write-mode', 'Write mode', `Current write mode: ${args.writeMode}.`, 'neutral'))
-
-  if (args.mutationNotice) {
-    entries.unshift(makeEvent('notice', 'Dashboard notice', args.mutationNotice, 'good'))
-  }
-
-  if (args.mutationError) {
-    entries.unshift(makeEvent('mutation-error', 'Source action error', args.mutationError, 'bad'))
-  }
-
-  if (args.error) {
-    entries.unshift(makeEvent('refresh-failed', 'Source refresh issue', args.error, 'warn'))
-  }
-
-  return entries.slice(0, 8)
-}
-
-const fetchJsonWithRetry = async (url: string, attempts = 3): Promise<{ response: Response; data: Record<string, unknown> }> => {
-  let lastError: unknown
-
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      const response = await fetch(url, { cache: 'no-store' })
-      const data = await response.json().catch(() => ({})) as Record<string, unknown>
-      if ([502, 503, 504].includes(response.status) && attempt < attempts) {
-        await sleep(350 * attempt)
-        continue
-      }
-      return { response, data }
-    } catch (err) {
-      lastError = err
-      if (attempt < attempts) {
-        await sleep(350 * attempt)
-      }
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError))
-}
-
-const getMutationErrorMessage = (data: any, err: unknown, fallback: string) => {
-  const fromData = typeof data?.userMessage === 'string'
-    ? data.userMessage
-    : typeof data?.message === 'string'
-      ? data.message
-      : typeof data?.error === 'string'
-        ? data.error
-        : ''
-  if (fromData) return fromData
-  if (err instanceof Error && err.message) return err.message
-  if (typeof err === 'string' && err) return err
-  return fallback
-}
+const countLabel = (count: number, label: string) => `${count} ${label}${count === 1 ? '' : 's'}`
 
 export default function Dashboard() {
   const [sources, setSources] = useState<KnowledgeSource[]>([])
+  const [activeMode, setActiveMode] = useState<ActiveSourcesMode>('all')
+  const [activeSourceIds, setActiveSourceIds] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark')
   const [agentConnected, setAgentConnected] = useState(false)
+  const [busySourceId, setBusySourceId] = useState<string | null>(null)
+  const [showAddSource, setShowAddSource] = useState(false)
   const [sourcePath, setSourcePath] = useState('')
   const [sourceLabel, setSourceLabel] = useState('')
   const [sourceId, setSourceId] = useState('')
-  const [discoveryRootPath, setDiscoveryRootPath] = useState('')
-  const [discoveryIntervalMinutes, setDiscoveryIntervalMinutes] = useState(30)
-  const [discoveredRepos, setDiscoveredRepos] = useState<DiscoveredRepository[]>([])
-  const [selectedDiscoveredRepoPath, setSelectedDiscoveredRepoPath] = useState('')
-  const [discoveryLoading, setDiscoveryLoading] = useState(false)
-  const [discoveryError, setDiscoveryError] = useState<string | null>(null)
-  const [mutationLoading, setMutationLoading] = useState(false)
-  const [mutationError, setMutationError] = useState<string | null>(null)
-  const [mutationNotice, setMutationNotice] = useState<string | null>(null)
-  const [loadErrorDetail, setLoadErrorDetail] = useState<string | null>(null)
-  const [activeMode, setActiveMode] = useState<ActiveSourcesMode>('all')
-  const [activeSourceIds, setActiveSourceIds] = useState<string[]>([])
-  const [writeMode, setWriteMode] = useState<WriteMode>('safeWrites')
-  const [handoffCopyStatus, setHandoffCopyStatus] = useState<'idle' | 'codex-copied' | 'claude-copied' | 'error'>('idle')
-  const [activeDashboardSection, setActiveDashboardSection] = useState<DashboardSection>('overview')
-  const [showAddSourceForm, setShowAddSourceForm] = useState(false)
-  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
-  const [activityEvents, setActivityEvents] = useState<DashboardActivityEvent[]>([])
-  const [localPlan, setLocalPlan] = useState<DashboardLocalPlan | null>(null)
-  const [localPlanImportError, setLocalPlanImportError] = useState<string | null>(null)
-  const [setupCopyStatus, setSetupCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
+  const [notice, setNotice] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [activity, setActivity] = useState<ActivityLine[]>([])
+  const hydratedRef = useRef(false)
 
-  const addSourceFormRef = useRef<HTMLFormElement>(null)
-  const snapshotRef = useRef<DashboardSourceSnapshot | null>(null)
-  const themeInitializedRef = useRef(false)
-  const snapshotHydratedRef = useRef(false)
-  const activityEventSeqRef = useRef(0)
-  const currentSectionLabel = SECTION_LABELS[activeDashboardSection]
-  const openApiUrl = typeof window === 'undefined' ? '/api/openapi' : `${window.location.origin}/api/openapi`
+  const readyCount = useMemo(() => sources.filter(source => source.enabled && source.indexStatus === 'ready').length, [sources])
+  const indexingCount = useMemo(() => sources.filter(source => source.enabled && source.indexStatus === 'indexing').length, [sources])
+  const activeSources = useMemo(() => sources.filter(source => activeSourceIds.includes(source.id)), [sources, activeSourceIds])
+  const enabledSources = useMemo(() => sources.filter(source => source.enabled), [sources])
 
-  const copySetupOpenApiUrl = async () => {
+  const pushActivity = (label: string, detail: string, tone: StatusTone = 'neutral') => {
+    setActivity(current => [{ id: `${Date.now()}-${label}`, label, detail, tone }, ...current].slice(0, 3))
+  }
+
+  const refreshSources = async (silent = false) => {
     try {
-      await navigator.clipboard.writeText(openApiUrl)
-      setSetupCopyStatus('copied')
-      recordActivity('setup-openapi-copied', 'OpenAPI URL copied', openApiUrl, 'good')
-      setTimeout(() => setSetupCopyStatus('idle'), 2000)
-    } catch {
-      setSetupCopyStatus('error')
-      recordActivity('setup-openapi-copy-failed', 'OpenAPI copy failed', 'Could not copy the OpenAPI URL from the dashboard.', 'bad')
-      setTimeout(() => setSetupCopyStatus('idle'), 2000)
-    }
-  }
-
-  const copyToClipboard = async (
-    text: string,
-    status: 'codex-copied' | 'claude-copied',
-    activityType: 'handoff-codex-copied' | 'handoff-claude-copied',
-    title: string
-  ) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setHandoffCopyStatus(status)
-      recordActivity(activityType, title, `${currentSectionLabel} prompt copied to clipboard.`, 'good')
-      setTimeout(() => setHandoffCopyStatus('idle'), 2000)
-    } catch {
-      setHandoffCopyStatus('error')
-      setTimeout(() => setHandoffCopyStatus('idle'), 2000)
-    }
-  }
-
-  const pushActivityEvent = (event: Omit<DashboardActivityEvent, 'id' | 'timestamp'> & { timestamp?: string }) => {
-    activityEventSeqRef.current += 1
-    const nextEvent: DashboardActivityEvent = {
-      id: `${event.type}-${activityEventSeqRef.current}`,
-      timestamp: event.timestamp || new Date().toISOString(),
-      ...event
-    }
-    setActivityEvents(current => [nextEvent, ...current].slice(0, 40))
-  }
-
-  const recordActivity = (type: string, title: string, detail: string, tone: DashboardActivityEvent['tone'] = 'neutral') => {
-    pushActivityEvent({ type, title, detail, tone })
-  }
-
-  const activityFeedEntries = activityEvents.length > 0
-    ? activityEvents
-    : buildActivityEntries({
-        loading,
-        error,
-        mutationError,
-        mutationNotice,
-        sources,
-        agentConnected,
-        activeMode,
-        writeMode
-      })
-  const activeSourceCount = activeSourceIds.length
-  const readySourceCount = sources.filter(source => source.enabled && source.indexStatus === 'ready').length
-  const selectedSource = selectedSourceId ? sources.find(source => source.id === selectedSourceId) ?? null : null
-  const codexPrompt = buildCodexHandoffPrompt({
-    sources,
-    selectedSource,
-    activeMode,
-    activeSourceIds,
-    writeMode,
-    agentConnected,
-    activityFeedEntries,
-    localPlan,
-    currentSection: currentSectionLabel
-  })
-  const claudeCodePrompt = buildClaudeHandoffPrompt({
-    sources,
-    selectedSource,
-    activeMode,
-    activeSourceIds,
-    writeMode,
-    agentConnected,
-    activityFeedEntries,
-    localPlan,
-    currentSection: currentSectionLabel
-  })
-  const handoffSelectedSourceLabel = selectedSource ? `${selectedSource.label} · ${selectedSource.id}` : null
-  const handoffSourceSummary = `${sources.length} sources · ${readySourceCount} ready · ${activeSourceCount} active`
-
-  const handleCreateLocalPlan = () => {
-    const nextPlan = createDashboardPlan({ sources, selectedSource, agentConnected })
-    setLocalPlan(nextPlan)
-    recordActivity('local-plan-created', 'Local plan created', `${nextPlan.title} · ${nextPlan.tasks.length} tasks`, 'good')
-  }
-
-  const handleUpdatePlanTaskStatus = (taskId: string, status: DashboardPlanTaskStatus) => {
-    const task = localPlan?.tasks.find(item => item.id === taskId)
-    setLocalPlan(current => {
-      if (!current) return current
-      return {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        tasks: current.tasks.map(item => item.id === taskId ? { ...item, status } : item)
-      }
-    })
-    if (task) {
-      recordActivity('local-plan-task-updated', 'Plan task updated', `${task.title} · ${status}`, status === 'done' ? 'good' : status === 'blocked' ? 'warn' : 'neutral')
-    }
-  }
-
-  const handleClearLocalPlan = () => {
-    setLocalPlanImportError(null)
-    setLocalPlan(null)
-    recordActivity('local-plan-cleared', 'Local plan cleared', 'The in-browser dashboard plan was cleared.', 'warn')
-  }
-
-  const handleExportLocalPlan = () => {
-    if (!localPlan) {
-      setLocalPlanImportError('Create or import a plan before exporting.')
-      return
-    }
-    setLocalPlanImportError(null)
-    const blob = new Blob([JSON.stringify(localPlan, null, 2)], { type: 'application/json' })
-    const url = window.URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${localPlan.id || 'buildflow-local-plan'}.json`
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    window.URL.revokeObjectURL(url)
-    recordActivity('local-plan-exported', 'Local plan exported', `${localPlan.title} was downloaded as JSON.`, 'good')
-  }
-
-  const handleImportLocalPlan = async (file: File) => {
-    try {
-      const text = await file.text()
-      const parsed = JSON.parse(text)
-      const nextPlan = normalizeImportedPlan(parsed)
-      if (!nextPlan) {
-        throw new Error('This file is not a valid BuildFlow Local plan JSON file.')
-      }
-      setLocalPlanImportError(null)
-      setLocalPlan(nextPlan)
-      recordActivity('local-plan-imported', 'Local plan imported', `${nextPlan.title} · ${nextPlan.tasks.length} tasks`, 'good')
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Could not import this local plan.'
-      setLocalPlanImportError(message)
-      recordActivity('local-plan-import-failed', 'Local plan import failed', message, 'bad')
-    }
-  }
-
-  const handleOpenHandoff = () => {
-    setActiveDashboardSection('handoff')
-    recordActivity('handoff-opened', 'Handoff opened', 'Dynamic handoff prompts are ready for the current workspace.', 'neutral')
-  }
-
-  const fetchSources = async (options: FetchSourcesOptions = {}) => {
-    const snapshot = snapshotRef.current
-    const blocking = options.blocking ?? (!snapshot && sources.length === 0)
-    let fetchedSources: KnowledgeSource[] = snapshot?.sources ?? sources
-    let fetchedActiveMode: ActiveSourcesMode = snapshot?.activeMode ?? activeMode
-    let fetchedActiveIds: string[] = snapshot?.activeSourceIds ?? activeSourceIds
-    let fetchedWriteMode: WriteMode = snapshot?.writeMode ?? writeMode
-    try {
+      if (!silent) setLoading(true)
       setError(null)
-      setLoadErrorDetail(null)
-      const { response, data } = await fetchJsonWithRetry('/api/agent/sources')
-      if (!response.ok) {
-        throw new Error(getAgentErrorMessage(data, `Failed to fetch sources: ${response.status}`))
-      }
-
-      fetchedSources = Array.isArray(data.sources) ? data.sources as KnowledgeSource[] : []
-      setSources(fetchedSources)
-      setAgentConnected(true)
-      const { response: activeResponse, data: activeData } = await fetchJsonWithRetry('/api/agent/active-sources')
-      if (!activeResponse.ok) {
-        setMutationNotice(getAgentErrorMessage(activeData, `Active source state was not refreshed: ${activeResponse.status}`))
-      } else {
-        fetchedActiveMode = (activeData.mode as ActiveSourcesMode) || 'all'
-        fetchedActiveIds = Array.isArray(activeData.activeSourceIds) ? activeData.activeSourceIds as string[] : []
-        setActiveMode(fetchedActiveMode)
-        setActiveSourceIds(fetchedActiveIds)
-      }
-      const { response: writeResponse, data: writeData } = await fetchJsonWithRetry('/api/agent/write-mode')
-      if (!writeResponse.ok) {
-        setMutationNotice(getAgentErrorMessage(writeData, `Write mode was not refreshed: ${writeResponse.status}`))
-      } else {
-        fetchedWriteMode = (writeData.writeMode as WriteMode) || 'safeWrites'
-        setWriteMode(fetchedWriteMode)
-      }
-      const nextSnapshot: DashboardSourceSnapshot = {
-        sources: fetchedSources,
-        activeMode: fetchedActiveMode,
-        activeSourceIds: fetchedActiveIds,
-        writeMode: fetchedWriteMode,
+      const [sourcesData, activeData] = await Promise.all([
+        fetchJson('/api/agent/sources'),
+        fetchJson('/api/agent/active-sources')
+      ])
+      const nextSources = Array.isArray(sourcesData.sources) ? sourcesData.sources as KnowledgeSource[] : []
+      const nextActiveIds = Array.isArray(activeData.activeSourceIds) ? activeData.activeSourceIds as string[] : []
+      const nextMode = (activeData.mode as ActiveSourcesMode) || (nextActiveIds.length > 1 ? 'multi' : 'single')
+      const snapshot = {
+        sources: nextSources,
+        activeMode: nextMode,
+        activeSourceIds: nextActiveIds,
         savedAt: new Date().toISOString()
       }
-      snapshotRef.current = nextSnapshot
-      saveSourceSnapshot(nextSnapshot)
+      setSources(nextSources)
+      setActiveMode(nextMode)
+      setActiveSourceIds(nextActiveIds)
       setAgentConnected(true)
-      recordActivity(
-        'refresh-completed',
-        'Refresh completed',
-        `${fetchedSources.length} sources synced, ${fetchedActiveIds.length} active, write mode ${fetchedWriteMode}.`,
-        'good'
-      )
-      return true
+      setNotice(null)
+      saveSnapshot(snapshot)
+      if (!silent) pushActivity('Synced', `${countLabel(nextSources.length, 'source')} · ${countLabel(nextActiveIds.length, 'active connection')}`, 'good')
+      return nextSources
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      setLoadErrorDetail(message)
-      if (blocking && !snapshotRef.current) {
-        setError('Unable to load sources')
-      } else {
-        setError(null)
-        setMutationNotice(
-          `BuildFlow agent was briefly unavailable while refreshing source state. Retry refresh if this does not update. ${message}`
-        )
-      }
-      recordActivity('refresh-failed', 'Refresh failed', message, 'warn')
-      if (fetchedSources.length > 0) {
-        setSources(fetchedSources)
-      }
-      setActiveMode(fetchedActiveMode)
-      setActiveSourceIds(fetchedActiveIds)
-      setWriteMode(fetchedWriteMode)
       setAgentConnected(false)
-      return false
+      setError(message)
+      if (!silent) pushActivity('Refresh failed', message, 'warn')
+      return sources
     } finally {
       setLoading(false)
     }
   }
 
-  const fetchRepositoryDiscovery = async (settings?: { rootPath?: string; intervalMinutes?: number }) => {
-    setDiscoveryLoading(true)
-    setDiscoveryError(null)
-    try {
-      const response = await fetch('/api/agent/sources/discovery', {
-        cache: 'no-store',
-        method: settings ? 'POST' : 'GET',
-        headers: settings ? { 'Content-Type': 'application/json' } : undefined,
-        body: settings ? JSON.stringify(settings) : undefined
-      })
-      const data = await response.json().catch(() => ({})) as Record<string, unknown>
-      if (!response.ok) throw new Error(getMutationErrorMessage(data, null, `Repository discovery failed: ${response.status}`))
-      const discoverySettings = data.settings as { rootPath?: string; intervalMinutes?: number; lastScannedAt?: string } | undefined
-      const repositories = Array.isArray(data.repositories) ? data.repositories as DiscoveredRepository[] : []
-      setDiscoveryRootPath(discoverySettings?.rootPath || settings?.rootPath || '')
-      setDiscoveryIntervalMinutes(discoverySettings?.intervalMinutes || settings?.intervalMinutes || 30)
-      setDiscoveredRepos(repositories)
-      setSelectedDiscoveredRepoPath(current => current && repositories.some(repo => repo.path === current && !repo.alreadyAdded) ? current : repositories.find(repo => !repo.alreadyAdded)?.path || '')
-      recordActivity('repository-discovery-scanned', 'Repository discovery updated', `${repositories.length} repositories found.`, 'good')
-      return true
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      setDiscoveryError(message)
-      recordActivity('repository-discovery-failed', 'Repository discovery failed', message, 'warn')
-      return false
-    } finally {
-      setDiscoveryLoading(false)
-    }
-  }
-
-  const handleSelectSource = (sourceId: string) => {
-    if (selectedSourceId === sourceId) return
-    setSelectedSourceId(sourceId)
-    const source = sources.find(item => item.id === sourceId)
-    recordActivity('source-selected', 'Source selected', source ? `${source.label} · ${source.path}` : sourceId, 'neutral')
-  }
-
-  const handleToggleActiveSource = async (sourceId: string) => {
-    const source = sources.find(item => item.id === sourceId)
-    const isDeactivating = activeSourceIds.includes(sourceId)
-    const next = activeSourceIds.includes(sourceId)
-      ? activeSourceIds.filter(id => id !== sourceId)
-      : [...activeSourceIds, sourceId]
-    const success = await mutateSources('/api/agent/active-sources', { mode: next.length > 1 ? 'multi' : 'single', activeSourceIds: next })
-    if (success) {
-      recordActivity(
-        isDeactivating ? 'source-deactivated' : 'source-activated',
-        isDeactivating ? 'Source deactivated' : 'Source activated',
-        source ? `${source.label} · ${next.length > 0 ? 'context updated' : 'no active sources'}` : `Source ${sourceId} updated`,
-        'good'
-      )
-    }
-  }
-
   useEffect(() => {
-    if (snapshotHydratedRef.current) return
-    snapshotHydratedRef.current = true
-
-    const snapshot = readSourceSnapshot()
-    snapshotRef.current = snapshot
+    if (hydratedRef.current) return
+    hydratedRef.current = true
+    const snapshot = readSnapshot()
     if (snapshot) {
       setSources(snapshot.sources)
       setActiveMode(snapshot.activeMode)
       setActiveSourceIds(snapshot.activeSourceIds)
-      setWriteMode(snapshot.writeMode)
       setAgentConnected(true)
-      setError(null)
-      setLoadErrorDetail(null)
       setLoading(false)
     }
-
-    void fetchSources({ blocking: !snapshot })
+    void refreshSources(Boolean(snapshot))
   }, [])
 
-  useEffect(() => {
-    if (!selectedSourceId) return
-    if (sources.some(source => source.id === selectedSourceId)) return
-    setSelectedSourceId(sources[0]?.id ?? null)
-  }, [sources, selectedSourceId])
-
-  useEffect(() => {
-    setLocalPlan(readLocalPlan())
-  }, [])
-
-  useEffect(() => {
-    void fetchRepositoryDiscovery()
-  }, [])
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void fetchRepositoryDiscovery()
-    }, Math.max(10, Math.min(60, discoveryIntervalMinutes)) * 60_000)
-    return () => window.clearInterval(timer)
-  }, [discoveryIntervalMinutes])
-
-  useEffect(() => {
-    saveLocalPlan(localPlan)
-  }, [localPlan])
-
-  useEffect(() => {
-    const storedTheme = window.localStorage.getItem('buildflow-dashboard-theme')
-    const preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-    setTheme(storedTheme === 'light' || storedTheme === 'dark' ? storedTheme : preferredTheme)
-    themeInitializedRef.current = true
-  }, [])
-
-  useEffect(() => {
-    if (!themeInitializedRef.current) return
-    window.localStorage.setItem('buildflow-dashboard-theme', theme)
-  }, [theme])
-
-  const handleToggleTheme = () => {
-    setTheme(current => (current === 'dark' ? 'light' : 'dark'))
-  }
-
-  const mutateSources = async (url: string, payload: Record<string, unknown>) => {
-    setMutationLoading(true)
-    setMutationError(null)
-    setMutationNotice(null)
-
+  const mutate = async (label: string, source: KnowledgeSource | null, url: string, payload: Record<string, unknown>, successDetail: string) => {
     try {
-      const response = await fetch(url, {
-        cache: 'no-store',
+      setBusySourceId(source?.id || 'new-source')
+      setError(null)
+      setNotice(null)
+      await fetchJson(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       })
-
-      const data = await response.json().catch(() => null)
-
-      if (!response.ok) {
-        throw new Error(getMutationErrorMessage(data, null, `Request failed: ${response.status}`))
-      }
-
-      const refreshed = await fetchSources({ blocking: false })
-      if (refreshed) {
-        setMutationNotice('Source changes were applied and the dashboard refreshed.')
-      }
+      setNotice(successDetail)
+      pushActivity(label, successDetail, 'good')
+      await refreshSources(true)
       return true
     } catch (err) {
-      setMutationError(getMutationErrorMessage(null, err, 'Source action failed'))
-      if (url === '/api/agent/sources/toggle' || url === '/api/agent/sources/reindex' || url === '/api/agent/sources/auto-index' || url === '/api/agent/sources/add' || url === '/api/agent/sources/remove' || url === '/api/agent/active-sources' || url === '/api/agent/write-mode') {
-        void fetchSources({ blocking: false }).catch(() => {})
-      }
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      pushActivity(`${label} failed`, message, 'bad')
       return false
     } finally {
-      setMutationLoading(false)
+      setBusySourceId(null)
     }
   }
 
-  const waitForTerminalIndexStatus = async (sourceId: string, timeoutMs = 300000) => {
+  const toggleActive = async (source: KnowledgeSource) => {
+    const next = activeSourceIds.includes(source.id)
+      ? activeSourceIds.filter(id => id !== source.id)
+      : [...activeSourceIds, source.id]
+    const mode: ActiveSourcesMode = next.length > 1 ? 'multi' : 'single'
+    await mutate(
+      next.includes(source.id) ? 'Activated' : 'Deactivated',
+      source,
+      '/api/agent/active-sources',
+      { mode, activeSourceIds: next },
+      `${source.label} ${next.includes(source.id) ? 'connected to this conversation' : 'disconnected'}.`
+    )
+  }
+
+  const toggleEnabled = async (source: KnowledgeSource) => {
+    await mutate(
+      source.enabled ? 'Disabled' : 'Enabled',
+      source,
+      '/api/agent/sources/toggle',
+      { sourceId: source.id, enabled: !source.enabled },
+      `${source.label} ${source.enabled ? 'disabled' : 'enabled'}.`
+    )
+  }
+
+  const reindexSource = async (source: KnowledgeSource) => {
+    const started = await mutate('Re-index started', source, '/api/agent/sources/reindex', { sourceId: source.id }, `${source.label} is re-indexing.`)
+    if (!started) return
     const startedAt = Date.now()
-
-    while (Date.now() - startedAt < timeoutMs) {
-      let response: Response
-      let data: Record<string, unknown>
-      try {
-        ({ response, data } = await fetchJsonWithRetry('/api/agent/sources'))
-      } catch (err) {
-        const remaining = timeoutMs - (Date.now() - startedAt)
-        if (remaining <= 0) break
-        setMutationNotice('Indexing is still running. Refresh source state in a moment.')
-        await sleep(Math.min(1500, remaining))
-        continue
+    while (Date.now() - startedAt < 60_000) {
+      await new Promise(resolve => window.setTimeout(resolve, 1500))
+      const nextSources = await refreshSources(true)
+      const current = nextSources.find(item => item.id === source.id)
+      if (current && terminalStatuses.has(current.indexStatus || 'unknown')) {
+        pushActivity('Re-index complete', `${current.label} · ${current.indexStatus}`, current.indexStatus === 'failed' ? 'bad' : 'good')
+        return
       }
-
-      if (!response.ok) {
-        if ([502, 503, 504].includes(response.status)) {
-          const remaining = timeoutMs - (Date.now() - startedAt)
-          if (remaining <= 0) break
-          setMutationNotice('Indexing is still running. Refresh source state in a moment.')
-          await sleep(Math.min(1500, remaining))
-          continue
-        }
-        throw new Error(getMutationErrorMessage(data, null, `Failed to refresh sources: ${response.status}`))
-      }
-
-      const nextSources = Array.isArray(data.sources) ? (data.sources as KnowledgeSource[]) : []
-      setSources(nextSources)
-
-      const current = nextSources.find(source => source.id === sourceId)
-      if (!current) {
-        throw new Error(`Source not found after reindex: ${sourceId}`)
-      }
-
-      if (TERMINAL_INDEX_STATUSES.has(current.indexStatus || 'unknown')) {
-        if (typeof data.activeMode === 'string') {
-          setActiveMode(data.activeMode as ActiveSourcesMode)
-        }
-        if (Array.isArray(data.activeSourceIds)) {
-          setActiveSourceIds(data.activeSourceIds)
-        }
-        return current
-      }
-
-      setMutationNotice(`Reindexing ${current.label || sourceId}... (${current.indexStatus || 'unknown'})`)
-      await sleep(1500)
     }
-
-    throw new Error(`Indexing is still running. Refresh source state in a moment.`)
+    setNotice(`${source.label} is still indexing. The dashboard will show the new state on refresh.`)
   }
 
-  const handleReindexSource = async (source: KnowledgeSource) => {
-    setMutationError(null)
-    setMutationNotice(null)
-
-    const success = await mutateSources('/api/agent/sources/reindex', { sourceId: source.id })
-    if (!success) return
-
-    try {
-      await waitForTerminalIndexStatus(source.id)
-      setMutationNotice(`Reindex complete for ${source.label}`)
-      recordActivity('source-reindexed', 'Source reindexed', `${source.label} · ${source.indexedFileCount ?? 0} files`, 'good')
-    } catch (err) {
-      setMutationError(null)
-      setMutationNotice(String(err))
-      recordActivity('source-reindex-failed', 'Source reindex failed', `${source.label} · ${String(err)}`, 'bad')
-    }
+  const removeSource = async (source: KnowledgeSource) => {
+    const confirmed = window.confirm(`Remove ${source.label} from BuildFlow?`)
+    if (!confirmed) return
+    await mutate('Removed', source, '/api/agent/sources/remove', { sourceId: source.id }, `${source.label} removed.`)
   }
 
-  const handleToggleEnabled = async (source: KnowledgeSource, nextEnabled: boolean) => {
-    const success = await mutateSources('/api/agent/sources/toggle', { sourceId: source.id, enabled: nextEnabled })
-    if (success) {
-      recordActivity(
-        nextEnabled ? 'source-enabled' : 'source-disabled',
-        nextEnabled ? 'Source enabled' : 'Source disabled',
-        `${source.label} · ${source.path}`,
-        nextEnabled ? 'good' : 'warn'
-      )
-    }
-  }
-
-  const handleSetAutoIndex = async (source: KnowledgeSource, settings: { enabled?: boolean; intervalMinutes?: number }) => {
-    const success = await mutateSources('/api/agent/sources/auto-index', {
-      sourceId: source.id,
-      autoIndexEnabled: settings.enabled,
-      autoIndexIntervalMinutes: settings.intervalMinutes
-    })
-    if (success) {
-      const detail = settings.intervalMinutes
-        ? `${source.label} will auto-index every ${settings.intervalMinutes} minutes.`
-        : `${source.label} auto-index ${settings.enabled === false ? 'disabled' : 'enabled'}.`
-      recordActivity('source-auto-index-updated', 'Auto-index updated', detail, settings.enabled === false ? 'warn' : 'good')
-    }
-  }
-
-  const handleRemoveSource = async (source: KnowledgeSource) => {
-    if (!window.confirm(`Remove knowledge source "${source.label}"?`)) {
-      return
-    }
-
-    const selectedWasRemoved = selectedSourceId === source.id
-    const success = await mutateSources('/api/agent/sources/remove', { sourceId: source.id })
-    if (!success) return
-
-    const nextSelection = sources.find(item => item.id !== source.id)?.id ?? null
-    setSelectedSourceId(selectedWasRemoved ? nextSelection : selectedSourceId)
-    recordActivity('source-removed', 'Source removed', `${source.label} · ${source.path}`, 'warn')
-  }
-
-  const handleDiscoverySettingsSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const addSource = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!discoveryRootPath.trim()) {
-      setDiscoveryError('Repository root folder is required')
+    const path = sourcePath.trim()
+    if (!path) {
+      setError('Repository path is required.')
       return
     }
-    await fetchRepositoryDiscovery({ rootPath: discoveryRootPath.trim(), intervalMinutes: discoveryIntervalMinutes })
-  }
-
-  const handleDiscoveredRepoChange = (repoPath: string) => {
-    setSelectedDiscoveredRepoPath(repoPath)
-    const repo = discoveredRepos.find(item => item.path === repoPath)
-    if (!repo) return
-    setSourcePath(repo.path)
-    setSourceLabel(repo.label)
-    setSourceId(repo.id)
-  }
-
-  const handleAddSource = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const selectedRepo = discoveredRepos.find(repo => repo.path === selectedDiscoveredRepoPath)
-    const resolvedPath = selectedRepo?.path || sourcePath.trim()
-    if (!resolvedPath) {
-      setMutationError('Select a discovered repo or enter a knowledge source path')
-      return
-    }
-
-    const nextPath = resolvedPath
-    const nextLabel = (selectedRepo?.label || sourceLabel).trim()
-    const nextId = (selectedRepo?.id || sourceId).trim()
-    const success = await mutateSources('/api/agent/sources/add', {
-      path: nextPath,
-      label: nextLabel || undefined,
-      id: nextId || undefined
-    })
-
-    if (success) {
-      recordActivity('source-added', 'Source added', `${nextLabel || nextId || nextPath} · ${nextPath}`, 'good')
+    const ok = await mutate('Added', null, '/api/agent/sources/add', {
+      path,
+      label: sourceLabel.trim() || undefined,
+      id: sourceId.trim() || undefined
+    }, `${sourceLabel.trim() || sourceId.trim() || path} added.`)
+    if (ok) {
       setSourcePath('')
       setSourceLabel('')
       setSourceId('')
-      setSelectedDiscoveredRepoPath('')
-      void fetchRepositoryDiscovery()
-      setShowAddSourceForm(false)
+      setShowAddSource(false)
     }
   }
-
-  const handleSetMode = async (mode: ActiveSourcesMode) => {
-    const enabledCount = sources.filter(source => source.enabled).length
-    if ((mode === 'single' || mode === 'multi') && enabledCount === 0) {
-      setMutationError(`Cannot set ${mode} mode while no sources are enabled`)
-      return
-    }
-    const nextIds = mode === 'all' ? [] : activeSourceIds.slice(0, mode === 'single' ? 1 : Math.max(activeSourceIds.length, 1))
-    const success = await mutateSources('/api/agent/active-sources', { mode, activeSourceIds: nextIds })
-    if (success) {
-      recordActivity('active-context-changed', 'Active context updated', `Context mode set to ${mode}.`, 'neutral')
-    }
-  }
-
-  const handleWriteMode = async (nextMode: WriteMode) => {
-    const success = await mutateSources('/api/agent/write-mode', { writeMode: nextMode })
-    if (success) {
-      recordActivity('write-mode-changed', 'Write mode updated', `Write mode set to ${nextMode}.`, 'neutral')
-    }
-  }
-
-  const topBarStatusText = mutationError || mutationNotice || error
 
   return (
-    <div className={theme === 'dark' ? 'dark' : ''}>
-      <div className="h-screen overflow-hidden flex flex-col bg-bf-bg dark:bg-slate-950">
-        <DashboardTopBar
-          currentSectionLabel={currentSectionLabel}
-          agentConnected={agentConnected}
-          statusText={topBarStatusText}
-          theme={theme}
-          onToggleTheme={handleToggleTheme}
-          onRefresh={() => fetchSources({ blocking: false })}
-        />
-        <DashboardShell
-          leftRail={<DashboardRail activeSection={activeDashboardSection} sources={sources} selectedSourceId={selectedSourceId} onSelectSection={setActiveDashboardSection} onSelectSource={handleSelectSource} />}
-          mainContent={
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bf-bg dark:bg-slate-950">
-              {error && (
-                <div className="px-5 pt-4 lg:px-6">
-                  <DashboardPanel className="border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/20 dark:text-red-200">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="font-semibold">Unable to load sources</div>
-                        <p className="mt-1 text-xs text-red-700 dark:text-red-200">{error}</p>
-                        {loadErrorDetail && <p className="mt-1 text-[11px] text-red-600 dark:text-red-300"><DashboardCodeText className="break-words text-[11px] text-red-600 dark:text-red-300">{loadErrorDetail}</DashboardCodeText></p>}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <DashboardButton type="button" onClick={() => fetchSources()} disabled={mutationLoading} variant="secondary" className="border-red-200 bg-white text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:bg-slate-900 dark:text-red-200 dark:hover:bg-slate-800">
-                          Retry load
-                        </DashboardButton>
-                      </div>
-                    </div>
-                  </DashboardPanel>
+    <main className="h-screen overflow-hidden bg-slate-50 text-slate-950 dark:bg-slate-950 dark:text-slate-50">
+      <div className="mx-auto flex h-full max-w-7xl flex-col gap-4 p-4 sm:p-5">
+        <header className="flex shrink-0 flex-wrap items-start justify-between gap-3 rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/80">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">BuildFlow agent</p>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">Sources dashboard</h1>
+            <p className="mt-1 max-w-2xl text-sm text-slate-600 dark:text-slate-300">One fast view for connected repos, live conversation context, and source maintenance.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`rounded-full px-3 py-1 text-xs font-medium ring-1 ${agentConnected ? toneClass.good : toneClass.warn}`}>
+              {agentConnected ? 'Agent connected' : 'Agent unavailable'}
+            </span>
+            <button type="button" onClick={() => refreshSources(false)} disabled={loading || Boolean(busySourceId)} className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </button>
+            <button type="button" onClick={() => setShowAddSource(value => !value)} className="rounded-full bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200">
+              {showAddSource ? 'Close add' : 'Add repo'}
+            </button>
+          </div>
+        </header>
+
+        <section className="grid shrink-0 gap-3 sm:grid-cols-4">
+          <Metric label="Sources" value={sources.length} detail={`${enabledSources.length} enabled`} />
+          <Metric label="Ready" value={readyCount} detail="searchable" tone={readyCount > 0 ? 'good' : 'neutral'} />
+          <Metric label="Indexing" value={indexingCount} detail="running now" tone={indexingCount > 0 ? 'warn' : 'neutral'} />
+          <Metric label="Live connections" value={activeSourceIds.length} detail={activeMode} tone={activeSourceIds.length > 0 ? 'good' : 'neutral'} />
+        </section>
+
+        {(notice || error || showAddSource) ? (
+          <section className="shrink-0 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            {notice ? <p className="text-sm text-emerald-700 dark:text-emerald-300">{notice}</p> : null}
+            {error ? <p className="text-sm text-red-700 dark:text-red-300">{error}</p> : null}
+            {showAddSource ? (
+              <form onSubmit={addSource} className="mt-3 grid gap-2 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <input value={sourcePath} onChange={event => setSourcePath(event.target.value)} placeholder="Repo path" className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500" />
+                <input value={sourceLabel} onChange={event => setSourceLabel(event.target.value)} placeholder="Label optional" className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500" />
+                <input value={sourceId} onChange={event => setSourceId(event.target.value)} placeholder="ID optional" className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500" />
+                <button type="submit" disabled={busySourceId === 'new-source'} className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-slate-950">
+                  {busySourceId === 'new-source' ? 'Adding…' : 'Add'}
+                </button>
+              </form>
+            ) : null}
+          </section>
+        ) : null}
+
+        <section className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="min-h-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="grid grid-cols-[minmax(0,1fr)_8rem_8rem_14rem] gap-3 border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:border-slate-800 dark:text-slate-400 max-md:hidden">
+              <span>Source</span>
+              <span>Status</span>
+              <span>Connection</span>
+              <span className="text-right">Actions</span>
+            </div>
+            <div className="h-full min-h-0 overflow-y-auto pb-10 md:pb-0">
+              {loading && sources.length === 0 ? (
+                <div className="flex h-full items-center justify-center p-8 text-sm text-slate-500">Loading sources…</div>
+              ) : sources.length === 0 ? (
+                <div className="flex h-full items-center justify-center p-8 text-center">
+                  <div>
+                    <p className="font-medium">No repos connected yet.</p>
+                    <p className="mt-1 text-sm text-slate-500">Add a repo path to make it available to the BuildFlow agent.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-200 dark:divide-slate-800">
+                  {sources.map(source => {
+                    const active = activeSourceIds.includes(source.id)
+                    const busy = busySourceId === source.id
+                    return (
+                      <article key={source.id} className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1fr)_8rem_8rem_14rem] md:items-center">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${source.enabled && source.indexStatus === 'ready' ? 'bg-emerald-500' : source.indexStatus === 'failed' ? 'bg-red-500' : source.indexStatus === 'indexing' ? 'bg-amber-500' : 'bg-slate-400'}`} />
+                            <h2 className="truncate text-sm font-semibold">{source.label}</h2>
+                            <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">{source.id}</span>
+                          </div>
+                          <p className="mt-1 truncate font-mono text-xs text-slate-500 dark:text-slate-400">{source.path}</p>
+                        </div>
+                        <Badge tone={statusTone(source)}>{statusLabel(source)}</Badge>
+                        <Badge tone={active ? 'good' : 'neutral'}>{active ? 'live' : 'idle'}</Badge>
+                        <div className="flex flex-wrap justify-start gap-1.5 md:justify-end">
+                          <ActionButton disabled={busy || (!source.enabled && !active)} onClick={() => toggleActive(source)}>{active ? 'Deactivate' : 'Activate'}</ActionButton>
+                          <ActionButton disabled={busy || !source.enabled || source.indexStatus === 'indexing'} onClick={() => reindexSource(source)}>Re-index</ActionButton>
+                          <ActionButton disabled={busy} onClick={() => toggleEnabled(source)}>{source.enabled ? 'Disable' : 'Enable'}</ActionButton>
+                          <ActionButton disabled={busy} danger onClick={() => removeSource(source)}>Remove</ActionButton>
+                        </div>
+                      </article>
+                    )
+                  })}
                 </div>
               )}
-
-              <div className="min-h-0 flex-1 overflow-hidden p-3 lg:p-4">
-                {activeDashboardSection === 'overview' && (
-                  <div className="h-full min-h-0 overflow-y-auto pb-4">
-                    <div className="space-y-4">
-                      <DashboardOverview
-                        loading={loading}
-                        agentConnected={agentConnected}
-                        sources={sources}
-                        writeMode={writeMode}
-                        localPlan={localPlan}
-                        activityEntries={activityFeedEntries}
-                        onManageSources={() => setActiveDashboardSection('sources')}
-                        onOpenHandoff={() => setActiveDashboardSection('handoff')}
-                        onOpenPlan={() => setActiveDashboardSection('plan')}
-                      />
-                      <SetupChecklistPanel
-                        sources={sources}
-                        agentConnected={agentConnected}
-                        activeMode={activeMode}
-                        activeSourceIds={activeSourceIds}
-                        writeMode={writeMode}
-                        localPlan={localPlan}
-                        openApiUrl={openApiUrl}
-                        copyStatus={setupCopyStatus}
-                        onOpenSources={() => setActiveDashboardSection('sources')}
-                        onOpenSettings={() => setActiveDashboardSection('settings')}
-                        onOpenPlan={() => setActiveDashboardSection('plan')}
-                        onOpenHandoff={() => setActiveDashboardSection('handoff')}
-                        onCopyOpenApi={copySetupOpenApiUrl}
-                        variant="compact"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {activeDashboardSection === 'sources' && (
-                  <div className="h-full min-h-0 overflow-y-auto pb-4">
-                    <KnowledgeSourcesPanel
-                      sources={sources}
-                      loading={loading}
-                      mutationLoading={mutationLoading}
-                      mutationError={mutationError}
-                      mutationNotice={mutationNotice}
-                      showAddSourceForm={showAddSourceForm}
-                      sourcePath={sourcePath}
-                      discoveryRootPath={discoveryRootPath}
-                      discoveryIntervalMinutes={discoveryIntervalMinutes}
-                      discoveredRepos={discoveredRepos}
-                      selectedDiscoveredRepoPath={selectedDiscoveredRepoPath}
-                      discoveryLoading={discoveryLoading}
-                      discoveryError={discoveryError}
-                      activeSourceIds={activeSourceIds}
-                      onAddSourceSubmit={handleAddSource}
-                      onDiscoveryRootPathChange={setDiscoveryRootPath}
-                      onDiscoveryIntervalChange={setDiscoveryIntervalMinutes}
-                      onDiscoverySettingsSubmit={handleDiscoverySettingsSubmit}
-                      onRefreshDiscovery={() => fetchRepositoryDiscovery()}
-                      onDiscoveredRepoChange={handleDiscoveredRepoChange}
-                      selectedSourceId={selectedSourceId}
-                      onSelectSource={handleSelectSource}
-                      onToggleActiveSource={handleToggleActiveSource}
-                      onToggleEnabled={handleToggleEnabled}
-                      onSetAutoIndex={handleSetAutoIndex}
-                      onReindexSource={handleReindexSource}
-                      onRemoveSource={handleRemoveSource}
-                      onToggleAddSourceForm={() => setShowAddSourceForm(prev => !prev)}
-                      addSourceFormRef={addSourceFormRef}
-                    />
-                  </div>
-                )}
-
-                {activeDashboardSection === 'activity' && (
-                  <div className="h-full min-h-0 overflow-y-auto pb-4">
-                    <DashboardActivityFeed
-                      entries={activityFeedEntries}
-                      emptyMessage="BuildFlow activity will appear here."
-                    />
-                  </div>
-                )}
-
-                {activeDashboardSection === 'plan' && (
-                  <div className="h-full min-h-0 overflow-y-auto pb-4">
-                    <div className="space-y-4">
-                      <PlanPlaceholderPanel
-                        sources={sources}
-                        agentConnected={agentConnected}
-                        selectedSource={selectedSource}
-                        plan={localPlan}
-                        importError={localPlanImportError}
-                        onCreatePlan={handleCreateLocalPlan}
-                        onUpdateTaskStatus={handleUpdatePlanTaskStatus}
-                        onClearPlan={handleClearLocalPlan}
-                        onOpenHandoff={handleOpenHandoff}
-                        onExportPlan={handleExportLocalPlan}
-                        onImportPlan={handleImportLocalPlan}
-                      />
-                      <ExecutionFlowPreview />
-                    </div>
-                  </div>
-                )}
-
-                {activeDashboardSection === 'handoff' && (
-                  <div className="h-full min-h-0 overflow-y-auto pb-4">
-                    <ExecutionHandoffPanel
-                      codexPrompt={codexPrompt}
-                      claudeCodePrompt={claudeCodePrompt}
-                      handoffCopyStatus={handoffCopyStatus}
-                      currentSectionLabel={currentSectionLabel}
-                      selectedSourceLabel={handoffSelectedSourceLabel}
-                      activeModeLabel={summarizeMode(activeMode)}
-                      writeModeLabel={summarizeWriteMode(writeMode)}
-                      sourceSummaryLabel={handoffSourceSummary}
-                      onCopyCodex={() => copyToClipboard(codexPrompt, 'codex-copied', 'handoff-codex-copied', 'Codex handoff copied')}
-                      onCopyClaude={() => copyToClipboard(claudeCodePrompt, 'claude-copied', 'handoff-claude-copied', 'Claude handoff copied')}
-                    />
-                  </div>
-                )}
-
-                {activeDashboardSection === 'settings' && (
-                  <div className="h-full min-h-0 overflow-y-auto pr-1 pb-4">
-                    <div className="space-y-4">
-                      <SetupChecklistPanel
-                        sources={sources}
-                        agentConnected={agentConnected}
-                        activeMode={activeMode}
-                        activeSourceIds={activeSourceIds}
-                        writeMode={writeMode}
-                        localPlan={localPlan}
-                        openApiUrl={openApiUrl}
-                        copyStatus={setupCopyStatus}
-                        onOpenSources={() => setActiveDashboardSection('sources')}
-                        onOpenSettings={() => setActiveDashboardSection('settings')}
-                        onOpenPlan={() => setActiveDashboardSection('plan')}
-                        onOpenHandoff={() => setActiveDashboardSection('handoff')}
-                        onCopyOpenApi={copySetupOpenApiUrl}
-                      />
-                      <ActiveContextPanel activeMode={activeMode} writeMode={writeMode} activeSourceIds={activeSourceIds} onSetMode={handleSetMode} onSetWriteMode={handleWriteMode} />
-                      <InfoPanels />
-                    </div>
-                  </div>
-                )}
-                </div>
             </div>
-          }
-          rightPanel={
-            <InsightPanel
-              loading={loading}
-              error={error}
-              section={activeDashboardSection}
-              activeMode={activeMode}
-              writeMode={writeMode}
-              agentConnected={agentConnected}
-              activityEntries={activityFeedEntries}
-              localPlan={localPlan}
-              sources={sources}
-              selectedSource={selectedSource}
-              activeSourceIds={activeSourceIds}
-              onSelectSource={handleSelectSource}
-              onToggleActiveSource={handleToggleActiveSource}
-              onToggleEnabled={handleToggleEnabled}
-              onReindexSource={handleReindexSource}
-              onRemoveSource={handleRemoveSource}
-            />
-          }
-        />
+          </div>
+
+          <aside className="grid min-h-0 gap-4 lg:grid-rows-[auto_minmax(0,1fr)]">
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">Live conversation</p>
+              <h2 className="mt-2 text-lg font-semibold">Current ChatGPT chat</h2>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Connected to {activeSources.length > 0 ? countLabel(activeSources.length, 'source') : 'no sources'}.</p>
+              <div className="mt-3 space-y-2">
+                {activeSources.length > 0 ? activeSources.map(source => (
+                  <div key={source.id} className="rounded-xl bg-slate-100 px-3 py-2 text-sm dark:bg-slate-800">
+                    <div className="truncate font-medium">{source.label}</div>
+                    <div className="truncate font-mono text-xs text-slate-500 dark:text-slate-400">{source.id}</div>
+                  </div>
+                )) : <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">Activate a source to connect this conversation.</p>}
+              </div>
+            </div>
+
+            <div className="min-h-0 overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">Agent activity</p>
+              <div className="mt-3 space-y-2">
+                {activity.length > 0 ? activity.map(item => (
+                  <div key={item.id} className={`rounded-xl px-3 py-2 text-sm ring-1 ${toneClass[item.tone]}`}>
+                    <div className="font-medium">{item.label}</div>
+                    <div className="mt-0.5 text-xs opacity-80">{item.detail}</div>
+                  </div>
+                )) : <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">No dashboard actions yet.</p>}
+              </div>
+            </div>
+          </aside>
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function Metric({ label, value, detail, tone = 'neutral' }: { label: string; value: number; detail: string; tone?: StatusTone }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <p className="text-xs font-medium text-slate-500 dark:text-slate-400">{label}</p>
+      <div className="mt-1 flex items-end justify-between gap-2">
+        <strong className="text-2xl font-semibold">{value}</strong>
+        <span className={`rounded-full px-2 py-1 text-xs ring-1 ${toneClass[tone]}`}>{detail}</span>
       </div>
     </div>
+  )
+}
+
+function Badge({ children, tone }: { children: string; tone: StatusTone }) {
+  return <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${toneClass[tone]}`}>{children}</span>
+}
+
+function ActionButton({ children, disabled, danger = false, onClick }: { children: string; disabled?: boolean; danger?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${danger ? 'border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/60 dark:text-red-300 dark:hover:bg-red-950/30' : 'border-slate-300 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800'}`}
+    >
+      {children}
+    </button>
   )
 }
