@@ -63,6 +63,12 @@ const nextBatchSchema = {
   required: ['paths']
 }
 
+const diagnosticsSchema = {
+  type: 'object',
+  additionalProperties: true,
+  description: 'Compact timing and payload-size diagnostics for BuildFlow action routing, transport, relay, proxy, and local processing.'
+}
+
 const activitySchema = {
   type: 'object',
   additionalProperties: false,
@@ -124,7 +130,8 @@ const writeResultSchema = {
     targetExistsAfter: { type: 'boolean' },
     deletedFileCount: { type: 'integer' },
     deletedDirectoryCount: { type: 'integer' },
-    activity: activitySchema
+    activity: activitySchema,
+    diagnostics: diagnosticsSchema
   },
   required: ['verified', 'verifiedAt', 'bytesOnDisk', 'contentHash', 'contentPreview']
 }
@@ -151,6 +158,9 @@ const agentJobSchema = {
     confirmationReason: { type: 'string' },
     blockedReason: { type: 'string' },
     steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    roadmapPhases: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    activeTaskId: { type: 'string' },
+    completedTaskCount: { type: 'integer' },
     nextActions: { type: 'array', items: { type: 'string' } },
     summary: { type: 'string' },
     handoffPath: { type: 'string' },
@@ -179,7 +189,8 @@ const commandResultSchema = {
     confirmationToken: { type: 'string' },
     reason: { type: 'string' },
     details: { type: 'object', additionalProperties: true },
-    activity: activitySchema
+    activity: activitySchema,
+    diagnostics: diagnosticsSchema
   },
   required: ['status', 'commandKind', 'command', 'cwd', 'outputTruncated', 'durationMs']
 }
@@ -292,7 +303,8 @@ const openapi = {
                     connected: { type: 'boolean' },
                     sourceCount: { type: 'integer' },
                     sourcesAvailable: { type: 'boolean' },
-                    activity: activitySchema
+                    activity: activitySchema,
+                    diagnostics: diagnosticsSchema
                   },
                   required: ['connected', 'sourceCount', 'sourcesAvailable']
                 }
@@ -324,7 +336,8 @@ const openapi = {
                       type: 'array',
                       items: sourceItemSchema
                     },
-                    activity: activitySchema
+                    activity: activitySchema,
+                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'sources']
                 }
@@ -355,7 +368,8 @@ const openapi = {
                     contextMode: { type: 'string', enum: ['single', 'multi'] },
                     activeSourceIds: { type: 'array', items: { type: 'string' } },
                     sources: { type: 'array', items: sourceItemSchema },
-                    activity: activitySchema
+                    activity: activitySchema,
+                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'contextMode', 'activeSourceIds']
                 }
@@ -410,7 +424,8 @@ const openapi = {
                     contextMode: { type: 'string', enum: ['single', 'multi'] },
                     activeSourceIds: { type: 'array', items: { type: 'string' } },
                     sources: { type: 'array', items: sourceItemSchema },
-                    activity: activitySchema
+                    activity: activitySchema,
+                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'contextMode', 'activeSourceIds', 'sources']
                 }
@@ -547,7 +562,7 @@ const openapi = {
                   sourceId: { type: 'string', description: 'Target source id.' },
                   commandKind: {
                     type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'verify_public_scope', 'type_check_web', 'type_check_cli', 'verify_write_policy', 'verify_source_reindex_resilience', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths'],
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'verify_public_scope', 'type_check_web', 'type_check_cli', 'verify_write_policy', 'verify_source_reindex_resilience', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance', 'local_cli_github_auth_status', 'local_cli_github_repo_view'],
                     description: 'Allowlisted command to run.'
                   },
                   timeoutMs: { type: 'integer', description: 'Optional timeout in milliseconds.', minimum: 1000, maximum: 300000 },
@@ -625,7 +640,8 @@ const openapi = {
                   properties: {
                     status: { type: 'string' },
                     job: agentJobSchema,
-                    activity: activitySchema
+                    activity: activitySchema,
+                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'job']
                 }
@@ -659,7 +675,10 @@ const openapi = {
                   confirmationReason: { type: 'string' },
                   nextActions: { type: 'array', items: { type: 'string' } },
                   summary: { type: 'string' },
-                  lastKnownGitStatus: { type: 'string' }
+                  lastKnownGitStatus: { type: 'string' },
+                  roadmapPhases: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Roadmap phases and tasks for the continuous Agent Mode loop.' },
+                  activeTaskId: { type: 'string', description: 'Current active roadmap task id.' },
+                  completedTaskCount: { type: 'integer', description: 'Completed/skipped roadmap task count.' }
                 }
               }
             }
@@ -677,7 +696,8 @@ const openapi = {
                     status: { type: 'string' },
                     job: agentJobSchema,
                     jobs: { type: 'array', items: agentJobSchema },
-                    activity: activitySchema
+                    activity: activitySchema,
+                    diagnostics: diagnosticsSchema
                   },
                   required: ['status']
                 }

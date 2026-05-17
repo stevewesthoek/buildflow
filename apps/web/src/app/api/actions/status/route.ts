@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeActionGET, ActionTransportError } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
-import { makeActivity, withActivity } from '@/lib/actions/gpt'
+import { makeActivity, withActivity, withActionRouteDiagnostics } from '@/lib/actions/gpt'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -21,6 +21,7 @@ function buildStatusActivity(sourceCount: number) {
 }
 
 export async function GET(request: NextRequest) {
+  const startedAt = Date.now()
   const auth = checkActionAuth(request)
   if (!auth.valid) return auth.error
 
@@ -29,7 +30,7 @@ export async function GET(request: NextRequest) {
     const sourceCount = typeof result.data === 'object' && result.data !== null && typeof (result.data as { sourceCount?: unknown }).sourceCount === 'number'
       ? (result.data as { sourceCount: number }).sourceCount
       : 0
-    const payload = withActivity({
+    const payload = withActionRouteDiagnostics(withActivity({
       ok: true,
       connected: true,
       status: 'available',
@@ -41,7 +42,7 @@ export async function GET(request: NextRequest) {
       message: 'BuildFlow is available',
       sourceCount,
       ...(result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {})
-    }, buildStatusActivity(sourceCount))
+    }, buildStatusActivity(sourceCount)), { route: '/api/actions/status', startedAt })
     return NextResponse.json(payload, {
       status: result.status,
       headers: {

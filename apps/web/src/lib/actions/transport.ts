@@ -12,6 +12,23 @@ type FetchResult = {
   response: Response
   text: string
   data: unknown
+  readMs: number
+  parseMs: number
+  responseBytes: number
+}
+
+type TransportDiagnostics = {
+  endpoint: string
+  method: 'GET' | 'POST'
+  backendMode: string
+  status: number
+  totalMs: number
+  fetchMs: number
+  readMs: number
+  parseMs: number
+  requestBytes: number
+  responseBytes: number
+  proxyMs?: number
 }
 
 const REQUEST_TIMEOUT_MS = 15000
@@ -26,7 +43,10 @@ function isConnectionError(err: unknown) {
 }
 
 async function readJsonResponse(response: Response, endpoint: string): Promise<FetchResult> {
+  const readStartedAt = Date.now()
   const text = await response.text()
+  const readMs = Date.now() - readStartedAt
+  const responseBytes = Buffer.byteLength(text, 'utf8')
   if (!text.trim()) {
     throw new ActionTransportError(
       `Empty response from ${endpoint}`,
@@ -41,6 +61,7 @@ async function readJsonResponse(response: Response, endpoint: string): Promise<F
   }
 
   let data: unknown
+  const parseStartedAt = Date.now()
   try {
     data = JSON.parse(text)
   } catch {
@@ -56,7 +77,7 @@ async function readJsonResponse(response: Response, endpoint: string): Promise<F
     )
   }
 
-  return { response, text, data }
+  return { response, text, data, readMs, parseMs: Date.now() - parseStartedAt, responseBytes }
 }
 
 function normalizeTransportFailure(err: unknown, endpoint: string, timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -114,6 +135,36 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = REQU
   }
 }
 
+function shouldAttachDiagnostics() {
+  return process.env.BUILDFLOW_ACTION_DIAGNOSTICS === '1'
+}
+
+function attachTransportDiagnostics(data: unknown, diagnostics: TransportDiagnostics): unknown {
+  if (!shouldAttachDiagnostics() || !data || typeof data !== 'object' || Array.isArray(data)) return data
+  const record = data as Record<string, unknown>
+  const existingDiagnostics = record.diagnostics && typeof record.diagnostics === 'object' && !Array.isArray(record.diagnostics)
+    ? record.diagnostics as Record<string, unknown>
+    : {}
+  return {
+    ...record,
+    diagnostics: {
+      ...existingDiagnostics,
+      transport: diagnostics
+    }
+  }
+}
+
+function bytesOfJson(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value ?? {}), 'utf8')
+}
+
+function proxyMsFrom(response: Response): number | undefined {
+  const raw = response.headers.get('x-buildflow-proxy-duration-ms')
+  if (!raw) return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : undefined
+}
+
 // Post request with optional token passthrough
 // In relay-agent mode: forwards user token unchanged to bridge for multi-user routing
 // In direct-agent mode: no auth token needed (validates at route level)
@@ -125,6 +176,8 @@ export async function executeAction(
   const backendUrl = getBackendUrl()
   const mode = getBackendMode()
   const url = `${backendUrl}${endpoint}`
+  const totalStartedAt = Date.now()
+  const requestBytes = bytesOfJson(body)
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -133,11 +186,14 @@ export async function executeAction(
       headers['Authorization'] = `Bearer ${userToken}`
     }
 
+    const bodyJson = JSON.stringify(body)
+    const fetchStartedAt = Date.now()
     const response = await fetchWithTimeout(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body)
+      body: bodyJson
     })
+    const fetchMs = Date.now() - fetchStartedAt
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => '')
@@ -155,8 +211,20 @@ export async function executeAction(
       throw new ActionTransportError(message, response.status, errorData)
     }
 
-    const { data } = await readJsonResponse(response, endpoint)
-    return data
+    const parsed = await readJsonResponse(response, endpoint)
+    return attachTransportDiagnostics(parsed.data, {
+      endpoint,
+      method: 'POST',
+      backendMode: mode,
+      status: response.status,
+      totalMs: Date.now() - totalStartedAt,
+      fetchMs,
+      readMs: parsed.readMs,
+      parseMs: parsed.parseMs,
+      requestBytes,
+      responseBytes: parsed.responseBytes,
+      ...(proxyMsFrom(response) !== undefined ? { proxyMs: proxyMsFrom(response) } : {})
+    })
   } catch (err) {
     throw normalizeTransportFailure(err, endpoint)
   }
@@ -168,6 +236,7 @@ export async function executeActionGET(
 ): Promise<{ data: unknown; status: number }> {
   const mode = getBackendMode()
   const backendUrl = getBackendUrl()
+  const totalStartedAt = Date.now()
 
   // In relay-agent mode: convert to POST through proxy endpoint (cleaner than bridge GET support)
   if (mode === 'relay-agent') {
@@ -182,13 +251,28 @@ export async function executeActionGET(
         headers['Authorization'] = `Bearer ${userToken}`
       }
 
+      const fetchStartedAt = Date.now()
       const response = await fetchWithTimeout(url, {
         method: 'POST',
         headers,
         body: JSON.stringify({})
       })
+      const fetchMs = Date.now() - fetchStartedAt
 
-      const { data } = await readJsonResponse(response, endpoint)
+      const parsed = await readJsonResponse(response, endpoint)
+      const data = attachTransportDiagnostics(parsed.data, {
+        endpoint,
+        method: 'POST',
+        backendMode: mode,
+        status: response.status,
+        totalMs: Date.now() - totalStartedAt,
+        fetchMs,
+        readMs: parsed.readMs,
+        parseMs: parsed.parseMs,
+        requestBytes: bytesOfJson({}),
+        responseBytes: parsed.responseBytes,
+        ...(proxyMsFrom(response) !== undefined ? { proxyMs: proxyMsFrom(response) } : {})
+      })
       return { data, status: response.status }
     } catch (err) {
       throw normalizeTransportFailure(err, endpoint)
@@ -201,13 +285,28 @@ export async function executeActionGET(
   try {
     const headers: Record<string, string> = { 'Cache-Control': 'no-store' }
 
+    const fetchStartedAt = Date.now()
     const response = await fetchWithTimeout(url, {
       method: 'GET',
       headers,
       cache: 'no-store'
     })
+    const fetchMs = Date.now() - fetchStartedAt
 
-    const { data } = await readJsonResponse(response, endpoint)
+    const parsed = await readJsonResponse(response, endpoint)
+    const data = attachTransportDiagnostics(parsed.data, {
+      endpoint,
+      method: 'GET',
+      backendMode: mode,
+      status: response.status,
+      totalMs: Date.now() - totalStartedAt,
+      fetchMs,
+      readMs: parsed.readMs,
+      parseMs: parsed.parseMs,
+      requestBytes: 0,
+      responseBytes: parsed.responseBytes,
+      ...(proxyMsFrom(response) !== undefined ? { proxyMs: proxyMsFrom(response) } : {})
+    })
     return { data, status: response.status }
   } catch (err) {
     throw normalizeTransportFailure(err, endpoint)

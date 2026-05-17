@@ -204,6 +204,28 @@ export function withActivity<T extends Record<string, unknown>>(result: T, activ
   return { ...result, activity }
 }
 
+export function withActionRouteDiagnostics<T extends Record<string, unknown>>(result: T, params: { route: string; startedAt: number; requestBytes?: number }): T & { diagnostics?: Record<string, unknown> } {
+  if (process.env.BUILDFLOW_ACTION_DIAGNOSTICS !== '1') {
+    return result
+  }
+  const existingDiagnostics = result.diagnostics && typeof result.diagnostics === 'object' && !Array.isArray(result.diagnostics)
+    ? result.diagnostics as Record<string, unknown>
+    : {}
+  const base = {
+    ...result,
+    diagnostics: {
+      ...existingDiagnostics,
+      actionRoute: {
+        route: params.route,
+        totalMs: Date.now() - params.startedAt,
+        requestBytes: params.requestBytes || 0,
+        responseBytesBeforeDiagnostics: Buffer.byteLength(JSON.stringify(result), 'utf8')
+      }
+    }
+  }
+  return base
+}
+
 function summaryList(items: string[], limit = 3): string {
   if (items.length === 0) return 'none'
   const trimmed = items.slice(0, limit)
@@ -741,6 +763,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     const nextBatch = (result as { nextBatch?: Record<string, unknown> }).nextBatch
     const budgetBytes = typeof (result as { budgetBytes?: unknown }).budgetBytes === 'number' ? (result as { budgetBytes: number }).budgetBytes : undefined
     const returnedBytes = typeof (result as { returnedBytes?: unknown }).returnedBytes === 'number' ? (result as { returnedBytes: number }).returnedBytes : undefined
+    const timings = (result as { timings?: Record<string, unknown> }).timings
     const truncatedCount = files.filter(file => typeof file.truncated === 'boolean' && file.truncated).length
     const budgeted = skipped.length > 0 || (typeof budgetBytes === 'number' && typeof returnedBytes === 'number' && returnedBytes < budgetBytes)
     return withActivity({
@@ -749,7 +772,8 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
       ...(skipped.length > 0 ? { skipped } : {}),
       ...(nextBatch ? { nextBatch } : {}),
       ...(typeof budgetBytes === 'number' ? { budgetBytes } : {}),
-      ...(typeof returnedBytes === 'number' ? { returnedBytes } : {})
+      ...(typeof returnedBytes === 'number' ? { returnedBytes } : {}),
+      ...(timings ? { timings } : {})
     }, makeActivity({
       operationId: 'readBuildFlowContext',
       phase: 'completed',
@@ -778,6 +802,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     if (typeof body.sourceId === 'string') searchPayload.sourceId = body.sourceId
 
     const searchResult = await executeAction('/api/search', searchPayload, userToken)
+    const searchTimings = (searchResult as { timings?: Record<string, unknown> }).timings
     const results = Array.isArray((searchResult as { results?: unknown }).results)
       ? ((searchResult as { results: Array<Record<string, unknown>> }).results || [])
       : []
@@ -807,6 +832,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     }
 
     const readResult = await executeAction('/api/read-files', readPayload, userToken)
+    const readTimings = (readResult as { timings?: Record<string, unknown> }).timings
     const files = Array.isArray((readResult as { files?: unknown }).files)
       ? ((readResult as { files: Array<Record<string, unknown>> }).files || [])
       : []
@@ -821,6 +847,10 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
 
     return withActivity({
       mode: 'search_and_read',
+      timings: {
+        ...(searchTimings ? { search: searchTimings } : {}),
+        ...(readTimings ? { read: readTimings } : {})
+      },
       results: pathEntries.map(entry => {
         const candidates = [
           entry.sourceId ? `${entry.sourceId}::${entry.path}` : '',
@@ -884,7 +914,10 @@ const SAFE_COMMAND_KINDS = new Set([
   'run_package_script',
   'run_package_test',
   'run_package_test_marker',
-  'security_scan_paths'
+  'security_scan_paths',
+  'diagnose_performance',
+  'local_cli_github_auth_status',
+  'local_cli_github_repo_view'
 ])
 
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
