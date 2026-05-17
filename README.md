@@ -438,10 +438,10 @@ For implementation work, be explicit:
 Use BuildFlow Agentic Goal Mode on source <sourceId>. Work hands-off until complete, blocked, or confirmation-required.
 ```
 
-For risky work, add boundaries:
+For protected work, add boundaries:
 
 ```text
-Do not commit, push, change dependencies, edit migrations, or touch deployment files unless I explicitly confirm.
+Do not change dependencies, edit migrations, touch deployment files, or run destructive cleanup unless I explicitly confirm.
 ```
 
 ## How the workflow feels

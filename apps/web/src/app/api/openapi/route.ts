@@ -142,33 +142,25 @@ const agentJobSchema = {
   properties: {
     id: { type: 'string' },
     sourceId: { type: 'string' },
-    goal: { type: 'string' },
-    mode: { type: 'string', enum: ['repo_agent'] },
     status: { type: 'string', enum: ['queued', 'running', 'needs_confirmation', 'blocked', 'completed', 'failed'] },
-    createdAt: { type: 'string' },
-    updatedAt: { type: 'string' },
     maxIterations: { type: 'integer' },
     currentIteration: { type: 'integer' },
-    autonomyLevel: { type: 'string', enum: ['supervised', 'hands_off_safe'] },
-    documentationPath: { type: 'string' },
-    reviewEveryStep: { type: 'boolean' },
+    activeTaskId: { type: 'string' },
+    completedTaskCount: { type: 'integer' },
+    totalTaskCount: { type: 'integer' },
+    activeTask: { type: 'object', additionalProperties: true },
+    roadmapSummary: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    nextActions: { type: 'array', items: { type: 'string' } },
+    summary: { type: 'string' },
+    handoffPath: { type: 'string' },
     autoCommit: { type: 'boolean' },
     autoPush: { type: 'boolean' },
     requiresConfirmation: { type: 'boolean' },
     confirmationReason: { type: 'string' },
     blockedReason: { type: 'string' },
-    steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
-    roadmapPhases: { type: 'array', items: { type: 'object', additionalProperties: true } },
-    activeTaskId: { type: 'string' },
-    completedTaskCount: { type: 'integer' },
-    nextActions: { type: 'array', items: { type: 'string' } },
-    summary: { type: 'string' },
-    handoffPath: { type: 'string' },
-    resumeInstructions: { type: 'array', items: { type: 'string' } },
-    fallbackPrompt: { type: 'string' },
     lastKnownGitStatus: { type: 'string' }
   },
-  required: ['id', 'sourceId', 'goal', 'mode', 'status', 'createdAt', 'updatedAt', 'maxIterations', 'currentIteration', 'autonomyLevel', 'documentationPath', 'reviewEveryStep', 'autoCommit', 'autoPush', 'requiresConfirmation', 'steps', 'nextActions', 'summary']
+  required: ['id', 'sourceId', 'status', 'maxIterations', 'currentIteration', 'completedTaskCount', 'totalTaskCount', 'autoCommit', 'autoPush', 'requiresConfirmation', 'nextActions', 'summary', 'handoffPath']
 }
 
 const commandResultSchema = {
@@ -383,7 +375,7 @@ const openapi = {
         operationId: 'setBuildFlowActiveContext',
         summary: 'Set active context',
         description: 'Set active sources.',
-        'x-openai-isConsequential': true,
+        'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
           required: true,
@@ -575,7 +567,7 @@ const openapi = {
                   body: { type: 'string', description: 'Optional git commit body for git_commit.' },
                   remote: { type: 'string', description: 'Safe remote name for git_push. Defaults to origin.' },
                   branch: { type: 'string', description: 'Safe branch name for git_push. Defaults to current branch.' },
-                  confirmedByUser: { type: 'boolean', description: 'Confirm confirmation-gated command execution.' },
+                  confirmedByUser: { type: 'boolean', description: 'Confirm protected destructive command execution.' },
                   confirmationToken: { type: 'string', description: 'Confirmation token returned by a prior needs_confirmation response.' }
                 },
                 required: ['sourceId', 'commandKind']
@@ -604,8 +596,8 @@ const openapi = {
       post: {
         operationId: 'startBuildFlowAgentJob',
         summary: 'Start Agent Mode job',
-        description: 'Start a repo-agnostic hands-off implementation loop for one source. The GPT continues the loop with existing read/write/command actions and stops only for policy blocks or confirmations.',
-        'x-openai-isConsequential': true,
+        description: 'Start a hands-off Agent Mode loop. Continue with read/write/command actions until blocked or complete.',
+        'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
           required: true,
@@ -618,11 +610,12 @@ const openapi = {
                   sourceId: { type: 'string', description: 'Target source id.' },
                   goal: { type: 'string', description: 'Implementation goal for the repo-agent loop.' },
                   maxIterations: { type: 'integer', description: 'Maximum repair/validation iterations.', minimum: 1, maximum: 20 },
-                  autonomyLevel: { type: 'string', enum: ['supervised', 'hands_off_safe'], description: 'Agentic execution mode. hands_off_safe continues without user interaction until blocked or confirmation is required.' },
-                  documentationPath: { type: 'string', description: 'Repo-relative progress document path for the goal/task/review loop.' },
+                  autonomyLevel: { type: 'string', enum: ['supervised', 'hands_off_safe'], description: 'Use hands_off_safe for autonomous work.' },
+                  documentationPath: { type: 'string', description: 'Repo-relative progress document path.' },
                   reviewEveryStep: { type: 'boolean', description: 'Review changed files and validation output after every task before continuing.' },
                   autoCommit: { type: 'boolean', description: 'Request automatic git commit after validation passes.' },
-                  autoPush: { type: 'boolean', description: 'Request automatic git push after commit and validation pass.' }
+                  autoPush: { type: 'boolean', description: 'Request automatic git push after commit and validation pass.' },
+                  full: { type: 'boolean', description: 'Return full job state. Usually false for speed.' }
                 },
                 required: ['sourceId', 'goal']
               }
@@ -678,7 +671,9 @@ const openapi = {
                   lastKnownGitStatus: { type: 'string' },
                   roadmapPhases: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'Roadmap phases and tasks for the continuous Agent Mode loop.' },
                   activeTaskId: { type: 'string', description: 'Current active roadmap task id.' },
-                  completedTaskCount: { type: 'integer', description: 'Completed/skipped roadmap task count.' }
+                  completedTaskCount: { type: 'integer', description: 'Completed/skipped roadmap task count.' },
+                  full: { type: 'boolean', description: 'Return full job state. Usually false for speed.' },
+                  limit: { type: 'integer', description: 'Max jobs when listing.', minimum: 1, maximum: 20 }
                 }
               }
             }
@@ -768,6 +763,7 @@ const openapi = {
                     changeType: { type: 'string', enum: ['append', 'create', 'overwrite', 'patch', 'delete_file', 'delete_directory', 'move', 'rename', 'mkdir', 'rmdir'], description: 'Choose append, create, overwrite, patch, delete_file, delete_directory, move, rename, mkdir, or rmdir.' },
                     sourceId: { type: 'string', description: 'Target source id.' },
                     path: { type: 'string', description: 'Target file path.' },
+                    from: { type: 'string', description: 'Source path for move or rename.' },
                     to: { type: 'string', description: 'Target path for move or rename.' },
                     content: { type: 'string', description: 'Content for append/create/overwrite.' },
                     find: { type: 'string', description: 'Exact text to replace.' },

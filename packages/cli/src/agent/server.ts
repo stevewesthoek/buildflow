@@ -15,7 +15,7 @@ import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot
 import type { Workspace } from '@buildflow/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
 import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
-import { getAgentJob, listAgentJobs, startAgentJob, updateAgentJob } from './agent-jobs'
+import { compactAgentJob, getAgentJob, listAgentJobs, startAgentJob, updateAgentJob } from './agent-jobs'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -319,27 +319,31 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     })
   })
 
-  fastify.post<{ Body: { sourceId: string; goal: string; maxIterations?: number; autonomyLevel?: 'supervised' | 'hands_off_safe'; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean } }>('/api/agent-jobs/start', async (request, reply) => {
+  fastify.post<{ Body: { sourceId: string; goal: string; maxIterations?: number; autonomyLevel?: 'supervised' | 'hands_off_safe'; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean; full?: boolean } }>('/api/agent-jobs/start', async (request, reply) => {
     try {
-      const { sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush } = request.body
+      const { sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush, full } = request.body
       if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
       const source = getSourcesSafe().find(item => item.id === sourceId)
       if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
       if (source.indexStatus !== 'ready') return reply.code(409).send({ error: `Source is not ready for Agent Mode: ${sourceId}`, indexStatus: source.indexStatus })
       const job = startAgentJob({ sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush })
-      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job })
+      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job: full === true ? job : compactAgentJob(job) })
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }
   })
 
-  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string; lastKnownGitStatus?: string; roadmapPhases?: any[]; activeTaskId?: string; completedTaskCount?: number } }>('/api/agent-jobs/status', async (request, reply) => {
+  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string; lastKnownGitStatus?: string; roadmapPhases?: any[]; activeTaskId?: string; completedTaskCount?: number; full?: boolean; limit?: number } }>('/api/agent-jobs/status', async (request, reply) => {
     try {
-      const { jobId, ...patch } = request.body || {}
-      if (!jobId) return reply.header('Cache-Control', 'no-store').send({ status: 'ok', jobs: listAgentJobs() })
+      const { jobId, full, limit, ...patch } = request.body || {}
+      if (!jobId) {
+        const maxJobs = Math.min(20, Math.max(1, Number(limit || 10)))
+        const jobs = listAgentJobs().slice(0, maxJobs)
+        return reply.header('Cache-Control', 'no-store').send({ status: 'ok', jobs: full === true ? jobs : jobs.map(compactAgentJob) })
+      }
       const job = Object.keys(patch).length > 0 ? updateAgentJob(jobId, patch) : getAgentJob(jobId)
       if (!job) return reply.code(404).send({ error: `Agent job not found: ${jobId}` })
-      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job })
+      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job: full === true ? job : compactAgentJob(job) })
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }
@@ -833,9 +837,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           if (!directoryEmptyBefore) {
             return reply.code(409).send({ status: 'error', verified: false, code: 'DIRECTORY_NOT_EMPTY', sourceId: resolvedSourceId, path: relPath, requestedPath: relPath, normalizedPath: validation.normalizedPath, changeType: 'delete_directory', reason: 'directory_not_empty', hint: 'Use recursive:true with confirmation or empty the directory first.' })
           }
-          if (!confirmOperation(request.body, resolvedSourceId, 'rmdir', validation.normalizedPath)) {
-            return reply.code(403).send(confirmationPayload(resolvedSourceId, 'rmdir', relPath, validation.normalizedPath, 'confirmation_required_path', 'This empty directory removal is confirmation-gated.'))
-          }
           fs.rmdirSync(validation.fullPath)
           return { status: 'deleted', sourceId: resolvedSourceId, requestedPath: relPath, normalizedPath: validation.normalizedPath, path: relPath, changeType: 'rmdir', operation: 'rmdir', verified: true, existsBefore: true, existsAfter: false, directoryEmptyBefore }
         }
@@ -914,9 +915,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           hint: 'Pass createParents:true to create the missing parent directories.'
         })
       }
-      if (!confirmOperation(request.body, resolvedSourceId, 'mkdir', validation.normalizedPath)) {
-        return reply.code(403).send(confirmationPayload(resolvedSourceId, 'mkdir', relPath, validation.normalizedPath, 'confirmation_required_path', 'This directory creation is confirmation-gated.'))
-      }
       fs.mkdirSync(validation.fullPath, { recursive: allowRecursive })
       return { status: 'created', sourceId: resolvedSourceId, requestedPath: relPath, normalizedPath: validation.normalizedPath, path: relPath, changeType: 'mkdir', verified: true, existsAfter: true }
     } catch (err) {
@@ -940,9 +938,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const directoryEmptyBefore = fs.readdirSync(validation.fullPath).length === 0
       if (!directoryEmptyBefore) {
         return reply.code(409).send({ status: 'error', verified: false, code: 'DIRECTORY_NOT_EMPTY', sourceId: resolvedSourceId, path: relPath, requestedPath: relPath, normalizedPath: validation.normalizedPath, changeType: 'rmdir', reason: 'directory_not_empty', hint: 'Pass recursive:true with confirmation or empty the directory first.' })
-      }
-      if (!confirmOperation(request.body, resolvedSourceId, 'rmdir', validation.normalizedPath)) {
-        return reply.code(403).send(confirmationPayload(resolvedSourceId, 'rmdir', relPath, validation.normalizedPath, 'confirmation_required_path', 'This empty directory removal is confirmation-gated.'))
       }
       fs.rmdirSync(validation.fullPath)
       return { status: 'deleted', sourceId: resolvedSourceId, requestedPath: relPath, normalizedPath: validation.normalizedPath, path: relPath, changeType: 'rmdir', operation: 'rmdir', verified: true, existsBefore: true, existsAfter: false, directoryEmptyBefore }

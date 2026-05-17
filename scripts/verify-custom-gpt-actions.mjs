@@ -189,8 +189,8 @@ function ensureConsequentialFlags(schema) {
     ['readBuildFlowContext', false],
     ['runBuildFlowCommand', false],
     ['getBuildFlowAgentJob', false],
-    ['setBuildFlowActiveContext', true],
-    ['startBuildFlowAgentJob', true],
+    ['setBuildFlowActiveContext', false],
+    ['startBuildFlowAgentJob', false],
     ['writeBuildFlowArtifact', false],
     ['applyBuildFlowFileChange', false]
   ])
@@ -606,9 +606,9 @@ async function runActionSuite(baseUrl, label) {
     body: JSON.stringify({
       changeType: 'patch',
       sourceId: 'buildflow',
-      path: 'package.json',
-      find: '"name": "buildflow"',
-      replace: '"name": "buildflow"',
+      path: 'pnpm-lock.yaml',
+      find: 'lockfileVersion',
+      replace: 'lockfileVersion',
       dryRun: true,
       reason: 'Contract smoke test confirmation'
     })

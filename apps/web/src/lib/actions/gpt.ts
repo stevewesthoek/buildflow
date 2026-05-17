@@ -538,7 +538,7 @@ async function preflightWrite(body: Record<string, unknown>, userToken?: string)
   const sourceError = await requireExplicitSourceId(body, userToken)
   if (sourceError) return sourceError
   const sourceId = typeof body.sourceId === 'string' ? body.sourceId : undefined
-  const path = typeof body.path === 'string' ? body.path : ''
+  const path = typeof body.path === 'string' ? body.path : typeof body.from === 'string' ? body.from : ''
   const changeType = body.changeType === 'append' || body.changeType === 'overwrite' || body.changeType === 'patch' || body.changeType === 'delete_file' || body.changeType === 'delete_directory' || body.changeType === 'move' || body.changeType === 'rename' || body.changeType === 'mkdir' || body.changeType === 'rmdir' ? body.changeType : 'create'
   const sourceMap = await loadSourceMap(userToken)
   const source = sourceId ? sourceMap.map.get(sourceId) : sourceMap.sources[0]
@@ -1095,7 +1095,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
   const changeType = body.changeType
   const payload: Record<string, unknown> = {
     sourceId: body.sourceId,
-    path: body.path,
+    path: typeof body.path === 'string' ? body.path : body.from,
     reason: body.reason
   }
   attachWriteConfirmation(payload, body)
@@ -1226,7 +1226,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     payload.confirmedByUser = body.confirmedByUser === true
     payload.confirmationToken = typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
     const result = await executeAction('/api/move-file', payload, userToken)
-    const from = typeof (result as Record<string, unknown>).from === 'string' ? (result as Record<string, unknown>).from as string : typeof body.path === 'string' ? body.path : undefined
+    const from = typeof (result as Record<string, unknown>).from === 'string' ? (result as Record<string, unknown>).from as string : typeof body.path === 'string' ? body.path : typeof body.from === 'string' ? body.from : undefined
     const to = typeof (result as Record<string, unknown>).to === 'string' ? (result as Record<string, unknown>).to as string : typeof body.to === 'string' ? body.to : undefined
     return withActivity(result as Record<string, unknown>, makeActivity({
       operationId: 'applyBuildFlowFileChange',
@@ -1280,7 +1280,8 @@ export async function startBuildFlowAgentJob(body: Record<string, unknown>, user
     documentationPath: typeof body.documentationPath === 'string' ? body.documentationPath : undefined,
     reviewEveryStep: typeof body.reviewEveryStep === 'boolean' ? body.reviewEveryStep : undefined,
     autoCommit: typeof body.autoCommit === 'boolean' ? body.autoCommit : undefined,
-    autoPush: typeof body.autoPush === 'boolean' ? body.autoPush : undefined
+    autoPush: typeof body.autoPush === 'boolean' ? body.autoPush : undefined,
+    full: body.full === true
   }, userToken)
   const job = (result as { job?: { id?: string; sourceId?: string; requiresConfirmation?: boolean } }).job
   return withActivity(result as Record<string, unknown>, makeActivity({
@@ -1306,6 +1307,12 @@ export async function getBuildFlowAgentJob(body: Record<string, unknown>, userTo
   if (typeof body.confirmationReason === 'string') payload.confirmationReason = body.confirmationReason
   if (Array.isArray(body.nextActions)) payload.nextActions = body.nextActions
   if (typeof body.summary === 'string') payload.summary = body.summary
+  if (typeof body.lastKnownGitStatus === 'string') payload.lastKnownGitStatus = body.lastKnownGitStatus
+  if (Array.isArray(body.roadmapPhases)) payload.roadmapPhases = body.roadmapPhases
+  if (typeof body.activeTaskId === 'string') payload.activeTaskId = body.activeTaskId
+  if (typeof body.completedTaskCount === 'number') payload.completedTaskCount = body.completedTaskCount
+  if (body.full === true) payload.full = true
+  if (typeof body.limit === 'number') payload.limit = body.limit
   const result = await executeAction('/api/agent-jobs/status', payload, userToken)
   const job = (result as { job?: { id?: string; sourceId?: string; status?: string; requiresConfirmation?: boolean } }).job
   return withActivity(result as Record<string, unknown>, makeActivity({
@@ -1317,6 +1324,6 @@ export async function getBuildFlowAgentJob(body: Record<string, unknown>, userTo
     riskLevel: job?.requiresConfirmation ? 'medium' : 'low',
     requiresConfirmation: job?.requiresConfirmation === true,
     verified: true,
-    nextStep: job?.requiresConfirmation ? 'Stop and ask for explicit confirmation.' : 'Continue the hands-off implementation loop.'
+    nextStep: job?.requiresConfirmation ? 'Stop only for the explicit blocker.' : 'Continue the hands-off implementation loop through validation, commit, push, and the next task.'
   }))
 }

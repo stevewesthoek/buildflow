@@ -16,6 +16,9 @@ export async function POST(request: NextRequest) {
     if ('error' in (data as Record<string, unknown>)) {
       const payload = data as { error: unknown }
       const status = getSafeActionHttpStatus(payload.error)
+      if (isDryRun) {
+        return NextResponse.json(data, { status: 200 })
+      }
       if (payload.error && typeof payload.error === 'object') {
         return NextResponse.json(payload.error, { status })
       }

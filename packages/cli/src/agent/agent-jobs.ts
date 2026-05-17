@@ -82,10 +82,49 @@ export type AgentJob = {
   lastKnownGitStatus?: string
 }
 
+export type CompactAgentJob = Pick<
+  AgentJob,
+  | 'id'
+  | 'sourceId'
+  | 'status'
+  | 'currentIteration'
+  | 'maxIterations'
+  | 'activeTaskId'
+  | 'completedTaskCount'
+  | 'nextActions'
+  | 'summary'
+  | 'handoffPath'
+  | 'autoCommit'
+  | 'autoPush'
+  | 'requiresConfirmation'
+  | 'confirmationReason'
+  | 'blockedReason'
+  | 'lastKnownGitStatus'
+> & {
+  totalTaskCount: number
+  activeTask?: {
+    id: string
+    title: string
+    phaseTitle: string
+    status: AgentTaskStatus
+    acceptanceCriteria: string[]
+    validation: string[]
+  }
+  roadmapSummary: Array<{
+    id: string
+    title: string
+    status: AgentTaskStatus
+    completedTasks: number
+    totalTasks: number
+  }>
+}
+
 const jobs = new Map<string, AgentJob>()
 const MAX_GOAL_LENGTH = 4000
 const MAX_ITERATIONS = 40
 const JOB_STORE_PATH = path.join(getConfigDir(), 'agent-jobs.json')
+const COMPACT_TEXT_LIMIT = 700
+const COMPACT_LIST_ITEM_LIMIT = 240
 const SECRET_LIKE_PATTERNS = [
   'BEGIN RSA' + ' PRIVATE KEY',
   'BEGIN OPENSSH' + ' PRIVATE KEY',
@@ -296,17 +335,17 @@ function coerceJob(raw: unknown): AgentJob | null {
     autonomyLevel: item.autonomyLevel === 'supervised' ? 'supervised' : 'hands_off_safe',
     documentationPath,
     reviewEveryStep: item.reviewEveryStep !== false,
-    autoCommit: item.autoCommit === true,
-    autoPush: item.autoPush === true,
-    requiresConfirmation: item.requiresConfirmation === true,
-    confirmationReason: item.confirmationReason,
+    autoCommit: item.autoCommit !== false,
+    autoPush: item.autoPush !== false,
+    requiresConfirmation: item.status === 'needs_confirmation' || item.requiresConfirmation === true,
+    confirmationReason: item.status === 'needs_confirmation' || item.requiresConfirmation === true ? item.confirmationReason : undefined,
     blockedReason: item.blockedReason,
     steps: Array.isArray(item.steps) && item.steps.length > 0 ? item.steps : buildSteps(),
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
     nextActions: Array.isArray(item.nextActions) && item.nextActions.length > 0 ? item.nextActions : buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
-    summary: item.summary || 'Agent Mode job loaded from persistent roadmap state. Continue the active task, update the handoff, validate, repair, and advance until all roadmap tasks are complete or blocked.',
+    summary: item.summary || 'Agent Mode job loaded from persistent roadmap state. Continue the active task, update the handoff, validate, repair, commit, push, and advance until all roadmap tasks are complete or blocked.',
     handoffPath: item.handoffPath || documentationPath,
     resumeInstructions: Array.isArray(item.resumeInstructions) ? item.resumeInstructions : buildResumeInstructions(documentationPath),
     fallbackPrompt: item.fallbackPrompt,
@@ -343,7 +382,8 @@ function buildResumeInstructions(documentationPath: string): string[] {
     'Verify the locked sourceId before inspecting, writing, or running commands.',
     'Run git_status_short and inspect changed files before continuing.',
     'Continue with the next unchecked task, then update the handoff after each meaningful chunk.',
-    'Stop only for blocked/no-access paths, failed validation that needs user choice, or confirmation-gated push/destructive operations.'
+    'After validation passes, stage explicit changed files, commit with a clear message, push the current branch, and continue.',
+    'Stop only for blocked/no-access paths, failed validation that needs user choice, or protected destructive operations.'
   ]
 }
 
@@ -456,4 +496,53 @@ export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'sta
 export function listAgentJobs(): AgentJob[] {
   if (jobs.size === 0) loadJobsFromDisk()
   return Array.from(jobs.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+}
+
+function compactText(value: string | undefined, limit = COMPACT_TEXT_LIMIT): string | undefined {
+  if (!value) return undefined
+  return value.length > limit ? `${value.slice(0, limit - 3)}...` : value
+}
+
+function compactList(values: string[], limit = 4): string[] {
+  return values.slice(0, limit).map(value => compactText(value, COMPACT_LIST_ITEM_LIMIT) || '')
+}
+
+export function compactAgentJob(job: AgentJob): CompactAgentJob {
+  const tasks = job.roadmapPhases.flatMap(phase => phase.tasks.map(task => ({ phase, task })))
+  const active = tasks.find(item => item.task.id === job.activeTaskId)
+
+  return {
+    id: job.id,
+    sourceId: job.sourceId,
+    status: job.status,
+    currentIteration: job.currentIteration,
+    maxIterations: job.maxIterations,
+    activeTaskId: job.activeTaskId,
+    completedTaskCount: job.completedTaskCount,
+    totalTaskCount: tasks.length,
+    nextActions: compactList(job.nextActions, 3),
+    summary: compactText(job.summary) || '',
+    handoffPath: job.handoffPath,
+    autoCommit: job.autoCommit,
+    autoPush: job.autoPush,
+    requiresConfirmation: job.requiresConfirmation,
+    confirmationReason: compactText(job.confirmationReason, 300),
+    blockedReason: compactText(job.blockedReason, 300),
+    lastKnownGitStatus: compactText(job.lastKnownGitStatus, 700),
+    activeTask: active ? {
+      id: active.task.id,
+      title: active.task.title,
+      phaseTitle: active.phase.title,
+      status: active.task.status,
+      acceptanceCriteria: compactList(active.task.acceptanceCriteria, 3),
+      validation: compactList(active.task.validation, 3)
+    } : undefined,
+    roadmapSummary: job.roadmapPhases.map(phase => ({
+      id: phase.id,
+      title: phase.title,
+      status: phase.status,
+      completedTasks: phase.tasks.filter(task => task.status === 'completed' || task.status === 'skipped').length,
+      totalTasks: phase.tasks.length
+    }))
+  }
 }

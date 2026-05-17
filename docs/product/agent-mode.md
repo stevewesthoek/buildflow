@@ -91,7 +91,7 @@ Agent Mode can use the allowlisted command runner:
 - git status, diff, branch, and log checks
 - cached git diff checks
 - explicit `git add -- <paths>`
-- confirmation-gated commit and push
+- automatic commit and push after validation
 - JSON validation
 - package scripts and tests
 - marker tests where supported
@@ -114,7 +114,6 @@ Examples:
 - real secrets or private key material
 - recursive or destructive deletes
 - protected binary assets
-- git push flows
 - deployment-like operations unless a future allowlisted deploy command supports them
 
 When a job is blocked, failed, or needs confirmation, BuildFlow now exposes a `fallbackPrompt`. The Custom GPT should present that prompt proactively as the recovery path instead of only reporting that it is stuck.
@@ -131,9 +130,9 @@ Goal:
 
 Work hands-off until complete, blocked, failed, or confirmation-required.
 Create or update a persistent handoff document.
-Continue through requirements, roadmap, implementation plan, phased tasks, execution, review, validation, repair, hardening, cleanup, and final handoff.
+Continue through requirements, roadmap, implementation plan, phased tasks, execution, review, validation, repair, hardening, cleanup, commit, push, and final handoff.
 Pass sourceId explicitly on every action.
-Do not commit or push unless I explicitly confirm.
+Commit and push automatically after validation passes.
 ```
 
 ## Resume prompt
