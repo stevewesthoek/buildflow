@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { promises as fsp } from 'fs'
 import path from 'path'
 import { getVaultPath, getEnabledSources, getInboxSourceId } from './config'
 import { validatePath } from './permissions'
@@ -64,7 +65,7 @@ export async function readFile(relativePath: string, sourceId?: string): Promise
 
   try {
     const fullPath = await resolveSafePath(relativePath, sourceId)
-    const content = fs.readFileSync(fullPath, 'utf-8')
+    const content = await fsp.readFile(fullPath, 'utf-8')
 
     logToFile({
       timestamp: new Date().toISOString(),

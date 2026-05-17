@@ -23,3 +23,12 @@ export function getAuditLogPath(): string {
 export function getIndexPath(): string {
   return path.join(getConfigDir(), 'index.json')
 }
+
+export function getIndexDir(): string {
+  return path.join(getConfigDir(), 'indexes')
+}
+
+export function getSourceIndexPath(sourceId: string): string {
+  const safeSourceId = sourceId.replace(/[^a-zA-Z0-9._-]/g, '_')
+  return path.join(getIndexDir(), `${safeSourceId}.json`)
+}

@@ -4,7 +4,7 @@ import path from 'path'
 import matter from 'gray-matter'
 import fg from 'fast-glob'
 import { getEnabledSources } from './config'
-import { getIndexPath } from '../utils/paths'
+import { getConfigDir, getIndexPath, getIndexDir, getSourceIndexPath } from '../utils/paths'
 import { IndexedDoc } from '@buildflow/shared'
 
 const DEFAULT_IGNORE_PATTERNS = [
@@ -59,6 +59,21 @@ const isProbablyBinaryContent = (buffer: Buffer): boolean => {
   return false
 }
 
+function ensureIndexDir(): void {
+  const dir = getIndexDir()
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+}
+
+function readJsonArray<T>(filePath: string): T[] {
+  if (!fs.existsSync(filePath)) return []
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+    return Array.isArray(parsed) ? parsed as T[] : []
+  } catch {
+    return []
+  }
+}
+
 export class Indexer {
   private docs: IndexedDoc[] = []
 
@@ -76,8 +91,6 @@ export class Indexer {
     for (const source of sources) {
       await this.buildIndexForSource(source.id, source.path, patterns, ignorePatterns)
     }
-
-    this.saveToDisk()
   }
 
   async buildIndexForSource(sourceId: string, sourcePath?: string, patterns: string[] = ['**/*'], ignorePatterns: string[] = DEFAULT_IGNORE_PATTERNS): Promise<number> {
@@ -92,6 +105,7 @@ export class Indexer {
     }
 
     const nextDocs = this.docs.filter(doc => doc.sourceId !== sourceId)
+    const sourceDocs: IndexedDoc[] = []
 
     let indexedFiles = 0
     let skippedFiles = 0
@@ -153,6 +167,7 @@ export class Indexer {
           }
 
           nextDocs.push(doc)
+          sourceDocs.push(doc)
           indexedFiles++
           processedFiles++
         } catch (err) {
@@ -170,7 +185,8 @@ export class Indexer {
     }
 
     this.docs = nextDocs
-    this.saveToDisk()
+    this.saveSourceToDisk(sourceId, sourceDocs)
+    this.saveManifestToDisk()
     return indexedFiles
   }
 
@@ -178,20 +194,67 @@ export class Indexer {
     const before = this.docs.length
     this.docs = this.docs.filter(doc => doc.sourceId !== sourceId)
     const removed = before - this.docs.length
-    this.saveToDisk()
+    this.deleteSourceFromDisk(sourceId)
+    this.saveManifestToDisk()
     return removed
+  }
+
+  private saveSourceToDisk(sourceId: string, docs: IndexedDoc[]): void {
+    try {
+      ensureIndexDir()
+      const indexPath = getSourceIndexPath(sourceId)
+      fs.writeFileSync(indexPath, JSON.stringify(docs))
+    } catch (err) {
+      console.warn(`Failed to save source index ${sourceId}:`, err)
+    }
+  }
+
+  private deleteSourceFromDisk(sourceId: string): void {
+    try {
+      const indexPath = getSourceIndexPath(sourceId)
+      if (fs.existsSync(indexPath)) fs.unlinkSync(indexPath)
+    } catch (err) {
+      console.warn(`Failed to delete source index ${sourceId}:`, err)
+    }
+  }
+
+  private saveManifestToDisk(): void {
+    try {
+      const indexPath = getIndexPath()
+      const dir = path.dirname(indexPath)
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+      const counts = this.docs.reduce<Record<string, number>>((acc, doc) => {
+        acc[doc.sourceId] = (acc[doc.sourceId] || 0) + 1
+        return acc
+      }, {})
+      const manifest = {
+        version: 2,
+        storage: 'per-source-json',
+        sources: Object.entries(counts).map(([sourceId, count]) => ({
+          sourceId,
+          file: path.relative(getConfigDir(), getSourceIndexPath(sourceId)),
+          count
+        }))
+      }
+      fs.writeFileSync(indexPath, JSON.stringify(manifest))
+    } catch (err) {
+      console.warn('Failed to save index manifest:', err)
+    }
   }
 
   private saveToDisk(): void {
     try {
-      const indexPath = getIndexPath()
-      const dir = path.dirname(indexPath)
-
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true })
+      ensureIndexDir()
+      const bySource = new Map<string, IndexedDoc[]>()
+      for (const doc of this.docs) {
+        const docs = bySource.get(doc.sourceId) || []
+        docs.push(doc)
+        bySource.set(doc.sourceId, docs)
       }
-
-      fs.writeFileSync(indexPath, JSON.stringify(this.docs, null, 2))
+      for (const [sourceId, docs] of bySource.entries()) {
+        this.saveSourceToDisk(sourceId, docs)
+      }
+      this.saveManifestToDisk()
     } catch (err) {
       console.warn('Failed to save index:', err)
     }
@@ -199,10 +262,20 @@ export class Indexer {
 
   private loadFromDisk(): void {
     try {
+      const indexDir = getIndexDir()
+      if (fs.existsSync(indexDir)) {
+        const sourceIndexFiles = fs.readdirSync(indexDir).filter(file => file.endsWith('.json'))
+        const docs = sourceIndexFiles.flatMap(file => readJsonArray<IndexedDoc>(path.join(indexDir, file)))
+        if (docs.length > 0) {
+          this.docs = docs
+          return
+        }
+      }
+
       const indexPath = getIndexPath()
       if (fs.existsSync(indexPath)) {
-        const content = fs.readFileSync(indexPath, 'utf-8')
-        this.docs = JSON.parse(content)
+        const parsed = JSON.parse(fs.readFileSync(indexPath, 'utf-8'))
+        this.docs = Array.isArray(parsed) ? parsed as IndexedDoc[] : []
       }
     } catch (err) {
       console.warn('Failed to load index:', err)
