@@ -353,10 +353,14 @@ export default function Dashboard() {
                   <span className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">Repo path</span>
                   <select
                     value={selectedDiscoveredRepoPath}
-                    onFocus={() => scanRepositories(discoveryRootPath, true)}
+                    onClick={() => {
+                      if (discoveredRepos.length === 0 && !discoveryLoading) {
+                        scanRepositories(discoveryRootPath, true)
+                      }
+                    }}
                     onChange={event => setSelectedDiscoveredRepoPath(event.target.value)}
-                    disabled={discoveryLoading || busySourceId === 'new-source'}
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500"
+                    disabled={busySourceId === 'new-source'}
+                    className="relative z-10 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500 dark:focus:ring-slate-600"
                   >
                     <option value="">{discoveryLoading ? 'Scanning repos…' : discoveryScanned ? 'Select a repository' : 'Click to scan repositories'}</option>
                     {discoveredRepos.map(repo => (
