@@ -131,8 +131,8 @@ function buildSteps(): AgentJobStep[] {
     { id: 'repair', title: 'Repair loop', status: 'pending', action: 'repair', description: 'Investigate failures, patch, update handoff, and repeat until validation is clean or policy blocks progress.' },
     { id: 'hardening', title: 'Harden implementation', status: 'pending', action: 'hardening', description: 'Add edge-case handling, tests, cleanup, docs, security checks, and maintainability improvements.' },
     { id: 'cleanup', title: 'Clean up', status: 'pending', action: 'cleanup', description: 'Remove temporary files inside allowed paths, simplify code, ensure docs are accurate, and preserve useful rollback notes.' },
-    { id: 'git_status', title: 'Review git state', status: 'pending', action: 'git_status', description: 'Report changed and staged files. Stage explicit files only. Commit/push only when configured and confirmed.' },
-    { id: 'commit_review', title: 'Commit review', status: 'pending', action: 'commit_review', description: 'Prepare commit message and verify staged file list, cached diff, and validation evidence before committing.' },
+    { id: 'git_status', title: 'Review git state', status: 'pending', action: 'git_status', description: 'Report changed and staged files. Stage explicit files only. Commit and push automatically after review when enabled.' },
+    { id: 'commit_review', title: 'Commit review', status: 'pending', action: 'commit_review', description: 'Prepare commit message and verify staged file list, cached diff, and validation evidence before committing and pushing.' },
     { id: 'final_handoff', title: 'Final handoff', status: 'pending', action: 'final_handoff', description: 'Summarize delivered value, validation results, changed files, risks, follow-ups, and exact resume point if unfinished.' }
   ]
 }
@@ -364,13 +364,14 @@ function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'document
     job.lastKnownGitStatus ? `Last known git status:\n${job.lastKnownGitStatus}` : undefined,
     '',
     'Instructions:',
-    '1. Read the handoff path first and treat it as the resume state.',
-    '2. Verify the current repo, branch, and git status before editing.',
-    '3. Continue with the next unfinished task from the handoff.',
-    '4. Keep all changes source-relative and do not expose secrets.',
-    '5. Update the handoff after each meaningful chunk with completed work, validation evidence, next task, blockers, and resume notes.',
-    '6. Run the relevant tests/validation, repair failures, and continue until the goal is complete or a hard no-access boundary is reached.',
-    '7. If committing, stage explicit files only and write a clear commit message. Do not force-push.'
+      '1. Read the handoff path first and treat it as the resume state.',
+      '2. Verify the current repo, branch, and git status before editing.',
+      '3. Continue with the next unfinished task from the handoff.',
+      '4. Keep all changes source-relative and do not expose secrets.',
+      '5. Update the handoff after each meaningful chunk with completed work, validation evidence, next task, blockers, and resume notes.',
+      '6. Run the relevant tests/validation, repair failures, and continue until the goal is complete or a hard no-access boundary is reached.',
+      '7. If the work is correct and validated, stage explicit files only, write a clear commit message, and push to the current branch.',
+      '8. Do not force-push.'
   ].filter(Boolean).join('\n')
 }
 
@@ -400,16 +401,16 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     autonomyLevel,
     documentationPath,
     reviewEveryStep: params.reviewEveryStep !== false,
-    autoCommit: params.autoCommit === true,
-    autoPush: params.autoPush === true,
-    requiresConfirmation: params.autoCommit === true || params.autoPush === true,
-    confirmationReason: params.autoCommit || params.autoPush ? 'git_commit_or_push_requires_confirmation' : undefined,
+    autoCommit: params.autoCommit !== false,
+    autoPush: params.autoPush !== false,
+    requiresConfirmation: false,
+    confirmationReason: undefined,
     steps: buildSteps(),
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
     nextActions: buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
-    summary: 'Agent Mode started with persistent roadmap state. Continue the active task, update the handoff, validate, repair, and advance task-by-task until all roadmap phases are complete, blocked, failed, or confirmation is required.',
+    summary: 'Agent Mode started with persistent roadmap state. Continue the active task, update the handoff, validate, repair, commit, and push task-by-task until all roadmap phases are complete or a hard blocker is reached.',
     handoffPath: documentationPath,
     resumeInstructions
   }

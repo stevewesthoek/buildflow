@@ -158,7 +158,7 @@ Use BuildFlow Agentic Goal Mode on source my-app.
 Goal:
 Build a complete project intake module with pages, API routes, validation, tests, and documentation.
 
-Work hands-off until complete, blocked, or confirmation-required. Create or update progress documentation, execute one task at a time, review each task, validate, repair failures, and continue until done. Do not commit or push unless I explicitly ask.
+Work hands-off until complete, blocked, or confirmation-required. Create or update progress documentation, execute one task at a time, review each task, validate, repair failures, commit, push, and continue until done unless a hard blocker requires manual intervention.
 ```
 
 When started, BuildFlow creates a repo-agnostic goal job and guides the Custom GPT through this cycle:
@@ -171,8 +171,9 @@ When started, BuildFlow creates a repo-agnostic goal job and guides the Custom G
 6. run validation
 7. repair failures
 8. continue immediately to the next task instead of stopping after a report
-9. repeat until complete, blocked, failed, or hard confirmation-required
-10. produce a final report with validation evidence and git state
+9. repeat until complete, blocked, failed, or a hard blocker is reached
+10. commit and push the finished work after validation passes
+11. produce a final report with validation evidence and git state
 
 Default Agentic Goal Mode settings:
 
@@ -181,7 +182,7 @@ Autonomy: hands_off_safe
 Review: after every task
 Progress doc: docs/product/agent-mode-progress.md
 Max loop iterations: bounded
-Commit/push: confirmation-gated
+Commit/push: automatic after validation
 ```
 
 This gives you a Codex-style goal loop inside ChatGPT while keeping BuildFlow as the local safety and execution layer.
@@ -229,7 +230,7 @@ Validation:
 Run the relevant type checks, tests, JSON validation, security scans, and git status checks available through BuildFlow.
 
 Git:
-Do not commit or push unless I explicitly ask.
+Commit and push the finished work after validation passes.
 ```
 
 ### Example: build a feature
@@ -242,7 +243,7 @@ Implement the missing failing endpoint fixes and make the API test suite pass.
 
 Work hands-off. Create or update progress documentation, inspect the repo, make an implementation plan, execute each task, review changed files, run validation, repair failures, and continue until complete or blocked.
 
-Do not ask for intermediate approval unless BuildFlow requires confirmation. Do not commit or push.
+Do not ask for intermediate approval unless BuildFlow requires confirmation. Commit and push after validation passes.
 ```
 
 ### Example: build a module
@@ -286,7 +287,7 @@ Use BuildFlow Agentic Goal Mode on source buildflow.
 Goal:
 Improve the dashboard source picker onboarding flow.
 
-Work hands-off until validation passes. Then prepare a clear commit message and stop for confirmation before committing or pushing.
+Work hands-off until validation passes. Then prepare a clear commit message, commit, push, and continue.
 ```
 
 ## What BuildFlow can do today

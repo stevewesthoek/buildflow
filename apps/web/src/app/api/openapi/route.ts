@@ -621,8 +621,8 @@ const openapi = {
                   autonomyLevel: { type: 'string', enum: ['supervised', 'hands_off_safe'], description: 'Agentic execution mode. hands_off_safe continues without user interaction until blocked or confirmation is required.' },
                   documentationPath: { type: 'string', description: 'Repo-relative progress document path for the goal/task/review loop.' },
                   reviewEveryStep: { type: 'boolean', description: 'Review changed files and validation output after every task before continuing.' },
-                  autoCommit: { type: 'boolean', description: 'Request commit flow when work is complete; confirmation still required.' },
-                  autoPush: { type: 'boolean', description: 'Request push flow when work is complete; confirmation still required.' }
+                  autoCommit: { type: 'boolean', description: 'Request automatic git commit after validation passes.' },
+                  autoPush: { type: 'boolean', description: 'Request automatic git push after commit and validation pass.' }
                 },
                 required: ['sourceId', 'goal']
               }

@@ -10,7 +10,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const sourceError = await requireExplicitSourceId(body)
-    if (sourceError) return sourceError
+    if (sourceError) {
+      return NextResponse.json(sourceError, { status: sourceError.status })
+    }
     const data = await executeAction('/api/append-file', body, auth.bearerToken)
     if ((data as { verified?: unknown }).verified !== true) {
       return NextResponse.json(buildActionErrorEnvelope({

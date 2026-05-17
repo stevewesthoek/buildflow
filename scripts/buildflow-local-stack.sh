@@ -15,6 +15,7 @@ PUBLIC_STATUS_URL="${PUBLIC_BASE_URL}/api/actions/status"
 
 AGENT_LOG="/tmp/buildflow-agent.log"
 AGENT_ERR_LOG="/tmp/buildflow-agent.err.log"
+AGENT_PID_FILE="/tmp/buildflow-agent.pid"
 RELAY_LOG="/tmp/buildflow-relay.log"
 RELAY_ERR_LOG="/tmp/buildflow-relay.err.log"
 WEB_LOG="/tmp/buildflow-web.log"
@@ -73,6 +74,41 @@ stop_web_pid() {
     fi
   fi
   rm -f "$WEB_PID_FILE"
+}
+
+agent_pid_running() {
+  if [ ! -f "$AGENT_PID_FILE" ]; then
+    return 1
+  fi
+  local pid
+  pid="$(cat "$AGENT_PID_FILE" 2>/dev/null || true)"
+  if [ -z "$pid" ]; then
+    return 1
+  fi
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+stop_agent_pid() {
+  if [ ! -f "$AGENT_PID_FILE" ]; then
+    return 0
+  fi
+  local pid
+  pid="$(cat "$AGENT_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+    log "Stopping agent PID $pid"
+    kill "$pid" || true
+    for _ in $(seq 1 10); do
+      if ! kill -0 "$pid" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      log "Force stopping agent PID $pid"
+      kill -9 "$pid" || true
+    fi
+  fi
+  rm -f "$AGENT_PID_FILE"
 }
 
 wait_for_docker() {
@@ -156,12 +192,38 @@ start_agent_if_needed() {
     log "Agent already healthy on ${AGENT_PORT}."
     return 0
   fi
-  log "Starting agent on ${AGENT_PORT}."
-  if command -v setsid >/dev/null 2>&1; then
-    AGENT_PORT="$AGENT_PORT" setsid pnpm --dir "$REPO_ROOT/packages/cli" dev >"$AGENT_LOG" 2>"$AGENT_ERR_LOG" </dev/null &
-  else
-    AGENT_PORT="$AGENT_PORT" nohup pnpm --dir "$REPO_ROOT/packages/cli" dev >"$AGENT_LOG" 2>"$AGENT_ERR_LOG" </dev/null &
+  if agent_pid_running; then
+    log "Agent PID file exists but health check failed; stopping stale agent process."
+    stop_agent_pid
   fi
+  log "Starting agent on ${AGENT_PORT}."
+  : >"$AGENT_LOG"
+  : >"$AGENT_ERR_LOG"
+  local pid
+  pid="$(
+    python3 - "$REPO_ROOT/packages/cli" "$AGENT_PORT" "$AGENT_LOG" "$AGENT_ERR_LOG" <<'PY'
+import os
+import subprocess
+import sys
+
+cli_dir, port, log_path, err_path = sys.argv[1:5]
+env = os.environ.copy()
+env["AGENT_PORT"] = port
+
+with open(log_path, "ab", buffering=0) as log_file, open(err_path, "ab", buffering=0) as err_file:
+    proc = subprocess.Popen(
+        ["pnpm", "--dir", cli_dir, "dev"],
+        cwd=cli_dir,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=err_file,
+        start_new_session=True,
+    )
+    print(proc.pid)
+PY
+  )"
+  echo "$pid" >"$AGENT_PID_FILE"
 }
 
 start_relay() {
@@ -216,6 +278,7 @@ stop_web() {
 }
 
 stop_agent() {
+  stop_agent_pid
   kill_port "$AGENT_PORT"
 }
 
