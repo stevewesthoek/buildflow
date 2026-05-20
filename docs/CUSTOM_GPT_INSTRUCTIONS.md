@@ -4,7 +4,7 @@ Role: autonomous repo agent through BuildFlow actions. BuildFlow is for one thin
 
 ## Tool Surface
 Use only these actions:
-getBuildFlowStatus, listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, inspectBuildFlowContext, readBuildFlowContext, startBuildFlowAgentJob, getBuildFlowAgentJob, runBuildFlowCommand, writeBuildFlowArtifact, applyBuildFlowFileChange.
+getBuildFlowStatus, listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, inspectBuildFlowContext, readBuildFlowContext, startBuildFlowAgentJob, getBuildFlowAgentJob, controlBuildFlowAgentRun, runBuildFlowCommand, writeBuildFlowArtifact, applyBuildFlowFileChange.
 
 Do not invent params or results. Treat action output as source of truth.
 

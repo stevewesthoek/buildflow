@@ -142,7 +142,7 @@ const agentJobSchema = {
   properties: {
     id: { type: 'string' },
     sourceId: { type: 'string' },
-    status: { type: 'string', enum: ['queued', 'running', 'needs_confirmation', 'blocked', 'completed', 'failed'] },
+    status: { type: 'string', enum: ['queued', 'running', 'paused', 'cancelled', 'needs_confirmation', 'blocked', 'completed', 'failed'] },
     maxIterations: { type: 'integer' },
     currentIteration: { type: 'integer' },
     activeTaskId: { type: 'string' },
@@ -161,6 +161,22 @@ const agentJobSchema = {
     lastKnownGitStatus: { type: 'string' }
   },
   required: ['id', 'sourceId', 'status', 'maxIterations', 'currentIteration', 'completedTaskCount', 'totalTaskCount', 'autoCommit', 'autoPush', 'requiresConfirmation', 'nextActions', 'summary', 'handoffPath']
+}
+
+const agentEventSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string' },
+    jobId: { type: 'string' },
+    sourceId: { type: 'string' },
+    type: { type: 'string' },
+    message: { type: 'string' },
+    createdAt: { type: 'string' },
+    commandKind: { type: 'string' },
+    status: { type: 'string' }
+  },
+  required: ['id', 'jobId', 'sourceId', 'type', 'message', 'createdAt']
 }
 
 const commandResultSchema = {
@@ -231,6 +247,7 @@ const schemaRefs = new Map<object, string>([
   [nextBatchSchema, 'NextBatch'],
   [writeResultSchema, 'WriteResult'],
   [agentJobSchema, 'AgentJob'],
+  [agentEventSchema, 'AgentEvent'],
   [commandResultSchema, 'CommandResult'],
   [errorSchema, 'Error']
 ])
@@ -268,6 +285,7 @@ const openapi = {
       NextBatch: nextBatchSchema,
       WriteResult: writeResultSchema,
       AgentJob: agentJobSchema,
+      AgentEvent: agentEventSchema,
       CommandResult: commandResultSchema,
       Error: errorSchema
     },
@@ -661,7 +679,7 @@ const openapi = {
                 additionalProperties: false,
                 properties: {
                   jobId: { type: 'string', description: 'Agent job id. Omit to list jobs.' },
-                  status: { type: 'string', enum: ['queued', 'running', 'needs_confirmation', 'blocked', 'completed', 'failed'] },
+                  status: { type: 'string', enum: ['queued', 'running', 'paused', 'cancelled', 'needs_confirmation', 'blocked', 'completed', 'failed'] },
                   currentIteration: { type: 'integer' },
                   blockedReason: { type: 'string' },
                   requiresConfirmation: { type: 'boolean' },
@@ -695,6 +713,59 @@ const openapi = {
                     diagnostics: diagnosticsSchema
                   },
                   required: ['status']
+                }
+              }
+            }
+          },
+          ...errorResponses
+        }
+      }
+    },
+    '/api/actions/agent/control': {
+      post: {
+        operationId: 'controlBuildFlowAgentRun',
+        summary: 'Control Agent Runtime run',
+        description: 'Pause, resume, cancel, or fetch compact events for a local Agent Runtime run.',
+        'x-openai-isConsequential': false,
+        security: [bearer],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  jobId: { type: 'string', description: 'Agent job id.' },
+                  action: { type: 'string', enum: ['events', 'pause', 'resume', 'cancel'], description: 'Control action. Use events for compact progress polling.' },
+                  reason: { type: 'string', description: 'Optional compact reason for pause, resume, or cancel.' },
+                  limit: { type: 'integer', description: 'Max recent events to return.', minimum: 1, maximum: 25 },
+                  full: { type: 'boolean', description: 'Return full job state. Usually false for speed.' }
+                },
+                required: ['jobId']
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Agent Runtime control result',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    status: { type: 'string' },
+                    action: { type: 'string' },
+                    job: agentJobSchema,
+                    events: { type: 'array', items: agentEventSchema },
+                    returnedBytes: { type: 'integer' },
+                    budgetBytes: { type: 'integer' },
+                    activity: activitySchema,
+                    diagnostics: diagnosticsSchema
+                  },
+                  required: ['status', 'job', 'events']
                 }
               }
             }

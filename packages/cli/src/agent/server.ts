@@ -15,7 +15,8 @@ import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot
 import type { Workspace } from '@buildflow/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
 import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
-import { compactAgentJob, getAgentJob, listAgentJobs, startAgentJob, updateAgentJob } from './agent-jobs'
+import { compactAgentJob, controlAgentJob, getAgentJob, listAgentJobs, startAgentJob, updateAgentJob, type AgentJobControlAction } from './agent-jobs'
+import { listAgentEvents, appendAgentEvent } from './agent-events'
 import { startLocalAgentPreflight } from './agent-runtime'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from './payload-budget'
 
@@ -329,6 +330,13 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
       if (source.indexStatus !== 'ready') return reply.code(409).send({ error: `Source is not ready for Agent Mode: ${sourceId}`, indexStatus: source.indexStatus })
       const job = startAgentJob({ sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush })
+      appendAgentEvent({
+        jobId: job.id,
+        sourceId,
+        type: 'job_started',
+        message: 'Agent Runtime job created. Custom GPT remains the reasoning and coding engine; local BuildFlow handles deterministic control-plane work.',
+        status: job.status
+      })
       if (autonomyLevel === 'hands_off_safe') {
         setImmediate(() => startLocalAgentPreflight({ jobId: job.id, sourceId, sourceRoot: source.path }))
       }
@@ -338,7 +346,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string; lastKnownGitStatus?: string; roadmapPhases?: any[]; activeTaskId?: string; completedTaskCount?: number; full?: boolean; limit?: number } }>('/api/agent-jobs/status', async (request, reply) => {
+  fastify.post<{ Body: { jobId?: string; status?: 'queued' | 'running' | 'paused' | 'cancelled' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'; currentIteration?: number; blockedReason?: string; requiresConfirmation?: boolean; confirmationReason?: string; nextActions?: string[]; summary?: string; lastKnownGitStatus?: string; roadmapPhases?: any[]; activeTaskId?: string; completedTaskCount?: number; full?: boolean; limit?: number } }>('/api/agent-jobs/status', async (request, reply) => {
     try {
       const { jobId, full, limit, ...patch } = request.body || {}
       if (!jobId) {
@@ -349,6 +357,45 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const job = Object.keys(patch).length > 0 ? updateAgentJob(jobId, patch) : getAgentJob(jobId)
       if (!job) return reply.code(404).send({ error: `Agent job not found: ${jobId}` })
       return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job: full === true ? job : compactAgentJob(job) })
+    } catch (err) {
+      return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
+    }
+  })
+
+  fastify.post<{ Body: { jobId: string; action?: AgentJobControlAction | 'events'; reason?: string; limit?: number; full?: boolean } }>('/api/agent-jobs/control', async (request, reply) => {
+    try {
+      const { jobId, action = 'events', reason, limit, full } = request.body || {}
+      if (!jobId || typeof jobId !== 'string') return reply.code(400).send({ error: 'jobId is required' })
+      const existing = getAgentJob(jobId)
+      if (!existing) return reply.code(404).send({ error: `Agent job not found: ${jobId}` })
+
+      let job = existing
+      if (action === 'pause' || action === 'resume' || action === 'cancel') {
+        job = controlAgentJob(jobId, action, reason)
+        appendAgentEvent({
+          jobId,
+          sourceId: job.sourceId,
+          type: action === 'pause' ? 'job_paused' : action === 'resume' ? 'control_requested' : 'job_cancelled',
+          message: reason ? `${action} requested: ${reason}` : `${action} requested.`,
+          status: job.status
+        })
+        if (action === 'resume' && job.autonomyLevel === 'hands_off_safe') {
+          const source = getSourcesSafe().find(item => item.id === job.sourceId)
+          if (source?.enabled) setImmediate(() => startLocalAgentPreflight({ jobId: job.id, sourceId: job.sourceId, sourceRoot: source.path }))
+        }
+      } else if (action !== 'events') {
+        return reply.code(400).send({ error: `Unsupported control action: ${action}` })
+      }
+
+      const events = listAgentEvents({ jobId, limit })
+      return reply.header('Cache-Control', 'no-store').send({
+        status: 'ok',
+        action,
+        job: full === true ? job : compactAgentJob(job),
+        events: events.events,
+        returnedBytes: events.returnedBytes,
+        budgetBytes: events.budgetBytes
+      })
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }

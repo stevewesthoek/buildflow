@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
 
-export type AgentJobStatus = 'queued' | 'running' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'
+export type AgentJobStatus = 'queued' | 'running' | 'paused' | 'cancelled' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'
 export type AgentJobMode = 'repo_agent'
 export type AgentAutonomyLevel = 'supervised' | 'hands_off_safe'
 
@@ -546,4 +546,41 @@ export function compactAgentJob(job: AgentJob): CompactAgentJob {
       totalTasks: phase.tasks.length
     }))
   }
+}
+
+
+export type AgentJobControlAction = 'pause' | 'resume' | 'cancel'
+
+export function controlAgentJob(jobId: string, action: AgentJobControlAction, reason?: string): AgentJob {
+  const job = getAgentJob(jobId)
+  if (!job) throw new Error(`Agent job not found: ${jobId}`)
+  const safeReason = reason ? String(reason).slice(0, COMPACT_TEXT_LIMIT) : undefined
+  if (action === 'pause') {
+    if (job.status !== 'running' && job.status !== 'queued') throw new Error(`Cannot pause job in ${job.status} state`)
+    return updateAgentJob(jobId, {
+      status: 'paused',
+      summary: safeReason ? `Agent run paused: ${safeReason}` : 'Agent run paused.',
+      nextActions: ['Resume, cancel, or ask Custom GPT for targeted reasoning/coding before continuing.']
+    })
+  }
+  if (action === 'resume') {
+    if (job.status !== 'paused') throw new Error(`Cannot resume job in ${job.status} state`)
+    return updateAgentJob(jobId, {
+      status: 'running',
+      summary: safeReason ? `Agent run resumed: ${safeReason}` : 'Agent run resumed.',
+      nextActions: ['Local deterministic runtime can continue. Poll compact status/events for progress.']
+    })
+  }
+  if (action === 'cancel') {
+    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') throw new Error(`Cannot cancel job in ${job.status} state`)
+    return updateAgentJob(jobId, {
+      status: 'cancelled',
+      summary: safeReason ? `Agent run cancelled: ${safeReason}` : 'Agent run cancelled.',
+      nextActions: ['Start a new Agent Mode job when ready.'],
+      blockedReason: undefined,
+      requiresConfirmation: false,
+      confirmationReason: undefined
+    })
+  }
+  throw new Error(`Unsupported agent control action: ${action}`)
 }

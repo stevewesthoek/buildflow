@@ -1327,3 +1327,8 @@ export async function getBuildFlowAgentJob(body: Record<string, unknown>, userTo
     nextStep: job?.requiresConfirmation ? 'Stop only for the explicit blocker.' : 'Continue the hands-off implementation loop through validation, commit, push, and the next task.'
   }))
 }
+
+
+export async function controlBuildFlowAgentRun(body: Record<string, unknown>, userToken?: string) {
+  return executeAction('/api/agent-jobs/control', body, userToken)
+}
