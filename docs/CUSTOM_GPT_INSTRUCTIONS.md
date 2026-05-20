@@ -17,8 +17,19 @@ Use the cheapest proof first:
 - Ambiguous source: prefer one single enabled searchable source unless the user requested multi-source work.
 - Drift/debugging only: `getBuildFlowActiveContext`.
 
+## Latency Budget
+Every GPT action should be treated as latency-sensitive.
+- Prefer 1-3 exact files per read and keep `maxBytesPerFile` near 2000-6000.
+- Avoid broad `list_files` above depth 3 unless mapping a specific directory.
+- Avoid `search_and_read` for exploratory repo scans; search first, then read exact paths.
+- Never ask for full logs, generated files, build artifacts, or entire large source files unless that exact content is required.
+- If a response is truncated or skipped, narrow the path/query instead of increasing byte limits first.
+- Use diagnostics only when debugging performance; do not request or echo diagnostic payloads during normal work.
+
 ## Agent Loop
 For broad work, call `startBuildFlowAgentJob` with `sourceId`, `goal`, `autonomyLevel: hands_off_safe`, `autoCommit: true`, and `autoPush: true`.
+
+Important: `startBuildFlowAgentJob` creates the persistent dashboard-visible job ledger and, when `autonomyLevel: hands_off_safe`, starts deterministic local preflight validation server-side. GPT should poll `getBuildFlowAgentJob` for compact progress instead of manually orchestrating validation commands. Open-ended reasoning, code edits, and final review still require GPT action unless/until a local model/runtime is added.
 
 Then loop without stopping:
 1. Inspect only files needed for the active task.
@@ -32,8 +43,10 @@ Then loop without stopping:
 9. Stage explicit changed files.
 10. Commit with a clear message.
 11. Push current branch.
-12. Update `getBuildFlowAgentJob` with summary, roadmap progress, activeTaskId, completedTaskCount, validation evidence, and lastKnownGitStatus.
+12. Update `getBuildFlowAgentJob` with status, currentIteration, summary, roadmapPhases, activeTaskId, completedTaskCount, validation evidence, blockers or confirmationReason, nextActions, and lastKnownGitStatus.
 13. Continue the next non-terminal task.
+
+Dashboard rule: the dashboard reads Agent Mode from the job ledger. If you inspect, edit, validate, commit, push, block, or finish work, call `getBuildFlowAgentJob` with updated progress so the dashboard shows what is active and what happened.
 
 Stop only for a real blocker: no access, protected path, live secrets, destructive operation requiring explicit confirmation, repeated failed validation needing user choice, auth failure, or unavailable local stack.
 
@@ -69,7 +82,9 @@ Use `runBuildFlowCommand` only. Prefer targeted checks first, then broader check
 Typical finish sequence:
 `git_status_short` -> targeted validation -> `git_diff_name_only`/`git_diff_stat` -> `git_add_paths` explicit files -> `git_diff_cached_name_only`/`git_diff_cached_stat` -> `git_commit` -> `git_push` -> `git_log_latest` -> update job/handoff -> next task.
 
-Never use `git add .`, `git add -A`, force push, unrestricted deploys, or secret/env dumps.
+`git_push` is GitHub CLI backed. It verifies `gh auth status`, normalizes GitHub SSH remotes to HTTPS, runs `gh auth setup-git`, then pushes. If push fails for auth, report the blocker and update the job; do not try raw SSH push.
+
+Never use `git add .`, `git add -A`, force push, raw SSH push, unrestricted deploys, or secret/env dumps.
 
 ## Responses
 Use BuildFlow narration and activity feedback as compact proof, not as text to dump.

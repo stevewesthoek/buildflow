@@ -540,7 +540,7 @@ const openapi = {
       post: {
         operationId: 'runBuildFlowCommand',
         summary: 'Run safe command',
-        description: 'Run an allowlisted git/status, validation, or explicit git workflow command inside a selected source.',
+        description: 'Run an allowlisted git/status, validation, or explicit git workflow command. git_push verifies gh auth, normalizes GitHub SSH remotes to HTTPS, runs gh auth setup-git, then pushes without force.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -596,7 +596,7 @@ const openapi = {
       post: {
         operationId: 'startBuildFlowAgentJob',
         summary: 'Start Agent Mode job',
-        description: 'Start a hands-off Agent Mode loop. Continue with read/write/command actions until blocked or complete.',
+        description: 'Start the persistent Agent Mode ledger. With hands_off_safe, the local agent immediately runs deterministic server-side preflight validation and updates compact job status; GPT should poll getBuildFlowAgentJob instead of orchestrating those checks.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -608,7 +608,7 @@ const openapi = {
                 additionalProperties: false,
                 properties: {
                   sourceId: { type: 'string', description: 'Target source id.' },
-                  goal: { type: 'string', description: 'Implementation goal for the repo-agent loop.' },
+                  goal: { type: 'string', description: 'Implementation goal for the repo-agent loop. Include acceptance criteria and validation expectations when available.' },
                   maxIterations: { type: 'integer', description: 'Maximum repair/validation iterations.', minimum: 1, maximum: 20 },
                   autonomyLevel: { type: 'string', enum: ['supervised', 'hands_off_safe'], description: 'Use hands_off_safe for autonomous work.' },
                   documentationPath: { type: 'string', description: 'Repo-relative progress document path.' },
@@ -649,7 +649,7 @@ const openapi = {
       post: {
         operationId: 'getBuildFlowAgentJob',
         summary: 'Get or update Agent Mode job',
-        description: 'Return Agent Mode job state or update safe progress fields after a step in the hands-off loop.',
+        description: 'Return or update the dashboard-visible Agent Mode ledger after planning, file changes, validation, commit, push, blockers, and final handoff.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {

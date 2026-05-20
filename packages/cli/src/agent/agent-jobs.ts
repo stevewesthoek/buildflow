@@ -120,11 +120,12 @@ export type CompactAgentJob = Pick<
 }
 
 const jobs = new Map<string, AgentJob>()
-const MAX_GOAL_LENGTH = 4000
+const MAX_GOAL_LENGTH = 3000
 const MAX_ITERATIONS = 40
 const JOB_STORE_PATH = path.join(getConfigDir(), 'agent-jobs.json')
-const COMPACT_TEXT_LIMIT = 700
-const COMPACT_LIST_ITEM_LIMIT = 240
+// Compact job payloads are returned to GPT Actions repeatedly; keep summaries short.
+const COMPACT_TEXT_LIMIT = 420
+const COMPACT_LIST_ITEM_LIMIT = 160
 const SECRET_LIKE_PATTERNS = [
   'BEGIN RSA' + ' PRIVATE KEY',
   'BEGIN OPENSSH' + ' PRIVATE KEY',
