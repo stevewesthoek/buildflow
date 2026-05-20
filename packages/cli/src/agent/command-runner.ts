@@ -1,5 +1,5 @@
 import fs from 'fs'
-import { spawn } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import path from 'path'
 import { validateWriteTarget } from './safe-access'
 
@@ -303,7 +303,7 @@ function assertExplicitPaths(paths?: string[]): string[] {
 
 function getStagedPaths(sourceRoot: string): string[] {
   const output = fs.existsSync(path.join(sourceRoot, '.git'))
-    ? require('child_process').execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: sourceRoot, encoding: 'utf8' })
+    ? execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: sourceRoot, encoding: 'utf8' })
     : ''
   return output.split('\n').map((item: string) => item.trim()).filter(Boolean)
 }
@@ -360,8 +360,78 @@ async function runRepoLocalTsxScript(request: SafeCommandRequest, scriptPath: st
 }
 
 function currentBranch(sourceRoot: string): string {
-  const output = require('child_process').execFileSync('git', ['branch', '--show-current'], { cwd: sourceRoot, encoding: 'utf8' }).trim()
+  const output = execFileSync('git', ['branch', '--show-current'], { cwd: sourceRoot, encoding: 'utf8' }).trim()
   return output || 'main'
+}
+
+function getGitOutput(sourceRoot: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: sourceRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GH_PROMPT_DISABLED: '1'
+    }
+  }).trim()
+}
+
+function getGithubRepoSlug(sourceRoot: string, remote: string): string {
+  try {
+    const output = execFileSync('gh', ['repo', 'view', remote, '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], {
+      cwd: sourceRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GH_PROMPT_DISABLED: '1'
+      }
+    }).trim()
+    if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(output)) return output
+  } catch {
+    // Fall back to parsing the configured remote URL.
+  }
+
+  const remoteUrl = getGitOutput(sourceRoot, ['remote', 'get-url', remote])
+  const sshMatch = remoteUrl.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/)
+  if (sshMatch) return sshMatch[1]
+  const httpsMatch = remoteUrl.match(/^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?$/)
+  if (httpsMatch) return httpsMatch[1]
+  throw new Error(`git_push only supports GitHub remotes; ${remote} points to ${remoteUrl}`)
+}
+
+async function runGithubCliBackedPush(request: SafeCommandRequest, remote: string, branch: string, sourceRoot: string): Promise<SafeCommandResult> {
+  const auth = await runProcess(request, ['gh', 'auth', 'status'], sourceRoot)
+  if (auth.status !== 'completed') {
+    return {
+      ...auth,
+      commandKind: 'git_push',
+      command: ['gh', 'auth', 'status'],
+      stderr: `${auth.stderr}${auth.stderr ? '\n' : ''}GitHub CLI authentication is required before BuildFlow can push. Run: gh auth login`
+    }
+  }
+
+  const repoSlug = getGithubRepoSlug(sourceRoot, remote)
+  const httpsUrl = `https://github.com/${repoSlug}.git`
+  const currentUrl = getGitOutput(sourceRoot, ['remote', 'get-url', remote])
+  if (currentUrl !== httpsUrl) {
+    const setUrl = await runProcess(request, ['git', 'remote', 'set-url', remote, httpsUrl], sourceRoot)
+    if (setUrl.status !== 'completed') return setUrl
+  }
+
+  const setup = await runProcess(request, ['gh', 'auth', 'setup-git'], sourceRoot)
+  if (setup.status !== 'completed') return setup
+
+  const push = await runProcess(request, ['git', 'push', remote, branch], sourceRoot)
+  return {
+    ...push,
+    command: ['gh', 'auth', 'setup-git', '&&', 'git', 'push', remote, branch],
+    stdout: [
+      currentUrl !== httpsUrl ? `remote ${remote} normalized to ${httpsUrl}` : `remote ${remote} already uses HTTPS`,
+      setup.stdout.trim(),
+      push.stdout.trim()
+    ].filter(Boolean).join('\n'),
+    stderr: push.stderr
+  }
 }
 
 function patternList(patternSet: SecurityPatternSet): Array<{ name: string; pattern: RegExp }> {
@@ -497,7 +567,7 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
     const branch = typeof request.branch === 'string' && request.branch.trim() ? request.branch.trim() : currentBranch(sourceRoot)
     if (!SAFE_REMOTE.test(remote)) throw new Error('remote must be a safe remote name')
     if (!SAFE_BRANCH.test(branch) || branch.startsWith('-') || branch.includes('..')) throw new Error('branch must be a safe branch name')
-    return runProcess(request, ['git', 'push', remote, branch], sourceRoot)
+    return runGithubCliBackedPush(request, remote, branch, sourceRoot)
   }
 
   if (request.commandKind === 'run_package_script') {
