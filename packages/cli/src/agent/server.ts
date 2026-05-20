@@ -16,6 +16,8 @@ import type { Workspace } from '@buildflow/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
 import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
 import { compactAgentJob, getAgentJob, listAgentJobs, startAgentJob, updateAgentJob } from './agent-jobs'
+import { startLocalAgentPreflight } from './agent-runtime'
+import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from './payload-budget'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -27,10 +29,8 @@ try {
 
 export async function startLocalServer(port: number = 3052): Promise<void> {
   const fastify = Fastify({ logger: true })
-  // Keep GPT Action responses small enough for reliable low-latency tool handoffs.
-  // Large JSON payloads make the model/tool loop slow even when the local server is fast.
-  const READ_FILES_RESPONSE_BUDGET_BYTES = 32_000
-  const DEFAULT_READ_FILES_MAX_BYTES_PER_FILE = 6_000
+  const READ_FILES_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BUDGET_BYTES
+  const DEFAULT_READ_FILES_MAX_BYTES_PER_FILE = GPT_ACTION_DEFAULT_FILE_BYTES
 
   const indexer = new Indexer()
   const config = loadConfig()
@@ -272,73 +272,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     return null
   }
 
-  const localAgentExecutions = new Set<string>()
-
-  const runLocalAgentPreflight = (jobId: string, sourceId: string, sourceRoot: string): void => {
-    if (localAgentExecutions.has(jobId)) return
-    localAgentExecutions.add(jobId)
-    void (async () => {
-      const evidence: string[] = []
-      try {
-        updateAgentJob(jobId, {
-          status: 'running',
-          summary: 'Local Agent Mode preflight is running server-side. GPT can poll compact job status instead of orchestrating these checks.',
-          nextActions: ['Poll getBuildFlowAgentJob for compact progress.', 'Wait for local preflight validation before making follow-up edits.']
-        })
-
-        const commands: Array<{ kind: SafeCommandKind; paths?: string[]; timeoutMs?: number }> = [
-          { kind: 'git_status_short', timeoutMs: 30_000 }
-        ]
-        if (fs.existsSync(path.join(sourceRoot, 'packages/cli/package.json'))) commands.push({ kind: 'type_check_cli', timeoutMs: 120_000 })
-        if (fs.existsSync(path.join(sourceRoot, 'apps/web/package.json'))) commands.push({ kind: 'type_check_web', timeoutMs: 120_000 })
-        if (fs.existsSync(path.join(sourceRoot, 'docs/openapi.chatgpt.json'))) commands.push({ kind: 'validate_json_files', paths: ['docs/openapi.chatgpt.json'], timeoutMs: 30_000 })
-
-        for (let index = 0; index < commands.length; index += 1) {
-          const command = commands[index]
-          updateAgentJob(jobId, {
-            currentIteration: index + 1,
-            summary: `Local Agent Mode preflight running ${command.kind}.`,
-            nextActions: ['Poll compact job status.', 'Local BuildFlow is handling validation server-side.']
-          })
-          const result = await runSafeCommand({
-            sourceId,
-            sourceRoot,
-            commandKind: command.kind,
-            timeoutMs: command.timeoutMs,
-            paths: command.paths
-          })
-          evidence.push(`${command.kind}: ${result.status}${result.exitCode !== null ? ` (${result.exitCode})` : ''}`)
-          if (result.status !== 'completed') {
-            updateAgentJob(jobId, {
-              status: 'blocked',
-              blockedReason: `Local preflight stopped at ${command.kind}: ${result.status}`,
-              summary: evidence.join('; '),
-              lastKnownGitStatus: result.stdout || result.stderr || result.reason || 'No command output.',
-              nextActions: ['Review the failed local preflight result.', 'Repair locally or ask GPT for targeted help with the compact failure summary.']
-            })
-            return
-          }
-        }
-
-        updateAgentJob(jobId, {
-          status: 'completed',
-          summary: `Local Agent Mode preflight completed server-side: ${evidence.join('; ')}.`,
-          nextActions: ['Use compact job status as validation evidence.', 'Continue with targeted implementation only if additional requirements remain.'],
-          lastKnownGitStatus: evidence.join('\n')
-        })
-      } catch (err) {
-        updateAgentJob(jobId, {
-          status: 'failed',
-          blockedReason: err instanceof Error ? err.message : String(err),
-          summary: evidence.length > 0 ? evidence.join('; ') : 'Local Agent Mode preflight failed before producing validation evidence.',
-          nextActions: ['Inspect the local agent error and retry after repair.']
-        })
-      } finally {
-        localAgentExecutions.delete(jobId)
-      }
-    })()
-  }
-
   // Health endpoint
   fastify.get('/health', async (request, reply) => {
       return {
@@ -397,7 +330,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       if (source.indexStatus !== 'ready') return reply.code(409).send({ error: `Source is not ready for Agent Mode: ${sourceId}`, indexStatus: source.indexStatus })
       const job = startAgentJob({ sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush })
       if (autonomyLevel === 'hands_off_safe') {
-        setImmediate(() => runLocalAgentPreflight(job.id, sourceId, source.path))
+        setImmediate(() => startLocalAgentPreflight({ jobId: job.id, sourceId, sourceRoot: source.path }))
       }
       return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job: full === true ? job : compactAgentJob(job) })
     } catch (err) {
