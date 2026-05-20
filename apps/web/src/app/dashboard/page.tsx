@@ -21,6 +21,26 @@ type ActivityLine = {
   label: string
   detail: string
   tone: StatusTone
+  timestamp?: string
+}
+
+type AgentDashboardJob = {
+  id: string
+  sourceId: string
+  status: string
+  currentIteration: number
+  maxIterations: number
+  completedTaskCount: number
+  totalTaskCount: number
+  updatedAt?: string
+  summary?: string
+  activeTask?: {
+    title: string
+    phaseTitle: string
+    status: string
+  }
+  blockedReason?: string
+  confirmationReason?: string
 }
 
 const terminalStatuses = new Set(['ready', 'failed', 'disabled'])
@@ -107,6 +127,7 @@ export default function Dashboard() {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [activity, setActivity] = useState<ActivityLine[]>([])
+  const [agentJobs, setAgentJobs] = useState<AgentDashboardJob[]>([])
   const hydratedRef = useRef(false)
 
   const readyCount = useMemo(() => sources.filter(source => source.enabled && source.indexStatus === 'ready').length, [sources])
@@ -120,7 +141,23 @@ export default function Dashboard() {
   )
 
   const pushActivity = (label: string, detail: string, tone: StatusTone = 'neutral') => {
-    setActivity(current => [{ id: `${Date.now()}-${label}`, label, detail, tone }, ...current].slice(0, 3))
+    setActivity(current => [{ id: `${Date.now()}-${label}`, label, detail, tone, timestamp: new Date().toISOString() }, ...current].slice(0, 5))
+  }
+
+  const refreshAgentJobs = async (silent = true) => {
+    try {
+      const data = await fetchJson('/api/agent/jobs')
+      const jobs = Array.isArray(data.jobs) ? data.jobs as AgentDashboardJob[] : []
+      setAgentJobs(jobs)
+      if (!silent && jobs.length > 0) {
+        const active = jobs.find(job => ['queued', 'running', 'needs_confirmation'].includes(job.status)) || jobs[0]
+        pushActivity('Agent Mode sync', `${active.status}: ${active.activeTask?.title || active.summary || active.id}`, active.status === 'blocked' || active.status === 'failed' ? 'bad' : active.status === 'needs_confirmation' ? 'warn' : 'good')
+      }
+      return jobs
+    } catch (err) {
+      if (!silent) pushActivity('Agent jobs unavailable', err instanceof Error ? err.message : String(err), 'warn')
+      return agentJobs
+    }
   }
 
   const refreshSources = async (silent = false) => {
@@ -129,7 +166,8 @@ export default function Dashboard() {
       setError(null)
       const [sourcesData, activeData] = await Promise.all([
         fetchJson('/api/agent/sources'),
-        fetchJson('/api/agent/active-sources')
+        fetchJson('/api/agent/active-sources'),
+        refreshAgentJobs(true)
       ])
       const nextSources = Array.isArray(sourcesData.sources) ? sourcesData.sources as KnowledgeSource[] : []
       const nextActiveIds = Array.isArray(activeData.activeSourceIds) ? activeData.activeSourceIds as string[] : []
@@ -201,7 +239,15 @@ export default function Dashboard() {
       setLoading(false)
     }
     void refreshSources(Boolean(snapshot))
+    void refreshAgentJobs(true)
   }, [])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void refreshAgentJobs(true)
+    }, agentJobs.some(job => ['queued', 'running', 'needs_confirmation'].includes(job.status)) ? 2500 : 7000)
+    return () => window.clearInterval(interval)
+  }, [agentJobs])
 
   useEffect(() => {
     if (!showAddSource) return
@@ -458,13 +504,31 @@ export default function Dashboard() {
 
             <div className="min-h-0 overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">Agent activity</p>
-              <div className="mt-3 space-y-2">
+              <div className="mt-3 space-y-2 overflow-y-auto pr-1">
+                {agentJobs.length > 0 ? agentJobs.map(job => (
+                  <div key={job.id} className={`rounded-xl px-3 py-2 text-sm ring-1 ${toneClass[job.status === 'failed' || job.status === 'blocked' ? 'bad' : job.status === 'needs_confirmation' ? 'warn' : job.status === 'completed' ? 'good' : 'neutral']}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="truncate font-medium">Agent Mode: {job.status}</div>
+                      <div className="shrink-0 font-mono text-[10px] opacity-70">{job.completedTaskCount}/{job.totalTaskCount}</div>
+                    </div>
+                    <div className="mt-1 text-xs opacity-85">
+                      {job.activeTask ? `${job.activeTask.phaseTitle}: ${job.activeTask.title}` : job.summary || job.id}
+                    </div>
+                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/50 dark:bg-slate-950/40">
+                      <div className="h-full rounded-full bg-current opacity-60" style={{ width: `${job.totalTaskCount > 0 ? Math.round((job.completedTaskCount / job.totalTaskCount) * 100) : 0}%` }} />
+                    </div>
+                    {job.blockedReason || job.confirmationReason ? (
+                      <div className="mt-1 text-xs opacity-85">{job.blockedReason || job.confirmationReason}</div>
+                    ) : null}
+                  </div>
+                )) : null}
                 {activity.length > 0 ? activity.map(item => (
                   <div key={item.id} className={`rounded-xl px-3 py-2 text-sm ring-1 ${toneClass[item.tone]}`}>
                     <div className="font-medium">{item.label}</div>
                     <div className="mt-0.5 text-xs opacity-80">{item.detail}</div>
                   </div>
-                )) : <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">No dashboard actions yet.</p>}
+                )) : null}
+                {agentJobs.length === 0 && activity.length === 0 ? <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">No agent activity yet.</p> : null}
               </div>
             </div>
           </aside>
