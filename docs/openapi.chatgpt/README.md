@@ -10,7 +10,7 @@ Use one of these:
 
 BuildFlow v1.2.13-beta actions return structured `activity` fields. The GPT must be instructed to surface those summaries in conversation; the schema alone does not make the assistant narrate progress.
 
-The Custom GPT surface is exactly these 8 core operations, with `applyBuildFlowFileChange` now carrying maintainer sub-operations through `changeType`:
+The Custom GPT surface is exactly these 11 operations. `applyBuildFlowFileChange` carries maintainer sub-operations through `changeType`; `runBuildFlowCommand` is the only command/validation/Git execution surface; Agent Mode operations expose a compact dashboard-visible job ledger.
 
 - `getBuildFlowStatus`
 - `listBuildFlowSources`
@@ -18,6 +18,9 @@ The Custom GPT surface is exactly these 8 core operations, with `applyBuildFlowF
 - `setBuildFlowActiveContext`
 - `inspectBuildFlowContext`
 - `readBuildFlowContext`
+- `runBuildFlowCommand`
+- `startBuildFlowAgentJob`
+- `getBuildFlowAgentJob`
 - `writeBuildFlowArtifact`
 - `applyBuildFlowFileChange`
 

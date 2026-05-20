@@ -26,10 +26,14 @@ Every GPT action should be treated as latency-sensitive.
 - If a response is truncated or skipped, narrow the path/query instead of increasing byte limits first.
 - Use diagnostics only when debugging performance; do not request or echo diagnostic payloads during normal work.
 
-## Agent Loop
-For broad work, call `startBuildFlowAgentJob` with `sourceId`, `goal`, `autonomyLevel: hands_off_safe`, `autoCommit: true`, and `autoPush: true`.
+## Agent Mode vs Manual Loop
+Use the manual loop for narrow implementation, review, hardening, schema, instruction, or follow-up tasks: inspect exact files, patch the smallest change, validate, review the diff, stage explicit paths, commit, and push.
 
-Important: `startBuildFlowAgentJob` creates the persistent dashboard-visible job ledger and, when `autonomyLevel: hands_off_safe`, starts deterministic local preflight validation server-side. GPT should poll `getBuildFlowAgentJob` for compact progress instead of manually orchestrating validation commands. Open-ended reasoning, code edits, and final review still require GPT action unless/until a local model/runtime is added.
+Use `startBuildFlowAgentJob` only for broad multi-phase work that benefits from a persistent dashboard-visible ledger. When used, pass `sourceId`, `goal`, `autonomyLevel: hands_off_safe`, `autoCommit: true`, and `autoPush: true` unless the user asks for supervised work.
+
+Important: `startBuildFlowAgentJob` creates the persistent dashboard-visible job ledger and, when `autonomyLevel: hands_off_safe`, starts deterministic local preflight validation server-side. GPT should poll `getBuildFlowAgentJob` for compact progress instead of manually orchestrating deterministic preflight checks. Open-ended reasoning, code edits, diff review, staging decisions, final validation interpretation, and final handoff still require GPT action unless/until a local model/runtime is added.
+
+Auto-commit safety: never assume Agent Mode auto-commit replaces GPT review. Before reporting work as done, inspect git status and relevant diffs, stage explicit changed files only, verify cached file names/stats, commit, push, and re-check latest log. If local Agent Mode already created a commit, verify it with `git_log_latest`, commit any remaining explicit files separately, and report both commits.
 
 Then loop without stopping:
 1. Inspect only files needed for the active task.
@@ -77,10 +81,10 @@ Hard blocks: real `.env` files, live-looking secrets, private keys, credentials,
 Use placeholders like `<token>` or `[REDACTED]` for secret examples.
 
 ## Validation and Git
-Use `runBuildFlowCommand` only. Prefer targeted checks first, then broader checks before commit.
+Use `runBuildFlowCommand` only. Prefer targeted checks first, then broader checks before commit. If a validation command times out or the BuildFlow gateway returns an unavailable/timeout response before command output is captured, do not claim success; retry once when reasonable, then report the limitation as unverified evidence.
 
 Typical finish sequence:
-`git_status_short` -> targeted validation -> `git_diff_name_only`/`git_diff_stat` -> `git_add_paths` explicit files -> `git_diff_cached_name_only`/`git_diff_cached_stat` -> `git_commit` -> `git_push` -> `git_log_latest` -> update job/handoff -> next task.
+`git_status_short` -> targeted validation -> `git_diff_name_only`/`git_diff_stat` -> inspect changed files if needed -> `git_add_paths` explicit files -> `git_diff_cached_name_only`/`git_diff_cached_stat` -> `git_commit` -> `git_push` -> `git_log_latest` -> update job/handoff -> next task.
 
 `git_push` is GitHub CLI backed. It verifies `gh auth status`, normalizes GitHub SSH remotes to HTTPS, runs `gh auth setup-git`, then pushes. If push fails for auth, report the blocker and update the job; do not try raw SSH push.
 
