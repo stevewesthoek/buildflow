@@ -119,6 +119,21 @@ Call chain: **ChatGPT → Cloudflare Tunnel → Next.js :3054 → Local Agent :3
 
 ---
 
+## Known User-Facing Issues That Cannot Be Fixed From BuildFlow
+
+**"Streaming interrupted" / "Message incomplete"**
+This is a ChatGPT platform issue, not a BuildFlow timeout. ChatGPT streams its *text generation* to the browser as tokens arrive. If that stream drops (network blip, OpenAI infra hiccup), the browser shows "streaming interrupted" — but this has nothing to do with action call timeouts. BuildFlow's backend returns in under 200ms, nowhere near the 45s limit. There is no keepalive, heartbeat, or partial response mechanism available on the Custom GPT action interface. Do not attempt to implement one — it is architecturally impossible with synchronous REST actions.
+
+**Perceived slowness between action calls**
+Each action call is ~100ms on our backend. The 20–60 second waits the user experiences are ChatGPT's own model inference time (reasoning before calling, processing response after). This is irreducible from BuildFlow's side. The only mitigation is switching the Custom GPT's model to GPT-4o mini (faster inference, less reasoning overhead for tool-calling tasks).
+
+**What to put in Custom GPT instructions vs. what not to**
+- ✅ Put in: action names, execution order, stop conditions, search/write examples, commit rules, isolation rules
+- ✅ Put in: one-line progress narration rule (low token cost, high UX benefit)
+- ❌ Do not put in: verbose examples that consume the 8K limit without behavioral benefit
+- ❌ Do not put in: retry logic, polling loops, or anything that adds action calls without necessity
+- ❌ Do not put in: instructions that only describe what the GPT already does by default (it wastes the character budget)
+
 ## Best Practices
 
 From [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) and community findings:
