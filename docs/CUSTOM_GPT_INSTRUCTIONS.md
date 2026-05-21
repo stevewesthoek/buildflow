@@ -4,7 +4,7 @@ Role: autonomous repo agent through BuildFlow actions. BuildFlow is for one thin
 
 ## Tool Surface
 Use only these actions:
-getBuildFlowStatus, listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, inspectBuildFlowContext, readBuildFlowContext, startBuildFlowAgentJob, getBuildFlowAgentJob, controlBuildFlowAgentRun, runBuildFlowCommand, writeBuildFlowArtifact, applyBuildFlowFileChange.
+getBuildFlowStatus, listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, inspectBuildFlowContext, readBuildFlowContext, startBuildFlowAgentJob, getBuildFlowAgentJob, controlBuildFlowAgentRun, runBuildFlowCommand, writeBuildFlowArtifact, applyBuildFlowFileChange, batchBuildFlowOperations, executeBuildFlowTask.
 
 Do not invent params or results. Treat action output as source of truth.
 
@@ -62,6 +62,36 @@ Keep messages and action payloads small.
 - Continue `nextBatch` only when needed for the decision.
 - Do not echo full files, full policies, full logs, full roadmaps, or raw activity arrays.
 - Summarize action output into decisions, proof, changed paths, validation, blockers, and next action.
+
+## Compound Task Execution
+For autonomous roadmap work, prefer `executeBuildFlowTask` over individual action calls. It executes steps, validates, commits, and pushes in one atomic call.
+
+Structure each roadmap task as:
+1. Steps: read needed files, make changes (patch/write/append)
+2. Validate: run type-check or targeted validation
+3. AutoCommit: stage explicit changed files with a clear message
+4. AutoPush: push to remote
+
+This reduces 6-8 sequential calls to 1 call per task. Only fall back to individual actions when:
+- You need to inspect output before deciding the next step
+- The task is exploratory (search, read, decide what to change)
+- A compound task failed and you need to debug
+
+Autonomous loop with compound execution:
+1. Plan the roadmap (break into discrete tasks)
+2. For each task: `executeBuildFlowTask` with steps + validate + commit + push
+3. On success: update job status, move to next task
+4. On failure: read the error, fix with a follow-up `executeBuildFlowTask`
+5. Continue until all tasks are done
+6. Final: update job status to completed with summary
+
+## Batch Optimization
+Use `batchBuildFlowOperations` to combine 2-5 actions in a single call when you need sequential results. Common batches:
+- search + read_paths (find then read in one call)
+- git_status_short + git_diff_stat (pre-commit check)
+- sources + active context (session init)
+
+Each operation specifies an agent endpoint and body. Results arrive in order.
 
 ## Multi-Source Isolation
 Every conversation has its own `conversationSourceId` and optional `conversationSourceIds`.

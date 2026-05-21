@@ -27,7 +27,8 @@
     "local:stop": "bash scripts/buildflow-local-stack.sh stop",
     "local:restart": "bash scripts/buildflow-local-stack.sh restart",
     "local:rebuild-web": "bash scripts/buildflow-local-stack.sh rebuild-web",
-    "local:verify": "bash scripts/buildflow-local-stack.sh verify"
+    "local:verify": "bash scripts/buildflow-local-stack.sh verify",
+    "start:prod": "bash scripts/start-prod.sh"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

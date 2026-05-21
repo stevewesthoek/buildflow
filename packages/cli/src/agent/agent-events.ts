@@ -16,6 +16,10 @@ export type AgentEventType =
   | 'job_completed'
   | 'job_blocked'
   | 'job_failed'
+  | 'task_step_failed'
+  | 'validation_failed'
+  | 'task_committed'
+  | 'task_pushed'
 
 export type AgentEvent = {
   id: string

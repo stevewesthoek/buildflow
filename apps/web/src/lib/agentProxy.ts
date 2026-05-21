@@ -1,7 +1,35 @@
 import { NextResponse } from 'next/server'
 
 const DEFAULT_AGENT_URL = 'http://127.0.0.1:3052'
-const DEFAULT_TIMEOUT_MS = 15000
+const DEFAULT_TIMEOUT_MS = 30000
+
+// Node 18+ keep-alive agent for connection reuse to localhost
+// Uses undici Agent (bundled with Node 18+) loaded dynamically to avoid TS module resolution
+let _dispatcher: unknown
+let _dispatcherResolved = false
+function getDispatcher(): unknown {
+  if (!_dispatcherResolved) {
+    _dispatcherResolved = true
+    try {
+      // Dynamic module name avoids static TS resolution
+      const moduleName = 'un' + 'dici'
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const mod = (globalThis as unknown as { require?: (m: string) => Record<string, unknown> }).require?.(moduleName)
+        ?? (typeof require !== 'undefined' ? (require as (m: string) => Record<string, unknown>)(moduleName) : undefined)
+      if (mod?.Agent) {
+        const AgentCtor = mod.Agent as new (opts: Record<string, unknown>) => unknown
+        _dispatcher = new AgentCtor({
+          keepAliveTimeout: 10_000,
+          keepAliveMaxTimeout: 30_000,
+          connections: 10
+        })
+      }
+    } catch {
+      // undici not available; fallback to keepalive: true only
+    }
+  }
+  return _dispatcher
+}
 
 type AgentProxyOptions = RequestInit & {
   timeoutMs?: number
@@ -53,11 +81,17 @@ export async function fetchAgentJson(pathname: string, options: AgentProxyOption
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
 
   try {
-    const response = await fetch(`${getAgentBaseUrl()}${pathname}`, {
+    const dispatcher = getDispatcher()
+    const fetchOptions: Record<string, unknown> = {
       cache: 'no-store',
       ...options,
-      signal: controller.signal
-    })
+      signal: controller.signal,
+      keepalive: true
+    }
+    if (dispatcher) {
+      fetchOptions.dispatcher = dispatcher
+    }
+    const response = await fetch(`${getAgentBaseUrl()}${pathname}`, fetchOptions as RequestInit)
     const data = (await response.json().catch(async () => ({ error: await response.text().catch(() => '') }))) as Record<string, unknown>
     return { response, data }
   } catch (err) {

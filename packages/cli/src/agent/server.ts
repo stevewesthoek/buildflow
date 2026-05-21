@@ -1469,6 +1469,182 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
+  // Compound execute-task endpoint: execute steps -> validate -> commit -> push in one request
+  fastify.post<{ Body: {
+    jobId: string
+    sourceId: string
+    task: { id: string; title: string; phase: string }
+    steps: Array<{
+      type: 'read_files' | 'write_file' | 'patch_file' | 'append_file' | 'delete_file' | 'run_command' | 'search'
+      paths?: string[]
+      maxBytesPerFile?: number
+      path?: string
+      content?: string
+      find?: string
+      replace?: string
+      allowMultiple?: boolean
+      separator?: string
+      mode?: 'createOnly' | 'overwrite'
+      commandKind?: string
+      timeoutMs?: number
+      message?: string
+      body?: string
+      remote?: string
+      branch?: string
+      query?: string
+      limit?: number
+    }>
+    validate?: { commands: Array<{ commandKind: string; timeoutMs?: number; paths?: string[] }> }
+    autoCommit?: { message: string; body?: string; paths: string[] }
+    autoPush?: { remote?: string; branch?: string }
+  } }>('/api/agent-jobs/execute-task', async (request, reply) => {
+    const { jobId, sourceId, task, steps, validate, autoCommit, autoPush } = request.body
+    if (!jobId || typeof jobId !== 'string') return reply.code(400).send({ error: 'jobId is required' })
+    if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
+    if (!Array.isArray(steps) || steps.length === 0) return reply.code(400).send({ error: 'steps array is required' })
+
+    const job = getAgentJob(jobId)
+    if (!job) return reply.code(404).send({ error: 'Job not found' })
+    if (!['running', 'queued'].includes(job.status)) return reply.code(409).send({ error: `Job is ${job.status}` })
+
+    const startedAt = Date.now()
+    const stepResults: Array<{ type: string; status: 'ok' | 'failed'; data?: unknown; error?: string }> = []
+
+    // Execute steps sequentially
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]
+      let endpoint: string
+      let body: Record<string, unknown>
+
+      switch (step.type) {
+        case 'read_files':
+          endpoint = '/api/read-files'
+          body = { sourceId, paths: step.paths, maxBytesPerFile: step.maxBytesPerFile || 12000 }
+          break
+        case 'write_file':
+          endpoint = '/api/write-file'
+          body = { sourceId, path: step.path, content: step.content, mode: step.mode || 'createOnly' }
+          break
+        case 'patch_file':
+          endpoint = '/api/patch-file'
+          body = { sourceId, path: step.path, find: step.find, replace: step.replace, allowMultiple: step.allowMultiple }
+          break
+        case 'append_file':
+          endpoint = '/api/append-file'
+          body = { sourceId, path: step.path, content: step.content, separator: step.separator }
+          break
+        case 'delete_file':
+          endpoint = '/api/delete-file'
+          body = { sourceId, path: step.path, confirmedByUser: true }
+          break
+        case 'run_command':
+          endpoint = '/api/commands/run'
+          body = { sourceId, commandKind: step.commandKind, timeoutMs: step.timeoutMs, paths: step.paths, message: step.message, body: step.body, remote: step.remote, branch: step.branch }
+          break
+        case 'search':
+          endpoint = '/api/search'
+          body = { sourceId, query: step.query, limit: step.limit || 5 }
+          break
+        default:
+          stepResults.push({ type: step.type, status: 'failed', error: 'Unknown step type' })
+          return reply.header('Cache-Control', 'no-store').send({ status: 'failed', completedPhase: 'none', failedAt: { phase: 'steps', stepIndex: i, error: 'Unknown step type' }, stepResults, durationMs: Date.now() - startedAt })
+      }
+
+      const res = await fastify.inject({ method: 'POST', url: endpoint, payload: body })
+      const data = JSON.parse(res.payload)
+
+      if (res.statusCode >= 400) {
+        stepResults.push({ type: step.type, status: 'failed', error: data.error || `HTTP ${res.statusCode}`, data })
+        appendAgentEvent({ jobId, sourceId, type: 'task_step_failed', message: `Step ${i + 1} (${step.type}) failed: ${data.error || res.statusCode}`, status: job.status })
+        return reply.header('Cache-Control', 'no-store').send({ status: 'failed', completedPhase: 'none', failedAt: { phase: 'steps', stepIndex: i, error: data.error || `HTTP ${res.statusCode}` }, stepResults, durationMs: Date.now() - startedAt })
+      }
+
+      stepResults.push({ type: step.type, status: 'ok', data })
+    }
+
+    // Validation phase
+    let validationResults: Array<{ commandKind: string; status: string; durationMs: number; stdout?: string; stderr?: string }> | undefined
+    if (validate && validate.commands.length > 0) {
+      validationResults = []
+      for (const cmd of validate.commands) {
+        const res = await fastify.inject({ method: 'POST', url: '/api/commands/run', payload: { sourceId, commandKind: cmd.commandKind, timeoutMs: cmd.timeoutMs || 120000, paths: cmd.paths } })
+        const data = JSON.parse(res.payload)
+        validationResults.push({ commandKind: cmd.commandKind, status: data.status, durationMs: data.durationMs, stdout: typeof data.stdout === 'string' ? data.stdout.slice(0, 2000) : undefined, stderr: typeof data.stderr === 'string' ? data.stderr.slice(0, 1000) : undefined })
+        if (data.status !== 'completed') {
+          appendAgentEvent({ jobId, sourceId, type: 'validation_failed', message: `Validation ${cmd.commandKind} failed`, status: job.status })
+          return reply.header('Cache-Control', 'no-store').send({ status: 'failed', completedPhase: 'steps', failedAt: { phase: 'validation', error: `${cmd.commandKind} failed` }, stepResults, validationResults, durationMs: Date.now() - startedAt })
+        }
+      }
+    }
+
+    // Commit phase
+    let commitResult: { status: string; stdout?: string } | undefined
+    if (autoCommit) {
+      // Stage files
+      const addRes = await fastify.inject({ method: 'POST', url: '/api/commands/run', payload: { sourceId, commandKind: 'git_add_paths', paths: autoCommit.paths } })
+      const addData = JSON.parse(addRes.payload)
+      if (addData.status !== 'completed') {
+        return reply.header('Cache-Control', 'no-store').send({ status: 'failed', completedPhase: validate ? 'validation' : 'steps', failedAt: { phase: 'commit', error: `git add failed: ${addData.stderr || addData.error}` }, stepResults, validationResults, durationMs: Date.now() - startedAt })
+      }
+
+      // Commit
+      const commitRes = await fastify.inject({ method: 'POST', url: '/api/commands/run', payload: { sourceId, commandKind: 'git_commit', message: autoCommit.message, body: autoCommit.body } })
+      const commitData = JSON.parse(commitRes.payload)
+      commitResult = { status: commitData.status, stdout: typeof commitData.stdout === 'string' ? commitData.stdout.slice(0, 500) : undefined }
+      if (commitData.status !== 'completed') {
+        return reply.header('Cache-Control', 'no-store').send({ status: 'failed', completedPhase: validate ? 'validation' : 'steps', failedAt: { phase: 'commit', error: `git commit failed: ${commitData.stderr || commitData.error}` }, stepResults, validationResults, commitResult, durationMs: Date.now() - startedAt })
+      }
+      appendAgentEvent({ jobId, sourceId, type: 'task_committed', message: `Committed: ${autoCommit.message}`, status: job.status })
+    }
+
+    // Push phase
+    let pushResult: { status: string; stdout?: string } | undefined
+    if (autoPush) {
+      const pushRes = await fastify.inject({ method: 'POST', url: '/api/commands/run', payload: { sourceId, commandKind: 'git_push', remote: autoPush.remote, branch: autoPush.branch } })
+      const pushData = JSON.parse(pushRes.payload)
+      pushResult = { status: pushData.status, stdout: typeof pushData.stdout === 'string' ? pushData.stdout.slice(0, 500) : undefined }
+      if (pushData.status !== 'completed') {
+        return reply.header('Cache-Control', 'no-store').send({ status: 'partial', completedPhase: 'commit', failedAt: { phase: 'push', error: `git push failed: ${pushData.stderr || pushData.error}` }, stepResults, validationResults, commitResult, pushResult, durationMs: Date.now() - startedAt })
+      }
+      appendAgentEvent({ jobId, sourceId, type: 'task_pushed', message: `Pushed: ${autoCommit?.message || 'changes'}`, status: job.status })
+    }
+
+    // Final git status
+    const statusRes = await fastify.inject({ method: 'POST', url: '/api/commands/run', payload: { sourceId, commandKind: 'git_status_short' } })
+    const statusData = JSON.parse(statusRes.payload)
+
+    const completedPhase = autoPush ? 'push' : autoCommit ? 'commit' : validate ? 'validation' : 'steps'
+
+    return reply.header('Cache-Control', 'no-store').send({
+      status: 'completed',
+      completedPhase,
+      stepResults,
+      validationResults,
+      commitResult,
+      pushResult,
+      gitStatus: statusData.stdout || '',
+      durationMs: Date.now() - startedAt
+    })
+  })
+
+  // Batch endpoint: execute multiple operations in one request
+  fastify.post<{ Body: { operations: Array<{ endpoint: string; body: Record<string, unknown> }> } }>('/api/batch', async (request, reply) => {
+    const { operations } = request.body
+    if (!Array.isArray(operations) || operations.length === 0 || operations.length > 5) {
+      return reply.code(400).send({ error: 'operations must be 1-5 items' })
+    }
+    const results: Array<{ endpoint: string; status: number; data: unknown }> = []
+    for (const op of operations) {
+      try {
+        const res = await fastify.inject({ method: 'POST', url: op.endpoint, payload: op.body })
+        results.push({ endpoint: op.endpoint, status: res.statusCode, data: JSON.parse(res.payload) })
+      } catch (err) {
+        results.push({ endpoint: op.endpoint, status: 500, data: { error: String(err) } })
+      }
+    }
+    return reply.header('Cache-Control', 'no-store').send({ status: 'ok', results })
+  })
+
   fastify.addHook('onClose', async () => {
     flushIndexStateOnShutdown()
   })

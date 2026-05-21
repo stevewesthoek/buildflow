@@ -63,12 +63,6 @@ const nextBatchSchema = {
   required: ['paths']
 }
 
-const diagnosticsSchema = {
-  type: 'object',
-  additionalProperties: true,
-  description: 'Optional timing and payload-size diagnostics. Usually absent unless BUILDFLOW_ACTION_DIAGNOSTICS=1 is enabled.'
-}
-
 const activitySchema = {
   type: 'object',
   additionalProperties: false,
@@ -130,8 +124,7 @@ const writeResultSchema = {
     targetExistsAfter: { type: 'boolean' },
     deletedFileCount: { type: 'integer' },
     deletedDirectoryCount: { type: 'integer' },
-    activity: activitySchema,
-    diagnostics: diagnosticsSchema
+    activity: activitySchema
   },
   required: ['verified', 'verifiedAt', 'bytesOnDisk', 'contentHash', 'contentPreview']
 }
@@ -197,8 +190,7 @@ const commandResultSchema = {
     confirmationToken: { type: 'string' },
     reason: { type: 'string' },
     details: { type: 'object', additionalProperties: true },
-    activity: activitySchema,
-    diagnostics: diagnosticsSchema
+    activity: activitySchema
   },
   required: ['status', 'commandKind', 'command', 'cwd', 'outputTruncated', 'durationMs']
 }
@@ -314,7 +306,6 @@ const openapi = {
                     sourceCount: { type: 'integer' },
                     sourcesAvailable: { type: 'boolean' },
                     activity: activitySchema,
-                    diagnostics: diagnosticsSchema
                   },
                   required: ['connected', 'sourceCount', 'sourcesAvailable']
                 }
@@ -347,7 +338,6 @@ const openapi = {
                       items: sourceItemSchema
                     },
                     activity: activitySchema,
-                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'sources']
                 }
@@ -379,7 +369,6 @@ const openapi = {
                     activeSourceIds: { type: 'array', items: { type: 'string' } },
                     sources: { type: 'array', items: sourceItemSchema },
                     activity: activitySchema,
-                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'contextMode', 'activeSourceIds']
                 }
@@ -435,7 +424,6 @@ const openapi = {
                     activeSourceIds: { type: 'array', items: { type: 'string' } },
                     sources: { type: 'array', items: sourceItemSchema },
                     activity: activitySchema,
-                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'contextMode', 'activeSourceIds', 'sources']
                 }
@@ -652,7 +640,6 @@ const openapi = {
                     status: { type: 'string' },
                     job: agentJobSchema,
                     activity: activitySchema,
-                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'job']
                 }
@@ -710,7 +697,6 @@ const openapi = {
                     job: agentJobSchema,
                     jobs: { type: 'array', items: agentJobSchema },
                     activity: activitySchema,
-                    diagnostics: diagnosticsSchema
                   },
                   required: ['status']
                 }
@@ -763,7 +749,6 @@ const openapi = {
                     returnedBytes: { type: 'integer' },
                     budgetBytes: { type: 'integer' },
                     activity: activitySchema,
-                    diagnostics: diagnosticsSchema
                   },
                   required: ['status', 'job', 'events']
                 }
@@ -869,6 +854,297 @@ const openapi = {
           ...errorResponses
         }
       }
+    },
+    '/api/actions/agent/execute-task': {
+      post: {
+        operationId: 'executeBuildFlowTask',
+        summary: 'Execute compound task',
+        description: 'Execute steps, validate, commit, and push atomically for a single roadmap task. Reduces 6-8 sequential calls to 1. Steps run sequentially; stops on first failure. Requires an active agent job.',
+        'x-openai-isConsequential': false,
+        security: [bearer],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  jobId: { type: 'string', description: 'Active agent job id.' },
+                  sourceId: { type: 'string', description: 'Target source id.' },
+                  task: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', description: 'Task id from roadmap.' },
+                      title: { type: 'string', description: 'Task title.' },
+                      phase: { type: 'string', description: 'Phase name.' }
+                    },
+                    required: ['id', 'title', 'phase']
+                  },
+                  steps: {
+                    type: 'array',
+                    description: 'Ordered steps to execute.',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        type: { type: 'string', enum: ['read_files', 'write_file', 'patch_file', 'append_file', 'delete_file', 'run_command', 'search'], description: 'Step type.' },
+                        paths: { type: 'array', items: { type: 'string' }, description: 'Paths for read_files or run_command.' },
+                        maxBytesPerFile: { type: 'integer', description: 'Max bytes per file for read_files.' },
+                        path: { type: 'string', description: 'Target path for write/patch/append/delete.' },
+                        content: { type: 'string', description: 'Content for write/append.' },
+                        find: { type: 'string', description: 'Find text for patch.' },
+                        replace: { type: 'string', description: 'Replace text for patch.' },
+                        allowMultiple: { type: 'boolean', description: 'Allow multiple patch matches.' },
+                        separator: { type: 'string', description: 'Separator for append.' },
+                        mode: { type: 'string', enum: ['createOnly', 'overwrite'], description: 'Write mode.' },
+                        commandKind: { type: 'string', description: 'Command kind for run_command.' },
+                        timeoutMs: { type: 'integer', description: 'Timeout for run_command.' },
+                        message: { type: 'string', description: 'Message for git_commit via run_command.' },
+                        body: { type: 'string', description: 'Body for git_commit via run_command.' },
+                        remote: { type: 'string', description: 'Remote for git_push via run_command.' },
+                        branch: { type: 'string', description: 'Branch for git_push via run_command.' },
+                        query: { type: 'string', description: 'Query for search.' },
+                        limit: { type: 'integer', description: 'Limit for search.' }
+                      },
+                      required: ['type']
+                    },
+                    minItems: 1,
+                    maxItems: 20
+                  },
+                  validate: {
+                    type: 'object',
+                    additionalProperties: false,
+                    description: 'Validation commands to run after steps succeed.',
+                    properties: {
+                      commands: {
+                        type: 'array',
+                        items: {
+                          type: 'object',
+                          additionalProperties: false,
+                          properties: {
+                            commandKind: { type: 'string', description: 'Validation command kind.' },
+                            timeoutMs: { type: 'integer', description: 'Timeout.' },
+                            paths: { type: 'array', items: { type: 'string' }, description: 'Paths for validation.' }
+                          },
+                          required: ['commandKind']
+                        },
+                        minItems: 1,
+                        maxItems: 5
+                      }
+                    },
+                    required: ['commands']
+                  },
+                  autoCommit: {
+                    type: 'object',
+                    additionalProperties: false,
+                    description: 'Auto-commit after validation passes.',
+                    properties: {
+                      message: { type: 'string', description: 'Commit message.' },
+                      body: { type: 'string', description: 'Optional commit body.' },
+                      paths: { type: 'array', items: { type: 'string' }, description: 'Explicit paths to stage.', minItems: 1, maxItems: 50 }
+                    },
+                    required: ['message', 'paths']
+                  },
+                  autoPush: {
+                    type: 'object',
+                    additionalProperties: false,
+                    description: 'Auto-push after commit succeeds.',
+                    properties: {
+                      remote: { type: 'string', description: 'Remote name. Defaults to origin.' },
+                      branch: { type: 'string', description: 'Branch name. Defaults to current.' }
+                    }
+                  }
+                },
+                required: ['jobId', 'sourceId', 'task', 'steps']
+              },
+              examples: {
+                patchAndValidate: {
+                  value: {
+                    jobId: 'job-abc123',
+                    sourceId: 'buildflow',
+                    task: { id: 'task-1', title: 'Fix type error', phase: 'phase-1' },
+                    steps: [
+                      { type: 'read_files', paths: ['src/index.ts'] },
+                      { type: 'patch_file', path: 'src/index.ts', find: 'old code', replace: 'new code' }
+                    ],
+                    validate: { commands: [{ commandKind: 'type_check_web', timeoutMs: 60000 }] },
+                    autoCommit: { message: 'fix: resolve type error in index', paths: ['src/index.ts'] },
+                    autoPush: {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Task execution result',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    status: { type: 'string', enum: ['completed', 'failed', 'partial'] },
+                    completedPhase: { type: 'string', enum: ['steps', 'validation', 'commit', 'push', 'none'] },
+                    failedAt: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        phase: { type: 'string' },
+                        stepIndex: { type: 'integer' },
+                        error: { type: 'string' }
+                      },
+                      required: ['phase', 'error']
+                    },
+                    stepResults: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        additionalProperties: true,
+                        properties: {
+                          type: { type: 'string' },
+                          status: { type: 'string', enum: ['ok', 'failed'] },
+                          data: { type: 'object', additionalProperties: true },
+                          error: { type: 'string' }
+                        },
+                        required: ['type', 'status']
+                      }
+                    },
+                    validationResults: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          commandKind: { type: 'string' },
+                          status: { type: 'string' },
+                          durationMs: { type: 'integer' },
+                          stdout: { type: 'string' },
+                          stderr: { type: 'string' }
+                        },
+                        required: ['commandKind', 'status', 'durationMs']
+                      }
+                    },
+                    commitResult: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        status: { type: 'string' },
+                        stdout: { type: 'string' }
+                      },
+                      required: ['status']
+                    },
+                    pushResult: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        status: { type: 'string' },
+                        stdout: { type: 'string' }
+                      },
+                      required: ['status']
+                    },
+                    gitStatus: { type: 'string' },
+                    durationMs: { type: 'integer' },
+                    activity: activitySchema
+                  },
+                  required: ['status', 'completedPhase', 'stepResults', 'durationMs']
+                }
+              }
+            }
+          },
+          ...errorResponses
+        }
+      }
+    },
+    '/api/actions/batch': {
+      post: {
+        operationId: 'batchBuildFlowOperations',
+        summary: 'Batch operations',
+        description: 'Execute 2-5 agent operations in a single request. Each operation specifies an agent endpoint and body. Results arrive in order. Use for combining sequential actions like search + read, git_status + git_diff, or sources + active context.',
+        'x-openai-isConsequential': false,
+        security: [bearer],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  operations: {
+                    type: 'array',
+                    description: 'Operations to execute in order (1-5).',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        endpoint: { type: 'string', description: 'Agent endpoint path (e.g. /api/search, /api/read-files).' },
+                        body: { type: 'object', additionalProperties: true, description: 'Request body for the operation.' }
+                      },
+                      required: ['endpoint', 'body']
+                    },
+                    minItems: 1,
+                    maxItems: 5
+                  }
+                },
+                required: ['operations']
+              },
+              examples: {
+                searchAndRead: {
+                  value: {
+                    operations: [
+                      { endpoint: '/api/search', body: { query: 'README', limit: 3 } },
+                      { endpoint: '/api/read-files', body: { paths: ['README.md'] } }
+                    ]
+                  }
+                },
+                gitPreCommit: {
+                  value: {
+                    operations: [
+                      { endpoint: '/api/commands/run', body: { sourceId: 'buildflow', commandKind: 'git_status_short' } },
+                      { endpoint: '/api/commands/run', body: { sourceId: 'buildflow', commandKind: 'git_diff_stat' } }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          200: {
+            description: 'Batch results',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    status: { type: 'string', enum: ['ok'] },
+                    results: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                          endpoint: { type: 'string' },
+                          status: { type: 'integer' },
+                          data: { type: 'object', additionalProperties: true }
+                        },
+                        required: ['endpoint', 'status', 'data']
+                      }
+                    }
+                  },
+                  required: ['status', 'results']
+                }
+              }
+            }
+          },
+          ...errorResponses
+        }
+      }
     }
   }
 }
@@ -876,5 +1152,7 @@ const openapi = {
 const compactOpenapi = compactOpenApiDoc(openapi)
 
 export async function GET() {
-  return NextResponse.json(compactOpenapi)
+  return NextResponse.json(compactOpenapi, {
+    headers: { 'Cache-Control': 'public, max-age=60' }
+  })
 }

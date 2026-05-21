@@ -31,7 +31,7 @@ type TransportDiagnostics = {
   proxyMs?: number
 }
 
-const REQUEST_TIMEOUT_MS = 15000
+const REQUEST_TIMEOUT_MS = 30000
 
 function isTimeoutError(err: unknown) {
   return err instanceof DOMException && err.name === 'AbortError'
