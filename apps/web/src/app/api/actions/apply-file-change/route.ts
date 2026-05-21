@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { dispatchBuildFlowFileChange, unwrapActionError } from '@/lib/actions/gpt'
-import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
+import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { getSafeActionHttpStatus } from '@/lib/actions/http-status'
+
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
 
 export async function POST(request: NextRequest) {
   const auth = checkActionAuth(request)
@@ -17,7 +20,7 @@ export async function POST(request: NextRequest) {
       const payload = data as { error: unknown }
       const status = getSafeActionHttpStatus(payload.error)
       if (isDryRun) {
-        return NextResponse.json(data, { status: 200 })
+        return NextResponse.json(stripBloat(data))
       }
       if (payload.error && typeof payload.error === 'object') {
         return NextResponse.json(payload.error, { status })
@@ -34,7 +37,7 @@ export async function POST(request: NextRequest) {
         message: 'Write was not verified'
       }), { status: 502 })
     }
-    return NextResponse.json(data)
+    return NextResponse.json(stripBloat(data))
   } catch (err) {
     const { error, status } = unwrapActionError(err, 'apply-file-change error')
     if (error && typeof error === 'object') {

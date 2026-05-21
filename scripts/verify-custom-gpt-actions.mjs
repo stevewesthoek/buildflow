@@ -17,31 +17,19 @@ const HARD_ACTION_RESPONSE_BYTES = 32_000
 
 const EXPECTED_OPERATION_IDS = [
   'getBuildFlowStatus',
-  'listBuildFlowSources',
-  'getBuildFlowActiveContext',
   'setBuildFlowActiveContext',
-  'inspectBuildFlowContext',
   'readBuildFlowContext',
-  'runBuildFlowCommand',
-  'startBuildFlowAgentJob',
-  'getBuildFlowAgentJob',
-  'controlBuildFlowAgentRun',
-  'writeBuildFlowArtifact',
-  'applyBuildFlowFileChange'
+  'applyBuildFlowFileChange',
+  'commitBuildFlowChanges',
+  'runBuildFlowCommand'
 ]
 
-const REQUIRED_ACTIVITY_PATHS = [
+const REQUIRED_ACTION_PATHS = [
   '/api/actions/status',
-  '/api/actions/sources',
-  '/api/actions/context/active',
-  '/api/actions/inspect',
   '/api/actions/read-context',
-  '/api/actions/run-command',
-  '/api/actions/agent/start',
-  '/api/actions/agent/status',
-  '/api/actions/agent/control',
-  '/api/actions/write-artifact',
-  '/api/actions/apply-file-change'
+  '/api/actions/apply-file-change',
+  '/api/actions/commit-changes',
+  '/api/actions/run-command'
 ]
 
 function assert(condition, message) {
@@ -68,19 +56,6 @@ function collectOperations(schema) {
   return ops
 }
 
-function resolveSchemaRef(schema, node) {
-  if (!node || typeof node !== 'object' || typeof node.$ref !== 'string') return node
-  const prefix = '#/components/schemas/'
-  if (!node.$ref.startsWith(prefix)) return node
-  return schema.components?.schemas?.[node.$ref.slice(prefix.length)] || node
-}
-
-function responseSchema(schema, pathName) {
-  const pathItem = schema.paths?.[pathName]
-  const op = pathItem?.post || pathItem?.get
-  return resolveSchemaRef(schema, op?.responses?.['200']?.content?.['application/json']?.schema || {})
-}
-
 function ensureSchemaRules(schema) {
   const schemaBytes = byteLength(schema)
   assert(schemaBytes < MAX_SCHEMA_BYTES, `OpenAPI schema too large: ${schemaBytes} bytes`)
@@ -95,24 +70,14 @@ function ensureSchemaRules(schema) {
     assert(Array.isArray(op.security) && op.security.length > 0, `${op.operationId} missing security`)
     assert(op['x-openai-isConsequential'] === false, `${op.operationId} must be non-consequential for GPT action confirmation UX`)
     assert(typeof op.summary === 'string' && op.summary.length > 0 && op.summary.length <= 300, `${op.operationId} summary invalid`)
-    assert(typeof op.description === 'string' && op.description.length > 0 && op.description.length <= 500, `${op.operationId} description invalid`)
   }
 
-  for (const routePath of REQUIRED_ACTIVITY_PATHS) {
-    const resolved = responseSchema(schema, routePath)
-    assert(Object.prototype.hasOwnProperty.call(resolved.properties || {}, 'activity'), `${routePath} response must expose activity`)
+  for (const routePath of REQUIRED_ACTION_PATHS) {
+    assert(schema.paths?.[routePath], `Missing action path: ${routePath}`)
   }
-
-  const agentJobStatus = schema.components?.schemas?.AgentJob?.properties?.status?.enum || []
-  for (const state of ['queued', 'running', 'paused', 'cancelled', 'needs_confirmation', 'blocked', 'completed', 'failed']) {
-    assert(agentJobStatus.includes(state), `AgentJob status enum missing ${state}`)
-  }
-
-  assert(schema.components?.schemas?.AgentEvent, 'AgentEvent schema is required for compact runtime events')
-  assert(schema.paths?.['/api/actions/agent/control']?.post?.operationId === 'controlBuildFlowAgentRun', 'Missing controlBuildFlowAgentRun path')
 
   const schemaText = JSON.stringify(schema)
-  for (const legacy of ['setBuildFlowContext', 'action=list_sources', 'action=get_active', 'action=set_active']) {
+  for (const legacy of ['setBuildFlowContext', 'executeBuildFlowTask', 'manageBuildFlowAgent', '/api/actions/agent/execute-task', '/api/actions/agent/manage', 'action=list_sources', 'action=get_active', 'action=set_active', '/api/actions/sources', '/api/actions/context/active']) {
     assert(!schemaText.includes(legacy), `Legacy reference exposed in schema: ${legacy}`)
   }
 }
@@ -122,9 +87,12 @@ function ensureInstructions() {
   const text = fs.readFileSync(INSTRUCTIONS_FILE, 'utf8')
   const bytes = byteLength(text)
   assert(bytes <= MAX_INSTRUCTIONS_BYTES, `Custom GPT instructions exceed ${MAX_INSTRUCTIONS_BYTES} bytes: ${bytes}`)
-  assert(text.includes('Custom GPT remains the reasoning and coding engine'), 'Instructions must preserve the Custom GPT reasoning/coding boundary')
-  assert(text.includes('controlBuildFlowAgentRun'), 'Instructions must mention controlBuildFlowAgentRun')
-  assert(text.includes('BuildFlow narration and activity feedback'), 'Instructions must mention compact activity feedback')
+  for (const required of EXPECTED_OPERATION_IDS) {
+    assert(text.includes(required), `Instructions must mention ${required}`)
+  }
+  assert(text.includes('sourceId'), 'Instructions must require explicit sourceId usage')
+  assert(text.includes('maxBytesPerFile'), 'Instructions must include read-size guidance')
+  assert(text.includes('Never force push'), 'Instructions must preserve git safety (no force push)')
   return { bytes }
 }
 

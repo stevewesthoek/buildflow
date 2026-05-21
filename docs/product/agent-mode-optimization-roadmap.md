@@ -1,5 +1,9 @@
 # Agent Mode Optimization Roadmap
 
+## Current Decision
+
+Agent Mode is no longer exposed in the Custom GPT OpenAPI schema. The Custom GPT surface is intentionally limited to fast, bounded status/read/command actions because GPT Actions are synchronous and time out at 45 seconds. Long-running Agent Mode needs a separate async/streaming runtime surface before it should be reintroduced.
+
 ## Research Baseline
 
 Official GPT Actions constraints that shape BuildFlow:

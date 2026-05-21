@@ -125,7 +125,7 @@ function normalizeTransportFailure(err: unknown, endpoint: string, timeoutMs = R
   )
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS) {
+export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -240,9 +240,9 @@ export async function executeActionGET(
 
   // In relay-agent mode: convert to POST through proxy endpoint (cleaner than bridge GET support)
   if (mode === 'relay-agent') {
-    // Convert /api/status -> /api/actions/proxy/api/status
-    const proxyEndpoint = `/api/actions/proxy${endpoint}`
-    const url = `${backendUrl}${proxyEndpoint}`
+    // getBackendUrl() already includes the relay proxy prefix in relay-agent mode.
+    // Keep this as /api/actions/proxy + /api/status, not a double-prefixed proxy path.
+    const url = `${backendUrl}${endpoint}`
 
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }

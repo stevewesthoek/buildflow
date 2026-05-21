@@ -1,5 +1,14 @@
 import { NextResponse } from 'next/server'
 
+export function stripBloat(data: unknown): unknown {
+  if (!data || typeof data !== 'object') return data
+  const obj = { ...(data as Record<string, unknown>) }
+  delete obj.activity
+  delete obj._diagnostics
+  delete obj.timings
+  return obj
+}
+
 export type ActionErrorCode =
   | 'LOCAL_STACK_UNAVAILABLE'
   | 'LOCAL_STACK_TIMEOUT'

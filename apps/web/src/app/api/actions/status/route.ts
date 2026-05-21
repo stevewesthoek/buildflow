@@ -2,95 +2,86 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeActionGET, ActionTransportError } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
-import { makeActivity, withActivity, withActionRouteDiagnostics } from '@/lib/actions/gpt'
+import { listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, unwrapActionError } from '@/lib/actions/gpt'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
-function buildStatusActivity(sourceCount: number) {
-  return makeActivity({
-    operationId: 'getBuildFlowStatus',
-    phase: 'completed',
-    actionLabel: 'Checked BuildFlow connection',
-    userMessage: `BuildFlow is connected and can see ${sourceCount} ${sourceCount === 1 ? 'source' : 'sources'}.`,
-    riskLevel: 'low',
-    requiresConfirmation: false,
-    verified: true,
-    nextStep: sourceCount > 0 ? 'Select a source and continue.' : 'Connect a source and try again.'
-  })
+export async function GET(request: NextRequest) {
+  const auth = checkActionAuth(request)
+  if (!auth.valid) return auth.error
+
+  const include = request.nextUrl.searchParams.get('include') || ''
+
+  try {
+    await executeActionGET('/api/status', auth.bearerToken)
+
+    const payload: Record<string, unknown> = {
+      ok: true,
+      connected: true
+    }
+
+    if (include === 'sources' || include === 'all') {
+      try {
+        const sourcesData = await listBuildFlowSources(auth.bearerToken)
+        const rawSources = (sourcesData as Record<string, unknown>).sources
+        if (Array.isArray(rawSources)) {
+          payload.sources = rawSources
+            .filter((s: Record<string, unknown>) => s.enabled)
+            .map((s: Record<string, unknown>) => ({
+              id: s.id,
+              label: s.label,
+              active: s.active
+            }))
+        }
+      } catch {}
+    }
+
+    if (include === 'active' || include === 'all') {
+      try {
+        const activeData = await getBuildFlowActiveContext(auth.bearerToken) as Record<string, unknown>
+        payload.activeSourceIds = activeData.activeSourceIds
+        payload.contextMode = activeData.contextMode
+      } catch {}
+    }
+
+    return NextResponse.json(payload, { headers: { 'Cache-Control': 'no-store' } })
+  } catch (err) {
+    if (err instanceof ActionTransportError) {
+      return NextResponse.json(
+        buildActionErrorEnvelope({
+          code: 'LOCAL_STACK_UNAVAILABLE',
+          message: err.message,
+          status: 'unavailable'
+        }),
+        { status: err.statusCode, headers: { 'Cache-Control': 'no-store' } }
+      )
+    }
+    return NextResponse.json(
+      buildActionErrorEnvelope({
+        code: 'BUILDFLOW_STATUS_ERROR',
+        message: err instanceof Error ? err.message : String(err),
+        status: 'error'
+      }),
+      { status: 503, headers: { 'Cache-Control': 'no-store' } }
+    )
+  }
 }
 
-export async function GET(request: NextRequest) {
-  const startedAt = Date.now()
+export async function POST(request: NextRequest) {
   const auth = checkActionAuth(request)
   if (!auth.valid) return auth.error
 
   try {
-    const result = await executeActionGET('/api/status', auth.bearerToken)
-    const sourceCount = typeof result.data === 'object' && result.data !== null && typeof (result.data as { sourceCount?: unknown }).sourceCount === 'number'
-      ? (result.data as { sourceCount: number }).sourceCount
-      : 0
-    const payload = withActionRouteDiagnostics(withActivity({
+    const body = await request.json().catch(() => ({}))
+    const data = await setBuildFlowActiveContext(body, auth.bearerToken) as Record<string, unknown>
+    return NextResponse.json({
       ok: true,
-      connected: true,
-      status: 'available',
-      version: typeof result.data === 'object' && result.data !== null && typeof (result.data as { version?: unknown }).version === 'string'
-        ? (result.data as { version: string }).version
-        : 'unknown',
-      serverTime: new Date().toISOString(),
-      sourcesReady: sourceCount > 0,
-      message: 'BuildFlow is available',
-      sourceCount,
-      ...(result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {})
-    }, buildStatusActivity(sourceCount)), { route: '/api/actions/status', startedAt })
-    return NextResponse.json(payload, {
-      status: result.status,
-      headers: {
-        'Cache-Control': 'no-store'
-      }
+      contextMode: data.contextMode,
+      activeSourceIds: data.activeSourceIds
     })
   } catch (err) {
-    if (err instanceof ActionTransportError) {
-      const payload = err.payload && typeof err.payload === 'object'
-        ? (() => {
-            const raw = err.payload as { error?: { code?: string } }
-            if (raw.error?.code === 'ACTION_TRANSPORT_ERROR') {
-              return buildActionErrorEnvelope({
-                code: 'BUILDFLOW_STATUS_ERROR',
-                message: 'BuildFlow status check failed.',
-                details: err.message,
-                recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
-                status: 'error'
-              })
-            }
-            return err.payload
-          })()
-        : buildActionErrorEnvelope({
-          code: err.statusCode === 504 ? 'LOCAL_STACK_TIMEOUT' : 'LOCAL_STACK_UNAVAILABLE',
-          message: err.message,
-          details: 'The local BuildFlow stack was not reachable.',
-          recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
-          status: 'unavailable'
-        })
-      return NextResponse.json(payload, {
-        status: err.statusCode,
-        headers: {
-          'Cache-Control': 'no-store'
-        }
-      })
-    }
-    const payload = buildActionErrorEnvelope({
-      code: 'BUILDFLOW_STATUS_ERROR',
-      message: 'BuildFlow status check failed.',
-      details: err instanceof Error ? err.message : String(err),
-      recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
-      status: 'error'
-    })
-    return NextResponse.json(payload, {
-      status: 503,
-      headers: {
-        'Cache-Control': 'no-store'
-      }
-    })
+    const { error, status } = unwrapActionError(err, 'set-context error')
+    return NextResponse.json(error && typeof error === 'object' ? error : { error }, { status })
   }
 }

@@ -1,4 +1,4 @@
-import { executeAction, ActionTransportError, executeActionGET } from './transport'
+import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout } from './transport'
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
 
@@ -453,7 +453,7 @@ function assertVerifiedWriteResult(result: unknown, fallback: string): VerifiedW
 }
 
 async function fetchJson(endpoint: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`${getBackendUrl()}${endpoint}`, init)
+  const response = await fetchWithTimeout(`${getBackendUrl()}${endpoint}`, init ?? {}, 10000)
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}))
     throw new ActionTransportError(
