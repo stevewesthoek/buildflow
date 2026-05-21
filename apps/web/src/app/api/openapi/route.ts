@@ -7,7 +7,7 @@ const openapi = {
   info: {
     title: 'BuildFlow API',
     version: '4.0.0',
-    description: 'Fast, bounded BuildFlow Custom GPT actions for repo status, source context, reads, and allowlisted commands.'
+    description: 'Fast, bounded BuildFlow Custom GPT actions for repo status, source context, reads, writes, and allowlisted commands.'
   },
   servers: [
     {
@@ -84,7 +84,7 @@ const openapi = {
                   mode: { type: 'string', enum: ['read_paths', 'search_and_read', 'list_files', 'search'] },
                   sourceId: { type: 'string' },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 10 },
-                  query: { type: 'string' },
+                  query: { type: 'string', description: 'Search query. Exact paths are fastest; use content: or full: for content-only search. Natural queries automatically retry content search after a path miss.' },
                   path: { type: 'string', description: 'Folder for list_files.' },
                   depth: { type: 'integer', minimum: 1, maximum: 5 },
                   limit: { type: 'integer', minimum: 1, maximum: 10 },

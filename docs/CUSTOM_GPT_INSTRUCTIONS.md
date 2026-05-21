@@ -60,10 +60,17 @@ Bad search (too broad, returns noise):
 Good search (narrow and targeted):
 - query: "fetchWithTimeout transport timeout" limit: 3
 - query: "force-dynamic revalidate action route" limit: 5
+- query: "content:streamTutorReply metadata provider" limit: 5
 
 Read exact paths when you know them — faster than searching:
 - mode: read_paths, paths: ["apps/web/src/lib/actions/transport.ts"]
 - maxBytesPerFile: 4000 for large files; 8000 only if you need the full content
+
+Search behavior:
+- Default search is optimized for path/title matches.
+- Use `content:` or `full:` when searching code symbols, prose, or implementation details.
+- If a normal `search_and_read` query has no path matches, BuildFlow retries content search automatically.
+- No-match responses are not failures; refine the query or list files.
 
 ## Write — Patch vs Overwrite
 - `patch`: use when changing one block inside an existing file. Provide the exact string to find.

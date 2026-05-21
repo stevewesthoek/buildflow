@@ -237,6 +237,64 @@ function countLabel(count: number, singular: string, plural?: string): string {
   return `${count} ${count === 1 ? singular : plural || `${singular}s`}`
 }
 
+type SearchAttemptResult = {
+  result: Record<string, unknown>
+  results: Array<Record<string, unknown>>
+  timings?: Record<string, unknown>
+  queryUsed: string
+  fallbackUsed: boolean
+  fallbackAttempted: boolean
+}
+
+function hasExplicitSearchMode(query: string): boolean {
+  return /^(content|full):/i.test(query.trim())
+}
+
+async function executeSearchWithContentFallback(payload: Record<string, unknown>, userToken?: string): Promise<SearchAttemptResult> {
+  const query = typeof payload.query === 'string' ? payload.query : ''
+  const firstResult = await executeAction('/api/search', payload, userToken) as Record<string, unknown>
+  const firstResults = Array.isArray(firstResult.results) ? firstResult.results as Array<Record<string, unknown>> : []
+  const firstTimings = firstResult.timings && typeof firstResult.timings === 'object' && !Array.isArray(firstResult.timings)
+    ? firstResult.timings as Record<string, unknown>
+    : undefined
+
+  if (firstResults.length > 0 || hasExplicitSearchMode(query)) {
+    return {
+      result: firstResult,
+      results: firstResults,
+      timings: firstTimings,
+      queryUsed: query,
+      fallbackUsed: false,
+      fallbackAttempted: false
+    }
+  }
+
+  const fallbackQuery = `content:${query}`
+  const fallbackResult = await executeAction('/api/search', { ...payload, query: fallbackQuery }, userToken) as Record<string, unknown>
+  const fallbackResults = Array.isArray(fallbackResult.results) ? fallbackResult.results as Array<Record<string, unknown>> : []
+  const fallbackTimings = fallbackResult.timings && typeof fallbackResult.timings === 'object' && !Array.isArray(fallbackResult.timings)
+    ? fallbackResult.timings as Record<string, unknown>
+    : undefined
+
+  return {
+    result: {
+      ...fallbackResult,
+      originalQuery: query,
+      query: fallbackQuery,
+      searchFallback: 'content'
+    },
+    results: fallbackResults,
+    timings: {
+      fallback: 'content',
+      ...(firstTimings ? { path: firstTimings } : {}),
+      ...(fallbackTimings ? { content: fallbackTimings } : {})
+    },
+    queryUsed: fallbackQuery,
+    fallbackUsed: fallbackResults.length > 0,
+    fallbackAttempted: true
+  }
+}
+
 function createArtifactBlockedResponse(params: {
   sourceId?: string
   artifactPath: string
@@ -721,8 +779,9 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
-    const result = await executeAction('/api/search', payload, userToken)
-    const results = Array.isArray((result as { results?: unknown }).results) ? (result as { results: unknown[] }).results : []
+    const search = await executeSearchWithContentFallback(payload, userToken)
+    const result = search.result
+    const results = search.results
     const paths = results
       .map(entry => typeof entry === 'object' && entry !== null && typeof (entry as Record<string, unknown>).path === 'string' ? (entry as Record<string, unknown>).path as string : '')
       .filter(Boolean)
@@ -730,7 +789,9 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
       operationId: 'inspectBuildFlowContext',
       phase: 'completed',
       actionLabel: 'Searched connected source',
-      userMessage: `Found ${countLabel(results.length, 'match')} for "${body.query}".`,
+      userMessage: search.fallbackUsed
+        ? `Found ${countLabel(results.length, 'match')} for "${body.query}" using content search.`
+        : `Found ${countLabel(results.length, 'match')} for "${body.query}".`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       readPaths: paths.slice(0, 10),
       targetPaths: paths.slice(0, 10),
@@ -801,14 +862,31 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     if (Array.isArray(body.sourceIds)) searchPayload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') searchPayload.sourceId = body.sourceId
 
-    const searchResult = await executeAction('/api/search', searchPayload, userToken)
-    const searchTimings = (searchResult as { timings?: Record<string, unknown> }).timings
-    const results = Array.isArray((searchResult as { results?: unknown }).results)
-      ? ((searchResult as { results: Array<Record<string, unknown>> }).results || [])
-      : []
+    const search = await executeSearchWithContentFallback(searchPayload, userToken)
+    const searchTimings = search.timings
+    const results = search.results
 
     if (results.length === 0) {
-      throw new Error(`No matching files found for query: ${body.query}`)
+      return withActivity({
+        mode: 'search_and_read',
+        timings: searchTimings ? { search: searchTimings } : undefined,
+        results: [],
+        noMatches: true,
+        query: body.query,
+        ...(search.fallbackAttempted ? { fallbackAttempted: 'content' } : {})
+      }, makeActivity({
+        operationId: 'readBuildFlowContext',
+        phase: 'completed',
+        actionLabel: 'Searched repo files',
+        userMessage: search.fallbackAttempted
+          ? `No matching files found for "${body.query}" after path and content search.`
+          : `No matching files found for "${body.query}".`,
+        sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+        riskLevel: 'low',
+        requiresConfirmation: false,
+        verified: true,
+        nextStep: 'Try a more specific query or list files to choose exact paths.'
+      }))
     }
 
     const pathEntries = results
@@ -847,6 +925,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
 
     return withActivity({
       mode: 'search_and_read',
+      ...(search.fallbackUsed ? { searchFallback: 'content', originalQuery: body.query, queryUsed: search.queryUsed } : {}),
       timings: {
         ...(searchTimings ? { search: searchTimings } : {}),
         ...(readTimings ? { read: readTimings } : {})
@@ -877,8 +956,8 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
       phase: 'completed',
       actionLabel: 'Read repo files',
       userMessage: skipped.length > 0
-        ? `Found ${countLabel(pathEntries.length, 'matching file')} and read a budgeted subset; continue with nextBatch.`
-        : `Found ${countLabel(pathEntries.length, 'matching file')} and read the available contents.`,
+        ? `Found ${countLabel(pathEntries.length, 'matching file')}${search.fallbackUsed ? ' using content search' : ''} and read a budgeted subset; continue with nextBatch.`
+        : `Found ${countLabel(pathEntries.length, 'matching file')}${search.fallbackUsed ? ' using content search' : ''} and read the available contents.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       readPaths: pathEntries.map(entry => entry.path).slice(0, 10),
       targetPaths: pathEntries.map(entry => entry.path).slice(0, 10),
