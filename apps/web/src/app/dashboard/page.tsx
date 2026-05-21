@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type { FormEvent } from 'react'
 import type { ActiveSourcesMode, DiscoveredRepository, KnowledgeSource } from '@buildflow/shared'
 
 const CACHE_KEY = 'buildflow-dashboard-source-snapshot'
 const DEFAULT_REPO_ROOT = '~/Repos'
+const THEME_KEY = 'buildflow-theme'
 
 type SourceSnapshot = {
   sources: KnowledgeSource[]
@@ -54,14 +55,9 @@ type AgentRuntimeEvent = {
   status?: string
 }
 
-const terminalStatuses = new Set(['ready', 'failed', 'disabled'])
+type Theme = 'light' | 'dark' | 'system'
 
-const toneClass: Record<StatusTone, string> = {
-  neutral: 'bg-slate-100 text-slate-700 ring-slate-200 dark:bg-slate-900 dark:text-slate-300 dark:ring-slate-800',
-  good: 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-900/70',
-  warn: 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900/70',
-  bad: 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-950/40 dark:text-red-300 dark:ring-red-900/70'
-}
+const terminalStatuses = new Set(['ready', 'failed', 'disabled'])
 
 const readSnapshot = (): SourceSnapshot | null => {
   try {
@@ -83,9 +79,7 @@ const readSnapshot = (): SourceSnapshot | null => {
 const saveSnapshot = (snapshot: SourceSnapshot) => {
   try {
     window.localStorage.setItem(CACHE_KEY, JSON.stringify(snapshot))
-  } catch {
-    // Cache is best-effort only.
-  }
+  } catch {}
 }
 
 const fetchJson = async (url: string, init?: RequestInit) => {
@@ -126,7 +120,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [agentConnected, setAgentConnected] = useState(false)
   const [busySourceId, setBusySourceId] = useState<string | null>(null)
-  const [showAddSource, setShowAddSource] = useState(false)
+  const [showAddModal, setShowAddModal] = useState(false)
   const [sourcePath, setSourcePath] = useState('')
   const [sourceLabel, setSourceLabel] = useState('')
   const [sourceId, setSourceId] = useState('')
@@ -140,17 +134,53 @@ export default function Dashboard() {
   const [activity, setActivity] = useState<ActivityLine[]>([])
   const [agentJobs, setAgentJobs] = useState<AgentDashboardJob[]>([])
   const [busyJobId, setBusyJobId] = useState<string | null>(null)
+  const [theme, setTheme] = useState<Theme>('system')
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const hydratedRef = useRef(false)
+  const menuRef = useRef<HTMLDivElement>(null)
 
-  const readyCount = useMemo(() => sources.filter(source => source.enabled && source.indexStatus === 'ready').length, [sources])
-  const indexingCount = useMemo(() => sources.filter(source => source.enabled && source.indexStatus === 'indexing').length, [sources])
-  const activeSources = useMemo(() => sources.filter(source => activeSourceIds.includes(source.id)), [sources, activeSourceIds])
-  const enabledSources = useMemo(() => sources.filter(source => source.enabled), [sources])
-  const availableDiscoveredRepos = useMemo(() => discoveredRepos.filter(repo => !repo.alreadyAdded), [discoveredRepos])
+  const readyCount = useMemo(() => sources.filter(s => s.enabled && s.indexStatus === 'ready').length, [sources])
+  const indexingCount = useMemo(() => sources.filter(s => s.enabled && s.indexStatus === 'indexing').length, [sources])
+  const activeSources = useMemo(() => sources.filter(s => activeSourceIds.includes(s.id)), [sources, activeSourceIds])
+  const enabledSources = useMemo(() => sources.filter(s => s.enabled), [sources])
+  const availableDiscoveredRepos = useMemo(() => discoveredRepos.filter(r => !r.alreadyAdded), [discoveredRepos])
   const selectedDiscoveredRepo = useMemo(
-    () => discoveredRepos.find(repo => repo.path === selectedDiscoveredRepoPath) || null,
+    () => discoveredRepos.find(r => r.path === selectedDiscoveredRepoPath) || null,
     [discoveredRepos, selectedDiscoveredRepoPath]
   )
+
+  const applyTheme = useCallback((t: Theme) => {
+    const root = document.documentElement
+    if (t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      root.classList.add('dark')
+    } else {
+      root.classList.remove('dark')
+    }
+  }, [])
+
+  useEffect(() => {
+    const saved = localStorage.getItem(THEME_KEY) as Theme | null
+    const initial = saved || 'system'
+    setTheme(initial)
+    applyTheme(initial)
+  }, [applyTheme])
+
+  const cycleTheme = () => {
+    const next: Theme = theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'
+    setTheme(next)
+    localStorage.setItem(THEME_KEY, next)
+    applyTheme(next)
+  }
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpenMenuId(null)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
 
   const pushActivity = (label: string, detail: string, tone: StatusTone = 'neutral') => {
     setActivity(current => [{ id: `${Date.now()}-${label}`, label, detail, tone, timestamp: new Date().toISOString() }, ...current].slice(0, 5))
@@ -166,7 +196,7 @@ export default function Dashboard() {
         const event = events[0]
         pushActivity('Agent Runtime event', `${event.type}: ${event.message}`, event.type.includes('failed') || event.type.includes('blocked') ? 'bad' : event.type.includes('paused') ? 'warn' : 'good')
       } else if (!silent && jobs.length > 0) {
-        const active = jobs.find(job => ['queued', 'running', 'needs_confirmation', 'paused'].includes(job.status)) || jobs[0]
+        const active = jobs.find(j => ['queued', 'running', 'needs_confirmation', 'paused'].includes(j.status)) || jobs[0]
         pushActivity('Agent Mode sync', `${active.status}: ${active.activeTask?.title || active.summary || active.id}`, active.status === 'blocked' || active.status === 'failed' ? 'bad' : active.status === 'needs_confirmation' || active.status === 'paused' ? 'warn' : 'good')
       }
       return jobs
@@ -254,8 +284,8 @@ export default function Dashboard() {
       setDiscoveredRepos(repositories)
       setDiscoveryScanned(true)
       setSelectedDiscoveredRepoPath(current => {
-        if (current && repositories.some(repo => repo.path === current && !repo.alreadyAdded)) return current
-        return repositories.find(repo => !repo.alreadyAdded)?.path || ''
+        if (current && repositories.some(r => r.path === current && !r.alreadyAdded)) return current
+        return repositories.find(r => !r.alreadyAdded)?.path || ''
       })
       if (!silent) pushActivity('Repos scanned', `${countLabel(repositories.length, 'repo')} found under ${settings?.rootPath || rootPath}.`, 'good')
       return repositories
@@ -287,14 +317,14 @@ export default function Dashboard() {
   useEffect(() => {
     const interval = window.setInterval(() => {
       void refreshAgentJobs(true)
-    }, agentJobs.some(job => ['queued', 'running', 'paused', 'needs_confirmation'].includes(job.status)) ? 2500 : 7000)
+    }, agentJobs.some(j => ['queued', 'running', 'paused', 'needs_confirmation'].includes(j.status)) ? 2500 : 7000)
     return () => window.clearInterval(interval)
   }, [agentJobs])
 
   useEffect(() => {
-    if (!showAddSource) return
+    if (!showAddModal) return
     void scanRepositories(discoveryRootPath, true)
-  }, [showAddSource])
+  }, [showAddModal])
 
   useEffect(() => {
     if (!selectedDiscoveredRepo) return
@@ -375,7 +405,7 @@ export default function Dashboard() {
 
   const addSource = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const selectedRepo = selectedDiscoveredRepo || discoveredRepos.find(repo => repo.path === sourcePath)
+    const selectedRepo = selectedDiscoveredRepo || discoveredRepos.find(r => r.path === sourcePath)
     const path = (selectedRepo?.path || sourcePath).trim()
     if (!path) {
       setError('Select a discovered repository first.')
@@ -393,223 +423,308 @@ export default function Dashboard() {
       setSourceLabel('')
       setSourceId('')
       setSelectedDiscoveredRepoPath('')
-      setShowAddSource(false)
+      setShowAddModal(false)
       void scanRepositories(discoveryRootPath, true)
     }
   }
 
-  const toggleAddSource = () => {
-    setShowAddSource(current => !current)
-  }
-
   return (
-    <main className="h-screen overflow-hidden bg-slate-50 text-slate-950 dark:bg-slate-950 dark:text-slate-50">
-      <div className="mx-auto flex h-full max-w-7xl flex-col gap-4 p-4 sm:p-5">
-        <header className="flex shrink-0 flex-wrap items-start justify-between gap-3 rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/80">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">BuildFlow agent</p>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">Sources dashboard</h1>
-            <p className="mt-1 max-w-2xl text-sm text-slate-600 dark:text-slate-300">One fast view for connected repos, live conversation context, and source maintenance.</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={`rounded-full px-3 py-1 text-xs font-medium ring-1 ${agentConnected ? toneClass.good : toneClass.warn}`}>
-              {agentConnected ? 'Agent connected' : 'Agent unavailable'}
+    <main className="h-screen overflow-hidden bg-gray-50 text-gray-900 dark:bg-[#0a0a0f] dark:text-gray-100 font-[-apple-system,BlinkMacSystemFont,'Inter',sans-serif]">
+      <div className="flex h-full flex-col">
+        {/* Header */}
+        <header className="flex shrink-0 items-center justify-between border-b border-gray-200 bg-white/80 px-5 py-3 backdrop-blur-sm dark:border-gray-800 dark:bg-[#0f0f17]/80">
+          <div className="flex items-center gap-3">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-900 dark:bg-white">
+              <svg className="h-4 w-4 text-white dark:text-gray-900" viewBox="0 0 16 16" fill="currentColor"><path d="M3 1h10l2 4v9a1 1 0 01-1 1H2a1 1 0 01-1-1V5l2-4zm1.2 1L3 4.5h10L11.8 2H4.2zM2 6v8h12V6H2z"/></svg>
+            </div>
+            <span className="text-sm font-semibold tracking-tight">BuildFlow</span>
+            <span className={`ml-2 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${agentConnected ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400'}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${agentConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+              {agentConnected ? 'Connected' : 'Offline'}
             </span>
-            <button type="button" onClick={() => refreshSources(false)} disabled={loading || Boolean(busySourceId)} className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
-              {loading ? 'Refreshing…' : 'Refresh'}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button type="button" onClick={cycleTheme} className="rounded-lg p-2 text-gray-500 transition hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" title={`Theme: ${theme}`}>
+              {theme === 'dark' ? (
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+              ) : theme === 'light' ? (
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+              ) : (
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+              )}
             </button>
-            <button type="button" onClick={toggleAddSource} className="rounded-full bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200">
-              {showAddSource ? 'Close add' : 'Add repo'}
+            <button type="button" onClick={() => refreshSources(false)} disabled={loading || Boolean(busySourceId)} className="rounded-lg p-2 text-gray-500 transition hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200" title="Refresh">
+              <svg className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+            <button type="button" onClick={() => setShowAddModal(true)} className="ml-1 inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-700 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200">
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4"/></svg>
+              Add repo
             </button>
           </div>
         </header>
 
-        <section className="grid shrink-0 gap-3 sm:grid-cols-4">
-          <Metric label="Sources" value={sources.length} detail={`${enabledSources.length} enabled`} />
-          <Metric label="Ready" value={readyCount} detail="searchable" tone={readyCount > 0 ? 'good' : 'neutral'} />
-          <Metric label="Indexing" value={indexingCount} detail="running now" tone={indexingCount > 0 ? 'warn' : 'neutral'} />
-          <Metric label="Live connections" value={activeSourceIds.length} detail={activeMode} tone={activeSourceIds.length > 0 ? 'good' : 'neutral'} />
-        </section>
+        {/* Toast notifications */}
+        {(notice || error) && (
+          <div className="shrink-0 border-b border-gray-200 px-5 py-2 dark:border-gray-800">
+            {notice && <p className="text-xs text-emerald-700 dark:text-emerald-400">{notice}</p>}
+            {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+          </div>
+        )}
 
-        {(notice || error || showAddSource) ? (
-          <section className="shrink-0 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            {notice ? <p className="text-sm text-emerald-700 dark:text-emerald-300">{notice}</p> : null}
-            {error ? <p className="text-sm text-red-700 dark:text-red-300">{error}</p> : null}
-            {showAddSource ? (
-              <form onSubmit={addSource} className="mt-3 grid gap-2 md:grid-cols-[minmax(0,1.6fr)_auto]">
-                <label className="min-w-0">
-                  <span className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">Repo path</span>
-                  <select
-                    value={selectedDiscoveredRepoPath}
-                    onClick={() => {
-                      if (discoveredRepos.length === 0 && !discoveryLoading) {
-                        scanRepositories(discoveryRootPath, true)
-                      }
-                    }}
-                    onChange={event => setSelectedDiscoveredRepoPath(event.target.value)}
-                    disabled={busySourceId === 'new-source'}
-                    className="relative z-10 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:focus:border-slate-500 dark:focus:ring-slate-600"
-                  >
-                    <option value="">{discoveryLoading ? 'Scanning repos…' : discoveryScanned ? 'Select a repository' : 'Click to scan repositories'}</option>
-                    {discoveredRepos.map(repo => (
-                      <option key={repo.path} value={repo.path} disabled={repo.alreadyAdded}>
-                        {repo.account} / {repo.label}{repo.alreadyAdded ? ' · already added' : ''}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
-                    <span className="truncate font-mono">{sourcePath || discoveryRootPath}</span>
-                    <span>{availableDiscoveredRepos.length} available</span>
-                    <button type="button" onClick={() => scanRepositories(discoveryRootPath, false)} disabled={discoveryLoading} className="font-medium text-slate-700 underline-offset-2 hover:underline disabled:opacity-50 dark:text-slate-200">
-                      Rescan
-                    </button>
-                  </div>
-                </label>
-                <div className="flex items-end">
-                  <button type="submit" disabled={busySourceId === 'new-source' || !sourcePath || Boolean(selectedDiscoveredRepo?.alreadyAdded)} className="w-full rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-slate-950 md:w-auto">
-                    {busySourceId === 'new-source' ? 'Adding…' : 'Add'}
-                  </button>
-                </div>
-                {selectedDiscoveredRepo ? (
-                  <div className="rounded-xl bg-slate-100 px-3 py-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300 md:col-span-2">
-                    Label: <strong>{selectedDiscoveredRepo.label}</strong> · ID: <span className="font-mono">{selectedDiscoveredRepo.id}</span>
-                  </div>
-                ) : null}
-              </form>
-            ) : null}
-          </section>
-        ) : null}
+        {/* Metrics bar */}
+        <div className="flex shrink-0 items-center gap-6 border-b border-gray-200 bg-white/50 px-5 py-2.5 dark:border-gray-800 dark:bg-[#0f0f17]/50">
+          <MetricInline label="Sources" value={sources.length} sub={`${enabledSources.length} enabled`} />
+          <MetricInline label="Ready" value={readyCount} sub="searchable" tone={readyCount > 0 ? 'good' : 'neutral'} />
+          <MetricInline label="Indexing" value={indexingCount} sub="running" tone={indexingCount > 0 ? 'warn' : 'neutral'} />
+          <MetricInline label="Active" value={activeSourceIds.length} sub={activeMode} tone={activeSourceIds.length > 0 ? 'good' : 'neutral'} />
+        </div>
 
-        <section className="grid min-h-0 flex-1 gap-4 overflow-hidden lg:grid-cols-[minmax(0,1fr)_20rem]">
-          <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_8rem_8rem_14rem] gap-3 border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:border-slate-800 dark:text-slate-400 max-md:hidden">
-              <span>Source</span>
-              <span>Status</span>
-              <span>Connection</span>
-              <span className="text-right">Actions</span>
+        {/* Main content */}
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          {/* Source list */}
+          <section className="flex min-h-0 flex-1 flex-col overflow-hidden border-r border-gray-200 dark:border-gray-800">
+            <div className="flex shrink-0 items-center border-b border-gray-100 px-5 py-2 dark:border-gray-800/60">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Repositories</span>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               {loading && sources.length === 0 ? (
-                <div className="flex h-full items-center justify-center p-8 text-sm text-slate-500">Loading sources…</div>
+                <div className="flex h-full items-center justify-center text-sm text-gray-400">Loading sources...</div>
               ) : sources.length === 0 ? (
-                <div className="flex h-full items-center justify-center p-8 text-center">
-                  <div>
-                    <p className="font-medium">No repos connected yet.</p>
-                    <p className="mt-1 text-sm text-slate-500">Add a repo path to make it available to the BuildFlow agent.</p>
-                  </div>
+                <div className="flex h-full flex-col items-center justify-center gap-2 p-8">
+                  <p className="text-sm font-medium text-gray-600 dark:text-gray-300">No repos connected</p>
+                  <p className="text-xs text-gray-400">Add a repository to get started.</p>
                 </div>
               ) : (
-                <div className="divide-y divide-slate-200 pb-4 dark:divide-slate-800">
+                <div className="divide-y divide-gray-100 dark:divide-gray-800/60">
                   {sources.map(source => {
                     const active = activeSourceIds.includes(source.id)
                     const busy = busySourceId === source.id
+                    const menuOpen = openMenuId === source.id
                     return (
-                      <article key={source.id} className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1fr)_8rem_8rem_14rem] md:items-center">
-                        <div className="min-w-0">
+                      <div key={source.id} className={`group relative flex items-center gap-3 px-5 py-2.5 transition ${active ? 'bg-emerald-50/50 dark:bg-emerald-950/10' : 'hover:bg-gray-50 dark:hover:bg-gray-900/40'}`}>
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${source.enabled && source.indexStatus === 'ready' ? 'bg-emerald-500' : source.indexStatus === 'failed' ? 'bg-red-500' : source.indexStatus === 'indexing' ? 'bg-amber-500 animate-pulse' : 'bg-gray-300 dark:bg-gray-600'}`} />
+                        <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${source.enabled && source.indexStatus === 'ready' ? 'bg-emerald-500' : source.indexStatus === 'failed' ? 'bg-red-500' : source.indexStatus === 'indexing' ? 'bg-amber-500' : 'bg-slate-400'}`} />
-                            <h2 className="truncate text-sm font-semibold">{source.label}</h2>
-                            <span className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">{source.id}</span>
+                            <span className="truncate text-sm font-medium">{source.label}</span>
+                            <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">{source.id}</span>
                           </div>
-                          <p className="mt-1 truncate font-mono text-xs text-slate-500 dark:text-slate-400">{source.path}</p>
+                          <p className="mt-0.5 truncate font-mono text-[11px] text-gray-400 dark:text-gray-500">{source.path}</p>
                         </div>
-                        <Badge tone={statusTone(source)}>{statusLabel(source)}</Badge>
-                        <Badge tone={active ? 'good' : 'neutral'}>{active ? 'live' : 'idle'}</Badge>
-                        <div className="flex flex-wrap justify-start gap-1.5 md:justify-end">
-                          <ActionButton disabled={busy || (!source.enabled && !active)} onClick={() => toggleActive(source)}>{active ? 'Deactivate' : 'Activate'}</ActionButton>
-                          <ActionButton disabled={busy || !source.enabled || source.indexStatus === 'indexing'} onClick={() => reindexSource(source)}>Re-index</ActionButton>
-                          <ActionButton disabled={busy} onClick={() => toggleEnabled(source)}>{source.enabled ? 'Disable' : 'Enable'}</ActionButton>
-                          <ActionButton disabled={busy} danger onClick={() => removeSource(source)}>Remove</ActionButton>
+                        <div className="flex items-center gap-2">
+                          <StatusPill tone={statusTone(source)}>{statusLabel(source)}</StatusPill>
+                          {active && <StatusPill tone="good">live</StatusPill>}
+                          <div className="relative" ref={menuOpen ? menuRef : undefined}>
+                            <button
+                              type="button"
+                              onClick={() => setOpenMenuId(menuOpen ? null : source.id)}
+                              disabled={busy}
+                              className="rounded-md p-1 text-gray-400 transition hover:bg-gray-200 hover:text-gray-600 disabled:opacity-40 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+                            >
+                              <svg className="h-4 w-4" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+                            </button>
+                            {menuOpen && (
+                              <div className="absolute right-0 top-full z-30 mt-1 w-40 rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900">
+                                <DropdownItem onClick={() => { setOpenMenuId(null); void toggleActive(source) }} disabled={!source.enabled && !active}>
+                                  {active ? 'Deactivate' : 'Activate'}
+                                </DropdownItem>
+                                <DropdownItem onClick={() => { setOpenMenuId(null); void reindexSource(source) }} disabled={!source.enabled || source.indexStatus === 'indexing'}>
+                                  Re-index
+                                </DropdownItem>
+                                <DropdownItem onClick={() => { setOpenMenuId(null); void toggleEnabled(source) }}>
+                                  {source.enabled ? 'Disable' : 'Enable'}
+                                </DropdownItem>
+                                <div className="my-1 border-t border-gray-100 dark:border-gray-800" />
+                                <DropdownItem onClick={() => { setOpenMenuId(null); void removeSource(source) }} danger>
+                                  Remove
+                                </DropdownItem>
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </article>
+                      </div>
                     )
                   })}
                 </div>
               )}
             </div>
-          </div>
+          </section>
 
-          <aside className="grid min-h-0 gap-4 overflow-hidden lg:grid-rows-[auto_minmax(0,1fr)]">
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">Live conversation</p>
-              <h2 className="mt-2 text-lg font-semibold">Current ChatGPT chat</h2>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Connected to {activeSources.length > 0 ? countLabel(activeSources.length, 'source') : 'no sources'}.</p>
-              <div className="mt-3 space-y-2">
-                {activeSources.length > 0 ? activeSources.map(source => (
-                  <div key={source.id} className="rounded-xl bg-slate-100 px-3 py-2 text-sm dark:bg-slate-800">
-                    <div className="truncate font-medium">{source.label}</div>
-                    <div className="truncate font-mono text-xs text-slate-500 dark:text-slate-400">{source.id}</div>
+          {/* Right sidebar */}
+          <aside className="hidden w-80 shrink-0 flex-col overflow-hidden lg:flex">
+            {/* Live conversation */}
+            <div className="shrink-0 border-b border-gray-200 p-4 dark:border-gray-800">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Live conversation</p>
+              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                Connected to {activeSources.length > 0 ? countLabel(activeSources.length, 'source') : 'no sources'}.
+              </p>
+              <div className="mt-2 space-y-1.5">
+                {activeSources.length > 0 ? activeSources.map(s => (
+                  <div key={s.id} className="rounded-md bg-gray-100 px-2.5 py-1.5 dark:bg-gray-800">
+                    <span className="text-xs font-medium">{s.label}</span>
+                    <span className="ml-2 font-mono text-[10px] text-gray-400">{s.id}</span>
                   </div>
-                )) : <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">Activate a source to connect this conversation.</p>}
+                )) : (
+                  <p className="rounded-md bg-gray-100 px-2.5 py-1.5 text-xs text-gray-400 dark:bg-gray-800">Activate a source to connect.</p>
+                )}
               </div>
             </div>
 
-            <div className="min-h-0 overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">Agent activity</p>
-              <div className="mt-3 space-y-2 overflow-y-auto pr-1">
-                {agentJobs.length > 0 ? agentJobs.map(job => (
-                  <div key={job.id} className={`rounded-xl px-3 py-2 text-sm ring-1 ${toneClass[job.status === 'failed' || job.status === 'blocked' ? 'bad' : job.status === 'needs_confirmation' || job.status === 'paused' ? 'warn' : job.status === 'completed' ? 'good' : 'neutral']}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="truncate font-medium">Agent Mode: {job.status}</div>
-                      <div className="shrink-0 font-mono text-[10px] opacity-70">{job.completedTaskCount}/{job.totalTaskCount}</div>
-                    </div>
-                    <div className="mt-1 text-xs opacity-85">
-                      {job.activeTask ? `${job.activeTask.phaseTitle}: ${job.activeTask.title}` : job.summary || job.id}
-                    </div>
-                    <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/50 dark:bg-slate-950/40">
-                      <div className="h-full rounded-full bg-current opacity-60" style={{ width: `${job.totalTaskCount > 0 ? Math.round((job.completedTaskCount / job.totalTaskCount) * 100) : 0}%` }} />
-                    </div>
-                    {job.blockedReason || job.confirmationReason ? (
-                      <div className="mt-1 text-xs opacity-85">{job.blockedReason || job.confirmationReason}</div>
-                    ) : null}
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      <ActionButton disabled={busyJobId === job.id || !['queued', 'running'].includes(job.status)} onClick={() => controlAgentJob(job, 'pause')}>Pause</ActionButton>
-                      <ActionButton disabled={busyJobId === job.id || job.status !== 'paused'} onClick={() => controlAgentJob(job, 'resume')}>Resume</ActionButton>
-                      <ActionButton disabled={busyJobId === job.id || ['completed', 'failed', 'cancelled'].includes(job.status)} danger onClick={() => controlAgentJob(job, 'cancel')}>Cancel</ActionButton>
-                    </div>
+            {/* Agent activity — scrollable */}
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
+              <p className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Agent activity</p>
+              <div className="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                {agentJobs.map(job => (
+                  <AgentJobCard key={job.id} job={job} busyJobId={busyJobId} onControl={controlAgentJob} />
+                ))}
+                {activity.map(item => (
+                  <div key={item.id} className={`rounded-lg px-2.5 py-2 text-xs ${toneBg(item.tone)}`}>
+                    <span className="font-medium">{item.label}</span>
+                    <p className="mt-0.5 opacity-75">{item.detail}</p>
                   </div>
-                )) : null}
-                {activity.length > 0 ? activity.map(item => (
-                  <div key={item.id} className={`rounded-xl px-3 py-2 text-sm ring-1 ${toneClass[item.tone]}`}>
-                    <div className="font-medium">{item.label}</div>
-                    <div className="mt-0.5 text-xs opacity-80">{item.detail}</div>
-                  </div>
-                )) : null}
-                {agentJobs.length === 0 && activity.length === 0 ? <p className="rounded-xl bg-slate-100 px-3 py-2 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">No agent activity yet.</p> : null}
+                ))}
+                {agentJobs.length === 0 && activity.length === 0 && (
+                  <p className="rounded-md bg-gray-100 px-2.5 py-2 text-xs text-gray-400 dark:bg-gray-800">No activity yet.</p>
+                )}
               </div>
             </div>
           </aside>
-        </section>
+        </div>
       </div>
+
+      {/* Add repo modal */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) setShowAddModal(false) }}>
+          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-gray-700 dark:bg-gray-900">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Add repository</h2>
+              <button type="button" onClick={() => setShowAddModal(false)} className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300">
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+            <form onSubmit={addSource} className="mt-4 space-y-3">
+              <div>
+                <label className="mb-1 block text-[11px] font-medium text-gray-500 dark:text-gray-400">Repository</label>
+                <select
+                  value={selectedDiscoveredRepoPath}
+                  onClick={() => { if (discoveredRepos.length === 0 && !discoveryLoading) scanRepositories(discoveryRootPath, true) }}
+                  onChange={e => setSelectedDiscoveredRepoPath(e.target.value)}
+                  disabled={busySourceId === 'new-source'}
+                  className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-gray-500 focus:ring-2 focus:ring-gray-200 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:focus:ring-gray-700"
+                >
+                  <option value="">{discoveryLoading ? 'Scanning...' : discoveryScanned ? 'Select a repository' : 'Click to scan'}</option>
+                  {discoveredRepos.map(repo => (
+                    <option key={repo.path} value={repo.path} disabled={repo.alreadyAdded}>
+                      {repo.account} / {repo.label}{repo.alreadyAdded ? ' (added)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <div className="mt-1.5 flex items-center gap-2 text-[11px] text-gray-400">
+                  <span className="truncate font-mono">{sourcePath || discoveryRootPath}</span>
+                  <span>{availableDiscoveredRepos.length} available</span>
+                  <button type="button" onClick={() => scanRepositories(discoveryRootPath, false)} disabled={discoveryLoading} className="font-medium text-gray-600 hover:underline disabled:opacity-50 dark:text-gray-300">
+                    Rescan
+                  </button>
+                </div>
+              </div>
+              {selectedDiscoveredRepo && (
+                <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs dark:bg-gray-800">
+                  <span className="font-medium">{selectedDiscoveredRepo.label}</span>
+                  <span className="ml-2 font-mono text-gray-400">{selectedDiscoveredRepo.id}</span>
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-1">
+                <button type="button" onClick={() => setShowAddModal(false)} className="rounded-lg px-3 py-1.5 text-xs font-medium text-gray-600 transition hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800">
+                  Cancel
+                </button>
+                <button type="submit" disabled={busySourceId === 'new-source' || !sourcePath || Boolean(selectedDiscoveredRepo?.alreadyAdded)} className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-gray-700 disabled:opacity-40 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200">
+                  {busySourceId === 'new-source' ? 'Adding...' : 'Add repository'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   )
 }
 
-function Metric({ label, value, detail, tone = 'neutral' }: { label: string; value: number; detail: string; tone?: StatusTone }) {
+function MetricInline({ label, value, sub, tone = 'neutral' }: { label: string; value: number; sub: string; tone?: StatusTone }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-      <p className="text-xs font-medium text-slate-500 dark:text-slate-400">{label}</p>
-      <div className="mt-1 flex items-end justify-between gap-2">
-        <strong className="text-2xl font-semibold">{value}</strong>
-        <span className={`rounded-full px-2 py-1 text-xs ring-1 ${toneClass[tone]}`}>{detail}</span>
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-gray-400 dark:text-gray-500">{label}</span>
+      <span className={`text-sm font-semibold ${tone === 'good' ? 'text-emerald-600 dark:text-emerald-400' : tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : tone === 'bad' ? 'text-red-600 dark:text-red-400' : ''}`}>{value}</span>
+      <span className="text-[11px] text-gray-400 dark:text-gray-500">{sub}</span>
+    </div>
+  )
+}
+
+function StatusPill({ children, tone }: { children: string; tone: StatusTone }) {
+  const colors: Record<StatusTone, string> = {
+    neutral: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
+    good: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400',
+    warn: 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400',
+    bad: 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-400'
+  }
+  return <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${colors[tone]}`}>{children}</span>
+}
+
+function DropdownItem({ children, onClick, disabled, danger }: { children: string; onClick: () => void; disabled?: boolean; danger?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`w-full px-3 py-1.5 text-left text-xs transition disabled:opacity-40 ${danger ? 'text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30' : 'text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800'}`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function AgentJobCard({ job, busyJobId, onControl }: { job: AgentDashboardJob; busyJobId: string | null; onControl: (job: AgentDashboardJob, action: 'pause' | 'resume' | 'cancel') => void }) {
+  const progress = job.totalTaskCount > 0 ? Math.round((job.completedTaskCount / job.totalTaskCount) * 100) : 0
+  const tone: StatusTone = job.status === 'failed' || job.status === 'blocked' ? 'bad' : job.status === 'needs_confirmation' || job.status === 'paused' ? 'warn' : job.status === 'completed' ? 'good' : 'neutral'
+  return (
+    <div className={`rounded-lg px-2.5 py-2 text-xs ${toneBg(tone)}`}>
+      <div className="flex items-center justify-between gap-1">
+        <span className="font-medium">Agent: {job.status}</span>
+        <span className="font-mono text-[10px] opacity-60">{job.completedTaskCount}/{job.totalTaskCount}</span>
+      </div>
+      <p className="mt-0.5 truncate opacity-75">{job.activeTask ? `${job.activeTask.phaseTitle}: ${job.activeTask.title}` : job.summary || job.id}</p>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+        <div className="h-full rounded-full bg-current opacity-50" style={{ width: `${progress}%` }} />
+      </div>
+      {(job.blockedReason || job.confirmationReason) && (
+        <p className="mt-1 opacity-75">{job.blockedReason || job.confirmationReason}</p>
+      )}
+      <div className="mt-1.5 flex gap-1">
+        <MiniButton onClick={() => onControl(job, 'pause')} disabled={busyJobId === job.id || !['queued', 'running'].includes(job.status)}>Pause</MiniButton>
+        <MiniButton onClick={() => onControl(job, 'resume')} disabled={busyJobId === job.id || job.status !== 'paused'}>Resume</MiniButton>
+        <MiniButton onClick={() => onControl(job, 'cancel')} disabled={busyJobId === job.id || ['completed', 'failed', 'cancelled'].includes(job.status)} danger>Cancel</MiniButton>
       </div>
     </div>
   )
 }
 
-function Badge({ children, tone }: { children: string; tone: StatusTone }) {
-  return <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${toneClass[tone]}`}>{children}</span>
-}
-
-function ActionButton({ children, disabled, danger = false, onClick }: { children: string; disabled?: boolean; danger?: boolean; onClick: () => void }) {
+function MiniButton({ children, onClick, disabled, danger }: { children: string; onClick: () => void; disabled?: boolean; danger?: boolean }) {
   return (
     <button
       type="button"
-      disabled={disabled}
       onClick={onClick}
-      className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${danger ? 'border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/60 dark:text-red-300 dark:hover:bg-red-950/30' : 'border-slate-300 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800'}`}
+      disabled={disabled}
+      className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition disabled:opacity-30 ${danger ? 'text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-950/30' : 'text-gray-600 hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-700'}`}
     >
       {children}
     </button>
   )
+}
+
+function toneBg(tone: StatusTone): string {
+  const map: Record<StatusTone, string> = {
+    neutral: 'bg-gray-50 text-gray-700 dark:bg-gray-800/60 dark:text-gray-300',
+    good: 'bg-emerald-50 text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300',
+    warn: 'bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-300',
+    bad: 'bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-300'
+  }
+  return map[tone]
 }
