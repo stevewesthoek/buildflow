@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_PORT="${AGENT_PORT:-3052}"
 RELAY_PORT="${RELAY_PORT:-3053}"
 WEB_PORT="${WEB_PORT:-3054}"
+WEB_SERVER_MODE="${BUILDFLOW_WEB_SERVER_MODE:-production}"
 AGENT_HEALTH_URL="http://127.0.0.1:${AGENT_PORT}/health"
 RELAY_HEALTH_URL="http://127.0.0.1:${RELAY_PORT}/health"
 WEB_HEALTH_URL="http://127.0.0.1:${WEB_PORT}/api/openapi"
@@ -209,6 +210,8 @@ import sys
 cli_dir, port, log_path, err_path = sys.argv[1:5]
 env = os.environ.copy()
 env["AGENT_PORT"] = port
+env.setdefault("BRIDGE_URL", "http://127.0.0.1:3053")
+env.setdefault("DEVICE_TOKEN", "local-device")
 
 with open(log_path, "ab", buffering=0) as log_file, open(err_path, "ab", buffering=0) as err_file:
     proc = subprocess.Popen(
@@ -245,20 +248,30 @@ start_web_if_needed() {
   : >"$WEB_LOG"
   : >"$WEB_ERR_LOG"
   local next_bin="$REPO_ROOT/apps/web/node_modules/.bin/next"
+  local next_command="dev"
+  if [ "$WEB_SERVER_MODE" = "production" ] || [ "$WEB_SERVER_MODE" = "start" ]; then
+    if [ ! -f "$REPO_ROOT/apps/web/.next/BUILD_ID" ]; then
+      log "No production web build found; building apps/web before next start."
+      (cd "$REPO_ROOT/apps/web" && pnpm build)
+    fi
+    next_command="start"
+  elif [ "$WEB_SERVER_MODE" != "dev" ]; then
+    die "Unknown BUILDFLOW_WEB_SERVER_MODE: $WEB_SERVER_MODE (expected production, start, or dev)"
+  fi
   local pid
   pid="$(
-    python3 - "$REPO_ROOT/apps/web" "$WEB_PORT" "$WEB_LOG" "$WEB_ERR_LOG" "$next_bin" <<'PY'
+    python3 - "$REPO_ROOT/apps/web" "$WEB_PORT" "$WEB_LOG" "$WEB_ERR_LOG" "$next_bin" "$next_command" <<'PY'
 import os
 import subprocess
 import sys
 
-web_dir, port, log_path, err_path, next_bin = sys.argv[1:6]
+web_dir, port, log_path, err_path, next_bin, next_command = sys.argv[1:7]
 env = os.environ.copy()
 env["HOST"] = "127.0.0.1"
 env["PORT"] = port
 with open(log_path, "ab", buffering=0) as log_file, open(err_path, "ab", buffering=0) as err_file:
     proc = subprocess.Popen(
-        [next_bin, "dev", "-H", "127.0.0.1", "-p", port],
+        [next_bin, next_command, "-H", "127.0.0.1", "-p", port],
         cwd=web_dir,
         env=env,
         stdin=subprocess.DEVNULL,
@@ -270,6 +283,7 @@ with open(log_path, "ab", buffering=0) as log_file, open(err_path, "ab", bufferi
 PY
   )"
   echo "$pid" >"$WEB_PID_FILE"
+  log "Web started with next ${next_command} on ${WEB_PORT}."
 }
 
 stop_web() {
