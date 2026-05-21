@@ -352,11 +352,25 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       if (!jobId) {
         const maxJobs = Math.min(20, Math.max(1, Number(limit || 10)))
         const jobs = listAgentJobs().slice(0, maxJobs)
-        return reply.header('Cache-Control', 'no-store').send({ status: 'ok', jobs: full === true ? jobs : jobs.map(compactAgentJob) })
+        const events = listAgentEvents({ limit: 20 })
+        return reply.header('Cache-Control', 'no-store').send({
+          status: 'ok',
+          jobs: full === true ? jobs : jobs.map(compactAgentJob),
+          events: events.events,
+          eventBytes: events.returnedBytes,
+          eventBudgetBytes: events.budgetBytes
+        })
       }
       const job = Object.keys(patch).length > 0 ? updateAgentJob(jobId, patch) : getAgentJob(jobId)
       if (!job) return reply.code(404).send({ error: `Agent job not found: ${jobId}` })
-      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job: full === true ? job : compactAgentJob(job) })
+      const events = listAgentEvents({ jobId, limit: 20 })
+      return reply.header('Cache-Control', 'no-store').send({
+        status: 'ok',
+        job: full === true ? job : compactAgentJob(job),
+        events: events.events,
+        eventBytes: events.returnedBytes,
+        eventBudgetBytes: events.budgetBytes
+      })
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }

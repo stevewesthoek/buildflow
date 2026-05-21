@@ -43,6 +43,17 @@ type AgentDashboardJob = {
   confirmationReason?: string
 }
 
+type AgentRuntimeEvent = {
+  id: string
+  jobId: string
+  sourceId: string
+  type: string
+  message: string
+  createdAt: string
+  commandKind?: string
+  status?: string
+}
+
 const terminalStatuses = new Set(['ready', 'failed', 'disabled'])
 
 const toneClass: Record<StatusTone, string> = {
@@ -128,6 +139,7 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null)
   const [activity, setActivity] = useState<ActivityLine[]>([])
   const [agentJobs, setAgentJobs] = useState<AgentDashboardJob[]>([])
+  const [busyJobId, setBusyJobId] = useState<string | null>(null)
   const hydratedRef = useRef(false)
 
   const readyCount = useMemo(() => sources.filter(source => source.enabled && source.indexStatus === 'ready').length, [sources])
@@ -148,15 +160,45 @@ export default function Dashboard() {
     try {
       const data = await fetchJson('/api/agent/jobs')
       const jobs = Array.isArray(data.jobs) ? data.jobs as AgentDashboardJob[] : []
+      const events = Array.isArray(data.events) ? data.events as AgentRuntimeEvent[] : []
       setAgentJobs(jobs)
-      if (!silent && jobs.length > 0) {
-        const active = jobs.find(job => ['queued', 'running', 'needs_confirmation'].includes(job.status)) || jobs[0]
-        pushActivity('Agent Mode sync', `${active.status}: ${active.activeTask?.title || active.summary || active.id}`, active.status === 'blocked' || active.status === 'failed' ? 'bad' : active.status === 'needs_confirmation' ? 'warn' : 'good')
+      if (!silent && events.length > 0) {
+        const event = events[0]
+        pushActivity('Agent Runtime event', `${event.type}: ${event.message}`, event.type.includes('failed') || event.type.includes('blocked') ? 'bad' : event.type.includes('paused') ? 'warn' : 'good')
+      } else if (!silent && jobs.length > 0) {
+        const active = jobs.find(job => ['queued', 'running', 'needs_confirmation', 'paused'].includes(job.status)) || jobs[0]
+        pushActivity('Agent Mode sync', `${active.status}: ${active.activeTask?.title || active.summary || active.id}`, active.status === 'blocked' || active.status === 'failed' ? 'bad' : active.status === 'needs_confirmation' || active.status === 'paused' ? 'warn' : 'good')
       }
       return jobs
     } catch (err) {
       if (!silent) pushActivity('Agent jobs unavailable', err instanceof Error ? err.message : String(err), 'warn')
       return agentJobs
+    }
+  }
+
+  const controlAgentJob = async (job: AgentDashboardJob, action: 'pause' | 'resume' | 'cancel') => {
+    try {
+      setBusyJobId(job.id)
+      setError(null)
+      const data = await fetchJson('/api/agent/jobs/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, action, reason: `Dashboard ${action}` })
+      })
+      const events = Array.isArray(data.events) ? data.events as AgentRuntimeEvent[] : []
+      const latest = events[0]
+      pushActivity(
+        `Agent ${action}`,
+        latest ? `${latest.type}: ${latest.message}` : `${job.id} ${action} requested.`,
+        action === 'cancel' ? 'warn' : 'good'
+      )
+      await refreshAgentJobs(true)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      pushActivity(`Agent ${action} failed`, message, 'bad')
+    } finally {
+      setBusyJobId(null)
     }
   }
 
@@ -245,7 +287,7 @@ export default function Dashboard() {
   useEffect(() => {
     const interval = window.setInterval(() => {
       void refreshAgentJobs(true)
-    }, agentJobs.some(job => ['queued', 'running', 'needs_confirmation'].includes(job.status)) ? 2500 : 7000)
+    }, agentJobs.some(job => ['queued', 'running', 'paused', 'needs_confirmation'].includes(job.status)) ? 2500 : 7000)
     return () => window.clearInterval(interval)
   }, [agentJobs])
 
@@ -506,7 +548,7 @@ export default function Dashboard() {
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">Agent activity</p>
               <div className="mt-3 space-y-2 overflow-y-auto pr-1">
                 {agentJobs.length > 0 ? agentJobs.map(job => (
-                  <div key={job.id} className={`rounded-xl px-3 py-2 text-sm ring-1 ${toneClass[job.status === 'failed' || job.status === 'blocked' ? 'bad' : job.status === 'needs_confirmation' ? 'warn' : job.status === 'completed' ? 'good' : 'neutral']}`}>
+                  <div key={job.id} className={`rounded-xl px-3 py-2 text-sm ring-1 ${toneClass[job.status === 'failed' || job.status === 'blocked' ? 'bad' : job.status === 'needs_confirmation' || job.status === 'paused' ? 'warn' : job.status === 'completed' ? 'good' : 'neutral']}`}>
                     <div className="flex items-center justify-between gap-2">
                       <div className="truncate font-medium">Agent Mode: {job.status}</div>
                       <div className="shrink-0 font-mono text-[10px] opacity-70">{job.completedTaskCount}/{job.totalTaskCount}</div>
@@ -520,6 +562,11 @@ export default function Dashboard() {
                     {job.blockedReason || job.confirmationReason ? (
                       <div className="mt-1 text-xs opacity-85">{job.blockedReason || job.confirmationReason}</div>
                     ) : null}
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      <ActionButton disabled={busyJobId === job.id || !['queued', 'running'].includes(job.status)} onClick={() => controlAgentJob(job, 'pause')}>Pause</ActionButton>
+                      <ActionButton disabled={busyJobId === job.id || job.status !== 'paused'} onClick={() => controlAgentJob(job, 'resume')}>Resume</ActionButton>
+                      <ActionButton disabled={busyJobId === job.id || ['completed', 'failed', 'cancelled'].includes(job.status)} danger onClick={() => controlAgentJob(job, 'cancel')}>Cancel</ActionButton>
+                    </div>
                   </div>
                 )) : null}
                 {activity.length > 0 ? activity.map(item => (
