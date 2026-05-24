@@ -187,7 +187,7 @@ stop_service() {
       kill -TERM "$pid" 2>/dev/null || true
       ;;
     web)
-      # Send SIGTERM to next dev process tree
+      # Send SIGTERM to next start process tree
       pkill -TERM -P "$pid" 2>/dev/null || true
       kill -TERM "$pid" 2>/dev/null || true
       ;;
@@ -304,8 +304,14 @@ start_service() {
       ;;
 
     next)
-      launch_detached "$BUILDFLOW_CONFIG_DIR/${service}.log" "$dir" pnpm dev
-      log_debug "Started $service via detached launcher: pnpm dev"
+      # Production mode: auto-build if no .next/BUILD_ID exists, then run next start
+      if [[ ! -f "$REPO_ROOT/apps/web/.next/BUILD_ID" ]]; then
+        log_info "No production build found; building apps/web (BUILDFLOW_WEB_SERVER_MODE=production)..."
+        (cd "$dir" && BUILDFLOW_WEB_SERVER_MODE=production pnpm build)
+      fi
+      export BUILDFLOW_WEB_SERVER_MODE=production
+      launch_detached "$BUILDFLOW_CONFIG_DIR/${service}.log" "$dir" pnpm start
+      log_debug "Started $service via detached launcher: pnpm start (BUILDFLOW_WEB_SERVER_MODE=production)"
       ;;
 
     docker)
