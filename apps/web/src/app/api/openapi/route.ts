@@ -192,7 +192,7 @@ const openapi = {
                   sourceId: { type: 'string' },
                   commandKind: {
                     type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_add_paths', 'git_commit', 'git_push', 'run_package_script', 'run_package_test']
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_add_paths', 'git_commit', 'git_push', 'run_package_script', 'run_package_test', 'diagnose_performance']
                   },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 50 },
                   message: { type: 'string' },
@@ -200,6 +200,7 @@ const openapi = {
                   remote: { type: 'string' },
                   branch: { type: 'string' },
                   scriptName: { type: 'string' },
+                  packageDir: { type: 'string', description: 'Required for run_package_script, run_package_test, and run_package_test_marker. Use "." for the selected source root.' },
                   timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000, description: 'Keep Custom GPT actions under the 45s platform timeout.' }
                 },
                 required: ['sourceId', 'commandKind']

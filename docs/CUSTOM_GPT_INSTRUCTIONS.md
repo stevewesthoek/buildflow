@@ -72,6 +72,11 @@ Search behavior:
 - If a normal `search_and_read` query has no path matches, BuildFlow retries content search automatically.
 - No-match responses are not failures; refine the query or list files.
 
+Command actions:
+- `run_package_script`, `run_package_test`, and `run_package_test_marker` require `packageDir`.
+- Example: `runBuildFlowCommand` with `commandKind` `run_package_script`, `packageDir` `.`, `scriptName` `diagnose:performance`.
+- Use `diagnose_performance` only for performance debugging.
+
 ## Write — Patch vs Overwrite
 - `patch`: use when changing one block inside an existing file. Provide the exact string to find.
 - `overwrite`: use only when rewriting the whole file. Send the complete new content.
