@@ -187,6 +187,15 @@ Commit/push: automatic after validation
 
 This gives you a Codex-style goal loop inside ChatGPT while keeping BuildFlow as the local safety and execution layer.
 
+Agentic Goal Mode follows a durable **GPT-led, backend-assisted** split:
+
+```text
+GPT side: reasoning, planning, implementation choices, code review, repair decisions, next-step control.
+Backend side: deterministic execution, validation, diagnostics, indexing, batching, compact summaries, safety policy.
+```
+
+BuildFlow should not move open-ended planning and repair into a server-side state machine unless a separate local model runtime is introduced. For speed, BuildFlow should instead batch mechanical work into compact tools: preflight checks, package diagnostics, validation bundles, response-size enforcement, and concise status/diff summaries.
+
 ### Persistent resume and handoff
 
 Agentic Goal Mode keeps a repo-local handoff path and a persistent local job record. Jobs are stored outside the chat process, so a new Custom GPT conversation can list or resume them after an interruption, browser refresh, or local service restart.

@@ -19,11 +19,18 @@ This is the maximum agent behavior achievable with OpenAI Custom GPT Actions. Se
 
 **Custom GPT Actions are synchronous REST calls with a 45-second hard timeout per call.** There is no streaming, no webhooks, no background jobs, and no reliable server-push mechanism.
 
-This means:
+This means BuildFlow must not move open-ended agent reasoning into the backend. A local server cannot replace the GPT as the planner, reviewer, repair loop, or next-step decision maker unless it embeds its own model runtime. Without that, a server-side job can only run deterministic procedures; it cannot reliably decide what code to write next from arbitrary repo context.
 
-**Server-side orchestration does not work.** You cannot start a background job on the server, have the GPT poll for status, and expect reliable results. The GPT loses conversational context across arbitrary polling calls. The 45-second timeout means any job that takes longer fails silently. There is no way to push progress back to the chat.
+**The correct model is GPT-led, backend-assisted.** The GPT's own context window is the job queue and reasoning state. Each action call returns a compact structured result with `nextStep`. The GPT reads `nextStep`, decides what should happen next, and makes the next call.
 
-**The correct model:** The GPT's own context window IS the job queue. Each action call returns a structured result with `nextStep`. The GPT reads `nextStep` and makes the next call. No server-side state machine. No polling. No job IDs.
+The backend should still help with speed by batching bounded, deterministic work that does not require model judgment. Good backend-assisted work includes preflight checks, package diagnostics, indexing, response-size enforcement, safe command execution, payload trimming, compact diff summaries, and status/event storage. Bad backend work is open-ended implementation orchestration that tries to plan, code, review, and repair without the GPT.
+
+Durable rule:
+
+```text
+GPT side: reasoning, planning, implementation choices, code review, repair decisions, next-step control.
+Backend side: deterministic execution, validation, diagnostics, indexing, batching, compact summaries, safety policy.
+```
 
 ---
 

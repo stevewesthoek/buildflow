@@ -37,9 +37,11 @@ The strongest root cause is payload and loop architecture, not one isolated slow
   - Added a latency budget section: prefer 1-3 exact files, 2-6 KB reads, shallow list depth, search-first/read-exact workflow, and diagnostics only for performance debugging.
 
 ## Architectural answer
-A full architectural replacement is not required yet. The current architecture is defensible because it isolates local repo access behind a relay/agent boundary and enforces explicit source IDs. However, BuildFlow needs an architectural operating principle: **all GPT-facing endpoints must be compact by default, paginated/chunked when needed, fail-fast, and diagnostic-on-demand only.**
+A full architectural replacement is not required. The current architecture is defensible because it isolates local repo access behind a relay/agent boundary and enforces explicit source IDs. However, BuildFlow needs an architectural operating principle: **all GPT-facing endpoints must be compact by default, paginated/chunked when needed, fail-fast, and diagnostic-on-demand only.**
 
-The biggest architectural improvement would be to make Agent Mode more asynchronous from the GPT perspective: the GPT should submit a small task, receive an immediate job ID, and poll compact progress/events instead of driving every low-level repo step through chat. The current dashboard-visible job ledger is already a foundation for this, but implementation still depends on the GPT executing each step. That design naturally creates many action round trips.
+The correct speed strategy is **GPT-led, backend-assisted** rather than fully server-side Agent Mode. The GPT must remain responsible for open-ended reasoning: planning, choosing edits, reviewing results, deciding repairs, and controlling the next step. The backend should reduce latency by doing bounded deterministic work: indexing, diagnostics, preflight checks, safe command execution, validation bundles, payload trimming, compact diff summaries, and status/event storage.
+
+Do not build backend features that try to replace GPT reasoning with a server-side state machine. Do build backend features that collapse multiple mechanical steps into one compact action response. This preserves the Custom GPT constraint that the model drives tool calls while reducing the number and size of tool calls needed for routine work.
 
 ## Next hardening recommendations
 1. Add server-enforced limits to `list_files` and search results that are stricter for GPT action routes than dashboard routes.
