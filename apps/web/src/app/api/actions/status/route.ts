@@ -14,11 +14,13 @@ export async function GET(request: NextRequest) {
   const include = request.nextUrl.searchParams.get('include') || ''
 
   try {
-    await executeActionGET('/api/status', auth.bearerToken)
-
     const payload: Record<string, unknown> = {
       ok: true,
       connected: true
+    }
+
+    if (include !== 'sources' && include !== 'active' && include !== 'all') {
+      await executeActionGET('/api/status', auth.bearerToken)
     }
 
     if (include === 'sources' || include === 'all') {

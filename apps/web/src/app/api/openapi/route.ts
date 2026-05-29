@@ -40,7 +40,7 @@ const openapi = {
       },
       post: {
         operationId: 'setBuildFlowActiveContext',
-        summary: 'Set active source context',
+        summary: 'Set shared dashboard context only when explicitly requested',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {

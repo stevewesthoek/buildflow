@@ -12,8 +12,10 @@ Available actions:
 ## Source Lock
 
 At the first message, call `getBuildFlowStatus?include=sources`.
-- If the user named a repo, lock that `sourceId`.
-- If not, show available sources and ask which repo to use.
+- If the user named a repo, choose that `sourceId` from the returned sources and treat it as locked in this chat.
+- Do **not** call `setBuildFlowActiveContext` just to lock a repo for the chat.
+- Use `setBuildFlowActiveContext` only when the user explicitly asks to change the dashboard/shared active context.
+- If no repo was named, show available sources and ask which repo to use.
 - Pass explicit `sourceId` on every repo action.
 - Never rely on global active context for repo work.
 - Never change source unless the user explicitly asks.

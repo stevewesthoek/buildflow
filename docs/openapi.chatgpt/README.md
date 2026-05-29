@@ -2,11 +2,13 @@
 
 For the free GitHub Local path, import the schema from your own BuildFlow endpoint.
 
-Use one of these:
+Use one of these for schema import/generation:
 
 - local reference file: `docs/openapi.chatgpt.json`
-- local running endpoint: `http://127.0.0.1:3054/api/openapi`
+- local running endpoint for local schema generation: `http://127.0.0.1:3054/api/openapi`
 - public Custom GPT endpoint you control: `https://<your-domain-or-tunnel>/api/openapi`
+
+For actual ChatGPT Actions, the server URL inside the imported schema must be reachable by ChatGPT over HTTPS. A `localhost` server URL is not a valid runtime endpoint for ChatGPT-hosted action calls.
 
 BuildFlow v1.2.13-beta actions return compact structured results for a Fast Repo Assistant Custom GPT. The GPT must be instructed to narrate progress before each action; the schema alone does not make the assistant explain what it is doing.
 
