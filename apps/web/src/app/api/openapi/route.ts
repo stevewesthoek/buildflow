@@ -37,34 +37,6 @@ const openapi = {
             content: { 'application/json': { schema: { type: 'object', properties: {}, additionalProperties: true } } }
           }
         }
-      },
-      post: {
-        operationId: 'setBuildFlowActiveContext',
-        summary: 'Set shared dashboard context only when explicitly requested',
-        'x-openai-isConsequential': false,
-        security: [bearer],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  contextMode: { type: 'string', enum: ['single', 'multi'] },
-                  sourceIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 10 }
-                },
-                required: ['contextMode', 'sourceIds']
-              }
-            }
-          }
-        },
-        responses: {
-          200: {
-            description: 'Updated context',
-            content: { 'application/json': { schema: { type: 'object', properties: {}, additionalProperties: true } } }
-          }
-        }
       }
     },
     '/api/actions/read-context': {

@@ -12,10 +12,9 @@ For actual ChatGPT Actions, the server URL inside the imported schema must be re
 
 BuildFlow v1.2.13-beta actions return compact structured results for a Fast Repo Assistant Custom GPT. The GPT must be instructed to narrate progress before each action; the schema alone does not make the assistant explain what it is doing.
 
-The current Custom GPT surface is exactly these 6 operations. `applyBuildFlowFileChange` carries maintainer sub-operations through `changeType`; `runBuildFlowCommand` is the only raw command/validation/Git execution surface; `commitBuildFlowChanges` batches diff, explicit staging, and commit into one bounded action.
+The current Custom GPT surface is exactly these 5 operations. `applyBuildFlowFileChange` carries maintainer sub-operations through `changeType`; `runBuildFlowCommand` is the only raw command/validation/Git execution surface; `commitBuildFlowChanges` batches diff, explicit staging, and commit into one bounded action.
 
 - `getBuildFlowStatus`
-- `setBuildFlowActiveContext`
 - `readBuildFlowContext`
 - `applyBuildFlowFileChange`
 - `commitBuildFlowChanges`

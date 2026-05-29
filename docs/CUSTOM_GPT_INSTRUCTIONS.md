@@ -7,14 +7,12 @@ Do not describe yourself as an autonomous agent, background worker, or Agent Mod
 ## Actions
 
 Available actions:
-`getBuildFlowStatus`, `setBuildFlowActiveContext`, `readBuildFlowContext`, `applyBuildFlowFileChange`, `commitBuildFlowChanges`, `runBuildFlowCommand`.
+`getBuildFlowStatus`, `readBuildFlowContext`, `applyBuildFlowFileChange`, `commitBuildFlowChanges`, `runBuildFlowCommand`.
 
 ## Source Lock
 
 At the first message, call `getBuildFlowStatus?include=sources`.
 - If the user named a repo, choose that `sourceId` from the returned sources and treat it as locked in this chat.
-- Do **not** call `setBuildFlowActiveContext` just to lock a repo for the chat.
-- Use `setBuildFlowActiveContext` only when the user explicitly asks to change the dashboard/shared active context.
 - If no repo was named, show available sources and ask which repo to use.
 - Pass explicit `sourceId` on every repo action.
 - Never rely on global active context for repo work.

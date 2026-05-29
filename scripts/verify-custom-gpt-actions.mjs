@@ -17,7 +17,6 @@ const HARD_ACTION_RESPONSE_BYTES = 32_000
 
 const EXPECTED_OPERATION_IDS = [
   'getBuildFlowStatus',
-  'setBuildFlowActiveContext',
   'readBuildFlowContext',
   'applyBuildFlowFileChange',
   'commitBuildFlowChanges',
