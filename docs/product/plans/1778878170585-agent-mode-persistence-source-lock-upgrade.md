@@ -1,5 +1,7 @@
 # Agent Mode persistence and conversation source lock upgrade
 
+> Superseded by `docs/product/agent-mode.md`. BuildFlow now uses bounded sequential execution for Custom GPT work, not long-running Agent Mode in the GPT schema.
+
 ## Goal
 Make BuildFlow more robust for multi-conversation Custom GPT use and interrupted Agent Mode work.
 

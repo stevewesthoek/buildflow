@@ -7,7 +7,7 @@ const openapi = {
   info: {
     title: 'BuildFlow API',
     version: '4.0.0',
-    description: 'Fast, bounded BuildFlow Custom GPT actions for repo status, source context, reads, writes, and allowlisted commands.'
+    description: 'Fast Repo Assistant actions for local repo status, source context, exact reads, guarded writes, validation commands, and commits.'
   },
   servers: [
     {
@@ -70,7 +70,7 @@ const openapi = {
     '/api/actions/read-context': {
       post: {
         operationId: 'readBuildFlowContext',
-        summary: 'Read files or search+read',
+        summary: 'Read files, search, or prepare focused task context',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -81,10 +81,10 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  mode: { type: 'string', enum: ['read_paths', 'search_and_read', 'list_files', 'search'] },
+                  mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search'] },
                   sourceId: { type: 'string' },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 10 },
-                  query: { type: 'string', description: 'Search query. Exact paths are fastest; use content: or full: for content-only search. Natural queries automatically retry content search after a path miss.' },
+                  query: { type: 'string', description: 'Task goal or search query. Use prepare_task_context first for coding tasks so BuildFlow can return a deterministic exact read plan.' },
                   path: { type: 'string', description: 'Folder for list_files.' },
                   depth: { type: 'integer', minimum: 1, maximum: 5 },
                   limit: { type: 'integer', minimum: 1, maximum: 10 },
@@ -192,7 +192,7 @@ const openapi = {
                   sourceId: { type: 'string' },
                   commandKind: {
                     type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_add_paths', 'git_commit', 'git_push', 'run_package_script', 'run_package_test', 'diagnose_performance']
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance']
                   },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 50 },
                   message: { type: 'string' },
@@ -200,7 +200,11 @@ const openapi = {
                   remote: { type: 'string' },
                   branch: { type: 'string' },
                   scriptName: { type: 'string' },
+                  marker: { type: 'string', description: 'Test marker for run_package_test_marker. Shell metacharacters are rejected by the backend.' },
+                  patternSet: { type: 'string', enum: ['forbidden_runtime_execution', 'forbidden_secret_material', 'forbidden_upload_network', 'forbidden_all_high_risk'], description: 'Named security scan set for security_scan_paths.' },
                   packageDir: { type: 'string', description: 'Required for run_package_script, run_package_test, and run_package_test_marker. Use "." for the selected source root.' },
+                  confirmedByUser: { type: 'boolean', description: 'Only use when the user explicitly confirmed a confirmation-gated safe command.' },
+                  confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated safe commands.' },
                   timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000, description: 'Keep Custom GPT actions under the 45s platform timeout.' }
                 },
                 required: ['sourceId', 'commandKind']

@@ -19,6 +19,7 @@ import { compactAgentJob, controlAgentJob, getAgentJob, listAgentJobs, startAgen
 import { listAgentEvents, appendAgentEvent } from './agent-events'
 import { startLocalAgentPreflight } from './agent-runtime'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from './payload-budget'
+import { prepareTaskContext } from './prepare-task-context'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -328,13 +329,13 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
       const source = getSourcesSafe().find(item => item.id === sourceId)
       if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
-      if (source.indexStatus !== 'ready') return reply.code(409).send({ error: `Source is not ready for Agent Mode: ${sourceId}`, indexStatus: source.indexStatus })
+      if (source.indexStatus !== 'ready') return reply.code(409).send({ error: `Source is not ready for sequential work: ${sourceId}`, indexStatus: source.indexStatus })
       const job = startAgentJob({ sourceId, goal, maxIterations, autonomyLevel, documentationPath, reviewEveryStep, autoCommit, autoPush })
       appendAgentEvent({
         jobId: job.id,
         sourceId,
         type: 'job_started',
-        message: 'Agent Runtime job created. Custom GPT remains the reasoning and coding engine; local BuildFlow handles deterministic control-plane work.',
+        message: 'Sequential job created. Custom GPT remains the reasoning and coding engine; local BuildFlow handles deterministic control-plane work.',
         status: job.status
       })
       if (autonomyLevel === 'hands_off_safe') {
@@ -464,6 +465,30 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       }
     } catch (err) {
       return reply.code(400).send({ error: String(err), timings: { totalMs: Date.now() - startedAt } })
+    }
+  })
+
+  fastify.post<{ Body: { query: string; sourceId?: string; sourceIds?: string[]; limit?: number; paths?: string[]; maxBytesPerFile?: number } }>('/api/prepare-task-context', async (request, reply) => {
+    try {
+      const { query, sourceId, sourceIds, limit, paths, maxBytesPerFile } = request.body
+      if (!query || typeof query !== 'string') return reply.code(400).send({ error: 'query is required' })
+      const resolvedSourceIds = sourceIds && sourceIds.length > 0 ? sourceIds : sourceId ? [sourceId] : getActiveSourceContext().activeSourceIds
+      if (resolvedSourceIds.length === 0) return reply.code(400).send({ error: 'sourceId or sourceIds required' })
+      const rejection = rejectUnindexedSources(resolvedSourceIds, reply)
+      if (rejection) return rejection
+
+      const prepared = await prepareTaskContext({
+        query,
+        sourceIds: resolvedSourceIds,
+        searcher,
+        limit,
+        paths,
+        maxBytesPerFile
+      })
+
+      return reply.header('Cache-Control', 'no-store').send(prepared)
+    } catch (err) {
+      return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }
   })
 
@@ -1469,7 +1494,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  // Compound execute-task endpoint: execute steps -> validate -> commit -> push in one request
+  // Compound execute-task endpoint for internal dashboard jobs: execute steps -> validate -> optional commit -> optional push.
   fastify.post<{ Body: {
     jobId: string
     sourceId: string

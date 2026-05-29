@@ -42,7 +42,7 @@ export function DashboardRail({
           </div>
           <div className="min-w-0">
             <div className="text-[13px] font-semibold text-bf-text dark:text-slate-50">BuildFlow Local</div>
-            <div className="text-[11px] text-bf-muted dark:text-slate-400">Local AI workbench</div>
+            <div className="text-[11px] text-bf-muted dark:text-slate-400">Local repo workbench</div>
           </div>
         </div>
       </div>

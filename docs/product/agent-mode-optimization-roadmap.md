@@ -1,118 +1,115 @@
-# Agent Mode Optimization Roadmap
+# Fast Repo Assistant Optimization Roadmap
 
 ## Current Decision
 
-Agent Mode is no longer exposed in the Custom GPT OpenAPI schema. The Custom GPT surface is intentionally limited to fast, bounded status/read/command actions because GPT Actions are synchronous and time out at 45 seconds. Long-running Agent Mode needs a separate async/streaming runtime surface before it should be reintroduced.
+BuildFlow has one GPT-facing direction: Fast Repo Assistant.
 
-## Research Baseline
+ChatGPT does the reasoning and coding. BuildFlow supplies local repo context, guarded writes, targeted validation, and explicit Git operations. BuildFlow does not expose or market a separate agent mode for Custom GPT usage.
 
-Official GPT Actions constraints that shape BuildFlow:
+## Why This Direction
 
-- GPT Actions have a 45 second round-trip timeout.
-- Request and response payloads must stay below 100,000 characters.
-- `x-openai-isConsequential: true` forces ChatGPT to ask for confirmation.
-- Action responses should return compact raw data instead of natural-language prose.
-- OpenAPI operation and parameter descriptions should be short and direct.
+The dominant latency cost is not local file IO. Local search, reads, and tree listing are fast. The expensive part is repeated Custom GPT action chatter: model reasoning, external action call, response parsing, then more model reasoning.
 
-Sources:
-- OpenAI GPT Actions production notes: `https://developers.openai.com/api/docs/actions/production`
-- OpenAI GPT Actions configuration guide: `https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts`
-- OpenAI latency optimization guide: `https://developers.openai.com/api/docs/guides/latency-optimization`
-
-## Current Bottlenecks Found
-
-1. Agent Mode start was marked consequential, which made ChatGPT ask for confirmation by design.
-2. Custom GPT instructions still contained legacy "do not push unless asked" guidance.
-3. Agent job status calls returned full roadmap state by default.
-4. The web action wrapper did not forward roadmap progress updates to the local agent.
-5. The dashboard still presents BuildFlow as a source dashboard instead of an Agent Mode cockpit.
-6. Several docs still describe commit/push as confirmation-gated even though the desired workflow is validated auto-finalization.
-7. The action schema exposes useful but non-core surfaces that compete with the single Agent Mode mental model.
+Therefore the product should optimize for fewer, smaller, clearer actions instead of autonomous loops.
 
 ## Target Architecture
 
-BuildFlow should be a thin, fast control plane for autonomous local repo work:
-
 ```text
 Custom GPT
-  -> compact action schema
-  -> web action proxy
-  -> local agent
-  -> source-scoped repo read/write/command engine
-  -> compact status/proof back to GPT
-  -> commit/push
-  -> next task
+  -> compact 6-action schema
+  -> web action adapter
+  -> local agent process
+  -> deterministic source-scoped repo tools
+  -> compact proof back to GPT
 ```
 
 Core invariants:
 
-- Every repo action carries explicit `sourceId` or `sourceIds`.
-- Agent Mode is the primary workflow; dashboard source management exists only to support Agent Mode.
-- The GPT receives compact proof, not full state dumps.
-- The agent stores full state locally and returns compact views by default.
-- Commit and push happen automatically after validation passes.
-- The loop stops only for true blockers: no access, protected paths, live secrets, destructive confirmation, unavailable stack, or repeated validation failure needing a user choice.
+- Every repo action carries explicit `sourceId`.
+- ChatGPT remains the only reasoning and coding layer.
+- BuildFlow returns compact proof, not full state dumps.
+- Validation is targeted and only run when useful.
+- Commits stage explicit paths only.
+- Push only happens when explicitly requested.
+- Large work stops with a plan or resume point.
+- No local LLM or external model API is made inside GPT-facing actions.
+
+## GPT-Facing Actions
+
+Keep exactly the compact action surface unless a new deterministic macro-action removes more chatter than it adds:
+
+- `getBuildFlowStatus`
+- `setBuildFlowActiveContext`
+- `readBuildFlowContext`
+- `applyBuildFlowFileChange`
+- `commitBuildFlowChanges`
+- `runBuildFlowCommand`
+
+Do not add GPT actions for long-running jobs, polling, server-owned coding loops, or local AI orchestration.
+
+## Fast Workflow
+
+```text
+question -> minimal exact read -> answer
+small edit -> exact read -> patch -> smallest validation -> optional commit -> stop
+large goal -> concise plan -> first safe slice only -> resume point
+```
+
+Normal task budget:
+
+- 1 task per response by default
+- up to 3 tightly related small tasks when all paths and validations are clear
+- never more than 5
 
 ## Implementation Phases
 
-### Phase 1: Remove Contradictions
+### Phase 1: Remove Conflicting Product Language
 
-Status: implemented.
+Status: implemented in this direction.
 
-- Make Agent Mode start non-consequential.
-- Default Agent Mode to `autoCommit: true` and `autoPush: true`.
-- Remove "ask before commit/push" language from Custom GPT instructions.
-- Update OpenAPI descriptions to match autonomous commit/push.
-- Update Agent Mode docs.
+- Replace agent-mode and bounded-sequential branding with Fast Repo Assistant.
+- Keep ChatGPT as the reasoning/coding layer.
+- Document that server-side autonomous loops and polling are not the Custom GPT path.
 
-### Phase 2: Compact the Control Plane
+### Phase 2: Keep The Schema Lean
 
-Status: implemented.
+Status: active.
 
-- Return compact AgentJob state by default.
-- Keep full job state available only with `full: true`.
-- Forward progress fields from the web action wrapper to the agent.
-- Keep instructions under a compact, agent-mode-only policy.
+- Keep the six GPT-facing operations compact.
+- Keep OpenAPI descriptions short and direct.
+- Reimport schema into the Custom GPT after schema wording changes.
 
 ### Phase 3: Reduce Action Chatter
 
-Status: next.
+Status: active.
 
-- Add a single `advanceBuildFlowAgentJob` action that accepts one step result and returns the next compact task.
-- Add a `finishBuildFlowTask` action that performs final validation, explicit staging, commit, push, log capture, and job update in one server-side operation.
-- Keep lower-level read/write/command actions available for execution, but make the Agent Mode schema emphasize the loop actions.
+- Use deterministic `prepare_task_context` only when paths are unknown.
+- Prefer exact reads over repeated search/read calls.
+- Keep `commitBuildFlowChanges` as the single diff/stage/commit action.
+- Add only bounded deterministic macro-actions when they remove repeated calls.
 
-### Phase 4: Dashboard Agent Cockpit
+### Phase 4: Runtime Metrics
 
-Status: next.
+Status: next useful hardening.
 
-- Replace the source-first dashboard header with current Agent Mode job state.
-- Show active source, active task, validation state, commit/push state, and blocker state first.
-- Move source management into a supporting panel.
-- Add a compact live activity timeline keyed by job id.
-- Add a "stuck reason" panel that maps failures to concrete recovery actions.
+- Record per-action duration, request bytes, response bytes, source ID, mode, and result count.
+- Expose a compact diagnostics summary on demand.
+- Keep timing details out of normal GPT responses.
 
-### Phase 5: Performance Instrumentation
+### Phase 5: Relay Parity
 
-Status: next.
+Status: optional hardening.
 
-- Record per-action duration, request bytes, response bytes, and upstream duration to a local rolling metrics file.
-- Add a dashboard performance strip for p50/p95 action latency and largest payloads.
-- Add a `diagnose_performance` summary that ranks bottlenecks by elapsed time and bytes.
-
-### Phase 6: Relay Hardening
-
-Status: next.
-
-- Ensure relay command proxy uses compact responses for Agent Mode endpoints.
-- Preserve per-conversation/source isolation in relay request routing.
-- Add request id, job id, source id, and compact timing headers for every proxied action.
+- Ensure relay paths proxy the same direct local API contract.
+- Avoid duplicate route semantics between relay and direct mode.
+- Preserve source isolation in relay request routing.
 
 ## Success Criteria
 
-- A broad Agent Mode request can run through task, validation, handoff update, commit, push, and next task without asking "should I commit/push?"
-- Normal Agent Mode action responses stay far below 10,000 characters.
-- No routine action should approach the 45 second GPT Action timeout.
-- The dashboard's first screen shows Agent Mode execution state, not generic source management.
-- The OpenAPI schema stays below 50,000 characters and contains no contradictory commit/push instructions.
-- Multi-source tasks remain isolated by explicit source ids.
+- Normal action responses stay far below 10,000 characters.
+- Routine actions do not approach the GPT Action timeout.
+- Read-only questions answer after minimal exact context.
+- Small edits complete with one read, one patch, one targeted validation, and optional commit.
+- Larger work produces a concise progress document and resume point instead of looping.
+- The OpenAPI schema contains no autonomous-agent or long-running-polling promises.
+- Multi-source tasks remain isolated by explicit source IDs.

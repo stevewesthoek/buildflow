@@ -1,132 +1,119 @@
-# BuildFlow Agent Mode
+# BuildFlow Fast Repo Assistant
 
-**Status:** Active — GPT-driven sequential execution  
-**Architecture:** The Custom GPT IS the agent loop. The backend provides atomic tools.
+**Status:** Active product direction.  
+**Architecture:** ChatGPT does the reasoning and coding. BuildFlow provides fast, deterministic local repo tools.
 
----
+## What BuildFlow Is
 
-## What Agent Mode Is
+BuildFlow is a fast repo assistant for Custom GPTs. It lets ChatGPT work with local files safely and quickly:
 
-When the user communicates a plan — a numbered list, a roadmap, multiple tasks described in natural language — the Custom GPT executes every task sequentially without stopping, without asking for permission, and without requiring any special keyword or command to "activate" this mode. Intent is detected from natural language.
+1. lock an explicit source
+2. prepare or read exact context
+3. apply guarded file changes when asked
+4. run targeted validation when needed
+5. commit explicit changed paths when appropriate
+6. stop with a concise result or resume point
 
-After each task completes validation, the GPT commits immediately (not at the end of the whole plan). This keeps the git history clean and creates safe restore points throughout execution.
+This is not an autonomous agent product. The Custom GPT remains the reasoning layer and the coding layer; BuildFlow is the local execution, safety, context, validation, and Git layer.
 
-This is the maximum agent behavior achievable with OpenAI Custom GPT Actions. See `docs/openai-custom-gpt-limits.md` for the authoritative constraints.
+## Why This Is The Only GPT Workflow
 
----
+Custom GPT Actions are synchronous external API calls. Every extra action requires ChatGPT to reason, call the endpoint, wait for a full response, parse JSON, and reason again. Long loops create slow responses, timeouts, and context drift.
 
-## Why the Loop Lives in the GPT, Not the Server
-
-**Custom GPT Actions are synchronous REST calls with a 45-second hard timeout per call.** There is no streaming, no webhooks, no background jobs, and no reliable server-push mechanism.
-
-This means BuildFlow must not move open-ended agent reasoning into the backend. A local server cannot replace the GPT as the planner, reviewer, repair loop, or next-step decision maker unless it embeds its own model runtime. Without that, a server-side job can only run deterministic procedures; it cannot reliably decide what code to write next from arbitrary repo context.
-
-**The correct model is GPT-led, backend-assisted.** The GPT's own context window is the job queue and reasoning state. Each action call returns a compact structured result with `nextStep`. The GPT reads `nextStep`, decides what should happen next, and makes the next call.
-
-The backend should still help with speed by batching bounded, deterministic work that does not require model judgment. Good backend-assisted work includes preflight checks, package diagnostics, indexing, response-size enforcement, safe command execution, payload trimming, compact diff summaries, and status/event storage. Bad backend work is open-ended implementation orchestration that tries to plan, code, review, and repair without the GPT.
-
-Durable rule:
+BuildFlow therefore optimizes for fast, bounded assistance:
 
 ```text
-GPT side: reasoning, planning, implementation choices, code review, repair decisions, next-step control.
-Backend side: deterministic execution, validation, diagnostics, indexing, batching, compact summaries, safety policy.
+Ask → read exact context → answer or patch → targeted validation → optional commit → stop
 ```
 
----
+The product should not present a separate agent mode, autonomous mode, polling mode, or server-owned implementation loop.
 
-## Action Architecture
+## Fast Defaults
 
-Five actions. Each is fast, atomic, and bounded within the 30-second internal timeout.
+- Questions: read minimal context and answer. No validation. No commit.
+- Small edits: read exact files, patch, validate the smallest relevant command, report or commit.
+- Larger goals: create or update a concise plan, complete only the first small safe slice, then stop.
+- Task lists: normally complete 1 task per response; up to 3 tightly related small tasks when all paths and validations are clear; never exceed 5.
+- Slow or broad work: stop with the next concrete action instead of continuing to loop.
 
-```
-getBuildFlowStatus         → check connection + sources (first call only)
-setBuildFlowActiveContext  → lock sourceId for this conversation
-readBuildFlowContext       → read files / search / list structure
-applyBuildFlowFileChange   → write: create / overwrite / patch / append / delete_file / move
-runBuildFlowCommand        → git status, diff, type-check, add, commit, push
-```
+## Custom GPT Action Architecture
 
-The execution loop per task:
+The Custom GPT surface is limited to six compact operations:
 
-```
-readBuildFlowContext (understand what to change)
-  ↓
-applyBuildFlowFileChange (make the change)
-  ↓
-runBuildFlowCommand: git_diff_stat (confirm what changed)
-  ↓
-runBuildFlowCommand: type_check_web (if TypeScript)
-  ↓
-git_add_paths + git_commit  ← commit after EVERY validated task
-  ↓
-next task (no user prompt)
-  ↓
-[all tasks done]
-  ↓
-runBuildFlowCommand: git_push
+```text
+getBuildFlowStatus         -> check connection + sources
+setBuildFlowActiveContext  -> lock sourceId for this conversation
+readBuildFlowContext       -> deterministic task context / read / search / list
+applyBuildFlowFileChange   -> create / overwrite / patch / append / delete_file / move
+commitBuildFlowChanges     -> diff + explicit stage + commit in one call
+runBuildFlowCommand        -> git status, diff, type-check, validation, optional push
 ```
 
-**Commit per task, not per plan.** Every validated task gets its own commit with a clear message. This means every task completion is a safe restore point. The push happens once at the end after all tasks are done.
+These actions are the whole GPT-facing product surface. Add new GPT actions only when they reduce action chatter through deterministic, bounded work.
 
----
+## Conversation Isolation
 
-## Conversation Isolation & Source Locking
+Every repo action requires an explicit `sourceId`. The GPT must lock the repo at the start of the conversation and keep passing the same source ID unless the user explicitly changes it.
 
-Each Custom GPT conversation locks to one or more repos independently. This is enforced at two levels:
+Global active context is a dashboard convenience only. It must not be used as implicit scope for repo reads, writes, validation, or commits.
 
-**Instructions level:** The GPT never auto-selects the globally active source. On first message, it calls `getBuildFlowStatus?include=sources` to list available repos, and either locks to the repo the user named or asks "Which repo should I work in?". Once locked, `sourceId` never changes unless the user explicitly requests it.
+## Validation Policy
 
-**Backend level:** Every write/read/command action requires an explicit `sourceId`. The backend refuses to fall back to global active context (`requireExplicitSourceId` in `gpt.ts`). This means even if another conversation changes the globally active source, it has zero effect on this conversation.
+Validation is important, but it should not turn simple assistance into a slow loop.
 
-This design means two concurrent conversations can each be working on different repos simultaneously with no cross-contamination.
+- Run validation after code, config, package, schema, or command-runner changes.
+- Prefer the smallest relevant validation command.
+- Do not run type checks after pure assessment or read-only questions.
+- Do not run broad test suites unless the user asked or the change requires them.
+- Treat slow validation as a stopping point with clear evidence and a next action.
 
----
+## Commit Policy
+
+Commit only explicit paths. Use `commitBuildFlowChanges` to collapse diff, staging, and commit into one bounded action.
+
+Push only when the user explicitly asks.
 
 ## Stop Conditions
 
-The GPT stops mid-plan only for:
+Stop and report a concise result when:
 
-1. `requiresConfirmation: true` in an `applyBuildFlowFileChange` response — path is protected (e.g. lockfiles, GitHub workflows). Pause and describe what needs confirmation.
-2. Two consecutive validation failures on the same file — report blocked with diagnosis.
-3. `connected: false` in any response — local stack unavailable. Report recovery steps.
+1. the requested answer is complete
+2. a patch and its targeted validation are complete
+3. a write requires confirmation
+4. the same validation fails twice after repair
+5. the local stack is unavailable
+6. the next task is ambiguous, broad, slow, or larger than the task budget
+7. the user asks to stop
 
-All other results (including non-fatal warnings) are handled inline.
+## What Not To Build Into GPT Actions
 
----
+Do not add these to the Custom GPT path:
 
-## Backend Agent Routes
+- server-side autonomous coding loops
+- long-running job polling
+- local LLM calls inside action routes
+- OpenAI API, Responses API, Agents SDK, or separate model runtimes
+- broad unrestricted shell access
+- large status snapshots
+- repeated read/search loops that could be replaced by one exact read or deterministic macro-action
 
-The following routes exist in the backend and are used by the CLI and dashboard:
+Internal dashboard or CLI experiments must not redefine the Custom GPT product direction. The GPT-facing direction is Fast Repo Assistant only.
 
-```
-/api/actions/agent/start
-/api/actions/agent/status
-/api/actions/agent/manage
-/api/actions/agent/control
-/api/actions/agent/execute-task
-```
+## Optimization Rule
 
-**These are NOT exposed in the Custom GPT schema.** They serve the local dashboard and CLI workflows where long-running jobs are viable. They are not part of the ChatGPT integration and should not be added to the OpenAPI schema.
+The fastest BuildFlow is not more agentic. It is fewer, smaller, clearer tool calls.
 
----
+Good:
+- compact task context prep
+- exact multi-file reads
+- write policy preflight
+- targeted validation
+- commit-specific-paths action
+- compact diagnostics on demand
 
-## Response Design
-
-Every action response includes:
-- `ok` / `verified` — did it succeed?
-- `nextStep` — what the GPT should do immediately after (no user prompt needed)
-- Minimal payload — under 10KB, stripped of diagnostics and timing data
-
-The `nextStep` field is the key to seamless plan execution. It tells the GPT exactly what action to make next without requiring it to re-reason from scratch.
-
----
-
-## Limitations (Hard Constraints from OpenAI)
-
-See `docs/openai-custom-gpt-limits.md` for the full reference. Key constraints that shape this architecture:
-
-- 45-second timeout per action call → internal timeout is 30 seconds
-- No streaming → full response must be ready before returning
-- No server-push → GPT must drive all sequencing
-- 100K character response limit → strip all non-essential fields before responding
-- 8,000 character instruction limit → instructions must be concise; use `nextStep` to reduce GPT reasoning overhead
+Bad:
+- autonomous-agent branding
+- polling loops
+- local AI in GPT-facing actions
+- broad unrestricted shell
+- repeated status endpoints that return large state

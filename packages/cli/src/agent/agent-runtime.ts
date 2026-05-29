@@ -38,11 +38,11 @@ function shouldStopForControl(jobId: string, sourceId: string): boolean {
   const job = getAgentJob(jobId)
   if (!job) return true
   if (job.status === 'cancelled') {
-    emit(jobId, sourceId, 'job_cancelled', 'Local Agent Runtime stopped because the run was cancelled.', { status: 'cancelled' })
+    emit(jobId, sourceId, 'job_cancelled', 'Background validation stopped because the run was cancelled.', { status: 'cancelled' })
     return true
   }
   if (job.status === 'paused') {
-    emit(jobId, sourceId, 'job_paused', 'Local Agent Runtime paused. Resume the run to restart deterministic preflight.', { status: 'paused' })
+    emit(jobId, sourceId, 'job_paused', 'Background validation paused. Resume the run to restart deterministic preflight.', { status: 'paused' })
     return true
   }
   return false
@@ -56,11 +56,11 @@ export function startLocalAgentPreflight(options: LocalAgentRuntimeOptions): voi
   void (async () => {
     const evidence: string[] = []
     try {
-      emit(jobId, sourceId, 'preflight_started', 'Local deterministic preflight started. Custom GPT remains the reasoning and coding engine.', { status: 'running' })
+      emit(jobId, sourceId, 'preflight_started', 'Background deterministic validation started. Custom GPT remains the reasoning and coding layer.', { status: 'running' })
       updateAgentJob(jobId, {
         status: 'running',
-        summary: 'Local Agent Mode preflight is running server-side. Custom GPT stays the reasoning/coding engine and can poll compact job status instead of orchestrating deterministic checks.',
-        nextActions: ['Poll getBuildFlowAgentJob or controlBuildFlowAgentRun for compact progress.', 'Wait for local deterministic preflight before targeted reasoning or edits.']
+        summary: 'Background deterministic validation is running server-side. Custom GPT stays the reasoning/coding layer; use compact status only from dashboard or CLI surfaces.',
+        nextActions: ['Review compact validation status when it is available.', 'Continue with targeted reasoning or edits only after validation evidence is clear.']
       })
 
       const commands = buildPreflightCommands(sourceRoot)
@@ -70,8 +70,8 @@ export function startLocalAgentPreflight(options: LocalAgentRuntimeOptions): voi
         emit(jobId, sourceId, 'command_started', `Running ${command.kind}.`, { commandKind: command.kind, status: 'running' })
         updateAgentJob(jobId, {
           currentIteration: index + 1,
-          summary: `Local Agent Mode preflight running ${command.kind}.`,
-          nextActions: ['Poll compact job status/events.', 'Local BuildFlow is handling deterministic validation server-side.']
+          summary: `Background deterministic validation running ${command.kind}.`,
+          nextActions: ['Review compact validation status/events when needed.', 'Local BuildFlow is handling deterministic validation server-side.']
         })
         const result = await runSafeCommand({
           sourceId,
@@ -98,7 +98,7 @@ export function startLocalAgentPreflight(options: LocalAgentRuntimeOptions): voi
 
       updateAgentJob(jobId, {
         status: 'completed',
-        summary: `Local Agent Mode preflight completed server-side: ${evidence.join('; ')}.`,
+        summary: `Local deterministic preflight completed server-side: ${evidence.join('; ')}.`,
         nextActions: ['Use compact job status/events as validation evidence.', 'Ask Custom GPT for targeted implementation only if additional requirements remain.'],
         lastKnownGitStatus: evidence.join('\n')
       })
@@ -108,7 +108,7 @@ export function startLocalAgentPreflight(options: LocalAgentRuntimeOptions): voi
       updateAgentJob(jobId, {
         status: 'failed',
         blockedReason: message,
-        summary: evidence.length > 0 ? evidence.join('; ') : 'Local Agent Mode preflight failed before producing validation evidence.',
+        summary: evidence.length > 0 ? evidence.join('; ') : 'Local deterministic preflight failed before producing validation evidence.',
         nextActions: ['Inspect the local runtime error and retry after repair.']
       })
       emit(jobId, sourceId, 'job_failed', message, { status: 'failed' })

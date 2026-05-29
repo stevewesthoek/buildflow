@@ -2,7 +2,7 @@
 
 ## Goal
 
-Design the BuildFlow Local dashboard as a compact local AI workbench.
+Design the BuildFlow Local dashboard as a compact local repo workbench.
 
 The dashboard should implement the generated BuildFlow three-panel mockup direction:
 

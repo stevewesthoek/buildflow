@@ -1,5 +1,7 @@
 # Agentic Goal Mode Upgrade Plan
 
+> Superseded by `docs/product/agent-mode.md`. BuildFlow now uses bounded sequential execution for Custom GPT work, not long-running Agent Mode in the GPT schema.
+
 ## Goal
 
 Upgrade BuildFlow Agent Mode so a Custom GPT can accept one broad implementation goal and work through a continuous repo-local loop:

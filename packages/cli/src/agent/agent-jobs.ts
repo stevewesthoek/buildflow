@@ -159,7 +159,7 @@ function normalizeDocumentationPath(value?: string): string {
 
 function buildSteps(): AgentJobStep[] {
   return [
-    { id: 'select_source', title: 'Lock source scope', status: 'pending', action: 'select_source', description: 'Confirm the sourceId and use it explicitly for every inspect, read, write, command, and Agent Mode call.' },
+    { id: 'select_source', title: 'Lock source scope', status: 'pending', action: 'select_source', description: 'Confirm the sourceId and use it explicitly for every inspect, read, write, command, and sequential job call.' },
     { id: 'requirements', title: 'Capture requirements', status: 'pending', action: 'requirements', description: 'Extract goals, constraints, acceptance criteria, risks, assumptions, and no-access boundaries from the prompt and repo evidence.' },
     { id: 'roadmap', title: 'Create roadmap', status: 'pending', action: 'roadmap', description: 'Turn requirements into phases with value, dependencies, validation strategy, and stopping conditions.' },
     { id: 'implementation_plan', title: 'Write implementation plan', status: 'pending', action: 'implementation_plan', description: 'Create or update the handoff document with tasks, files, validation commands, rollback notes, and current status.' },
@@ -171,8 +171,8 @@ function buildSteps(): AgentJobStep[] {
     { id: 'repair', title: 'Repair loop', status: 'pending', action: 'repair', description: 'Investigate failures, patch, update handoff, and repeat until validation is clean or policy blocks progress.' },
     { id: 'hardening', title: 'Harden implementation', status: 'pending', action: 'hardening', description: 'Add edge-case handling, tests, cleanup, docs, security checks, and maintainability improvements.' },
     { id: 'cleanup', title: 'Clean up', status: 'pending', action: 'cleanup', description: 'Remove temporary files inside allowed paths, simplify code, ensure docs are accurate, and preserve useful rollback notes.' },
-    { id: 'git_status', title: 'Review git state', status: 'pending', action: 'git_status', description: 'Report changed and staged files. Stage explicit files only. Commit and push automatically after review when enabled.' },
-    { id: 'commit_review', title: 'Commit review', status: 'pending', action: 'commit_review', description: 'Prepare commit message and verify staged file list, cached diff, and validation evidence before committing and pushing.' },
+    { id: 'git_status', title: 'Review git state', status: 'pending', action: 'git_status', description: 'Report changed and staged files. Stage explicit files only. Commit after review when enabled.' },
+    { id: 'commit_review', title: 'Commit review', status: 'pending', action: 'commit_review', description: 'Prepare commit message and verify staged file list, cached diff, and validation evidence before committing.' },
     { id: 'final_handoff', title: 'Final handoff', status: 'pending', action: 'final_handoff', description: 'Summarize delivered value, validation results, changed files, risks, follow-ups, and exact resume point if unfinished.' }
   ]
 }
@@ -337,7 +337,7 @@ function coerceJob(raw: unknown): AgentJob | null {
     documentationPath,
     reviewEveryStep: item.reviewEveryStep !== false,
     autoCommit: item.autoCommit !== false,
-    autoPush: item.autoPush !== false,
+    autoPush: item.autoPush === true,
     requiresConfirmation: item.status === 'needs_confirmation' || item.requiresConfirmation === true,
     confirmationReason: item.status === 'needs_confirmation' || item.requiresConfirmation === true ? item.confirmationReason : undefined,
     blockedReason: item.blockedReason,
@@ -346,7 +346,7 @@ function coerceJob(raw: unknown): AgentJob | null {
     activeTaskId,
     completedTaskCount,
     nextActions: Array.isArray(item.nextActions) && item.nextActions.length > 0 ? item.nextActions : buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
-    summary: item.summary || 'Agent Mode job loaded from persistent roadmap state. Continue the active task, update the handoff, validate, repair, commit, push, and advance until all roadmap tasks are complete or blocked.',
+    summary: item.summary || 'Sequential job loaded from persistent roadmap state. Continue the active task, update the handoff, validate, repair, commit, and advance until the bounded batch is complete or blocked.',
     handoffPath: item.handoffPath || documentationPath,
     resumeInstructions: Array.isArray(item.resumeInstructions) ? item.resumeInstructions : buildResumeInstructions(documentationPath),
     fallbackPrompt: item.fallbackPrompt,
@@ -383,7 +383,8 @@ function buildResumeInstructions(documentationPath: string): string[] {
     'Verify the locked sourceId before inspecting, writing, or running commands.',
     'Run git_status_short and inspect changed files before continuing.',
     'Continue with the next unchecked task, then update the handoff after each meaningful chunk.',
-    'After validation passes, stage explicit changed files, commit with a clear message, push the current branch, and continue.',
+    'After validation passes, stage explicit changed files and commit with a clear message.',
+    'Push only if the user explicitly asks for a push.',
     'Stop only for blocked/no-access paths, failed validation that needs user choice, or protected destructive operations.'
   ]
 }
@@ -392,7 +393,7 @@ function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'document
   const activeTask = describeActiveTask(job.roadmapPhases, job.activeTaskId) || 'none'
   const totalTasks = job.roadmapPhases.flatMap(phase => phase.tasks).length
   return [
-    'You are continuing a BuildFlow Agent Mode job directly inside the local repo.',
+    'You are continuing a BuildFlow sequential job directly inside the local repo.',
     '',
     `Source ID: ${job.sourceId}`,
     `Goal: ${job.goal}`,
@@ -411,8 +412,9 @@ function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'document
       '4. Keep all changes source-relative and do not expose secrets.',
       '5. Update the handoff after each meaningful chunk with completed work, validation evidence, next task, blockers, and resume notes.',
       '6. Run the relevant tests/validation, repair failures, and continue until the goal is complete or a hard no-access boundary is reached.',
-      '7. If the work is correct and validated, stage explicit files only, write a clear commit message, and push to the current branch.',
-      '8. Do not force-push.'
+      '7. If the work is correct and validated, stage explicit files only and write a clear commit message.',
+      '8. Push only if the user explicitly asks for a push.',
+      '9. Do not force-push.'
   ].filter(Boolean).join('\n')
 }
 
@@ -443,7 +445,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     documentationPath,
     reviewEveryStep: params.reviewEveryStep !== false,
     autoCommit: params.autoCommit !== false,
-    autoPush: params.autoPush !== false,
+    autoPush: params.autoPush === true,
     requiresConfirmation: false,
     confirmationReason: undefined,
     steps: buildSteps(),
@@ -451,7 +453,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     activeTaskId,
     completedTaskCount,
     nextActions: buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
-    summary: 'Agent Mode started with persistent roadmap state. Continue the active task, update the handoff, validate, repair, commit, and push task-by-task until all roadmap phases are complete or a hard blocker is reached.',
+    summary: 'Sequential job started with persistent roadmap state. Continue the active task, update the handoff, validate, repair, and commit task-by-task until the bounded batch is complete or a hard blocker is reached.',
     handoffPath: documentationPath,
     resumeInstructions
   }
@@ -559,7 +561,7 @@ export function controlAgentJob(jobId: string, action: AgentJobControlAction, re
     if (job.status !== 'running' && job.status !== 'queued') throw new Error(`Cannot pause job in ${job.status} state`)
     return updateAgentJob(jobId, {
       status: 'paused',
-      summary: safeReason ? `Agent run paused: ${safeReason}` : 'Agent run paused.',
+      summary: safeReason ? `Sequential run paused: ${safeReason}` : 'Sequential run paused.',
       nextActions: ['Resume, cancel, or ask Custom GPT for targeted reasoning/coding before continuing.']
     })
   }
@@ -567,7 +569,7 @@ export function controlAgentJob(jobId: string, action: AgentJobControlAction, re
     if (job.status !== 'paused') throw new Error(`Cannot resume job in ${job.status} state`)
     return updateAgentJob(jobId, {
       status: 'running',
-      summary: safeReason ? `Agent run resumed: ${safeReason}` : 'Agent run resumed.',
+      summary: safeReason ? `Sequential run resumed: ${safeReason}` : 'Sequential run resumed.',
       nextActions: ['Local deterministic runtime can continue. Poll compact status/events for progress.']
     })
   }
@@ -575,8 +577,8 @@ export function controlAgentJob(jobId: string, action: AgentJobControlAction, re
     if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') throw new Error(`Cannot cancel job in ${job.status} state`)
     return updateAgentJob(jobId, {
       status: 'cancelled',
-      summary: safeReason ? `Agent run cancelled: ${safeReason}` : 'Agent run cancelled.',
-      nextActions: ['Start a new Agent Mode job when ready.'],
+      summary: safeReason ? `Sequential run cancelled: ${safeReason}` : 'Sequential run cancelled.',
+      nextActions: ['Start a new bounded sequential job when ready.'],
       blockedReason: undefined,
       requiresConfirmation: false,
       confirmationReason: undefined

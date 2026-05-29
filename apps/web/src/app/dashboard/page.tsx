@@ -197,7 +197,7 @@ export default function Dashboard() {
         pushActivity('Agent Runtime event', `${event.type}: ${event.message}`, event.type.includes('failed') || event.type.includes('blocked') ? 'bad' : event.type.includes('paused') ? 'warn' : 'good')
       } else if (!silent && jobs.length > 0) {
         const active = jobs.find(j => ['queued', 'running', 'needs_confirmation', 'paused'].includes(j.status)) || jobs[0]
-        pushActivity('Agent Mode sync', `${active.status}: ${active.activeTask?.title || active.summary || active.id}`, active.status === 'blocked' || active.status === 'failed' ? 'bad' : active.status === 'needs_confirmation' || active.status === 'paused' ? 'warn' : 'good')
+        pushActivity('Sequential job sync', `${active.status}: ${active.activeTask?.title || active.summary || active.id}`, active.status === 'blocked' || active.status === 'failed' ? 'bad' : active.status === 'needs_confirmation' || active.status === 'paused' ? 'warn' : 'good')
       }
       return jobs
     } catch (err) {

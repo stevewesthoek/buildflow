@@ -1,6 +1,7 @@
 import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout } from './transport'
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
+import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_DEFAULT_INSPECT_LIMIT } from '@buildflow/shared'
 
 type NormalizedSource = {
   id: string
@@ -749,7 +750,7 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
     const payload: Record<string, unknown> = {
       path: typeof body.path === 'string' ? body.path : '',
       depth: typeof body.depth === 'number' ? body.depth : 3,
-      limit: typeof body.limit === 'number' ? body.limit : 50
+      limit: typeof body.limit === 'number' ? body.limit : GPT_ACTION_DEFAULT_INSPECT_LIMIT
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
@@ -775,7 +776,7 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
     if (typeof body.query !== 'string' || !body.query) throw new Error('Missing query parameter')
     const payload: Record<string, unknown> = {
       query: body.query,
-      limit: typeof body.limit === 'number' ? body.limit : 50
+      limit: typeof body.limit === 'number' ? body.limit : GPT_ACTION_DEFAULT_INSPECT_LIMIT
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
@@ -809,12 +810,11 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
   const scopeError = requireExplicitReadScope(body)
   if (scopeError) return scopeError
   const mode = body.mode
-  const DEFAULT_MULTI_FILE_READ_MAX_BYTES_PER_FILE = 12_000
   if (mode === 'read_paths') {
     if (!Array.isArray(body.paths) || body.paths.length === 0) throw new Error('Missing paths parameter')
     const payload: Record<string, unknown> = {
       paths: body.paths,
-      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : DEFAULT_MULTI_FILE_READ_MAX_BYTES_PER_FILE
+      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : GPT_ACTION_DEFAULT_FILE_BYTES
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
@@ -901,7 +901,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     const sourceIds = Array.from(new Set(pathEntries.map(entry => entry.sourceId).filter((id): id is string => typeof id === 'string' && id.length > 0)))
     const readPayload: Record<string, unknown> = {
       paths: pathEntries.map(entry => entry.path),
-      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : DEFAULT_MULTI_FILE_READ_MAX_BYTES_PER_FILE
+      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : GPT_ACTION_DEFAULT_FILE_BYTES
     }
     if (sourceIds.length > 0) {
       readPayload.sourceIds = sourceIds
@@ -967,6 +967,37 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
       whatRemains: skipped.length > 0 ? ['Continue with nextBatch.', 'Summarize the matching files.'] : undefined,
       nextActions: nextBatch ? ['Continue with nextBatch.', 'Summarize the matching files.'] : undefined,
       nextStep: nextBatch ? 'Continue with nextBatch.' : 'Summarize the matching files.'
+    }))
+  }
+  if (mode === 'prepare_task_context') {
+    if (typeof body.query !== 'string' || !body.query) throw new Error('Missing query parameter')
+    const payload: Record<string, unknown> = {
+      query: body.query,
+      limit: typeof body.limit === 'number' ? body.limit : 8
+    }
+    if (Array.isArray(body.paths)) payload.paths = body.paths
+    if (typeof body.maxBytesPerFile === 'number') payload.maxBytesPerFile = body.maxBytesPerFile
+    if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
+    if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
+    const result = await executeAction('/api/prepare-task-context', payload, userToken)
+    const exactReadPlan = Array.isArray((result as { exactReadPlan?: unknown }).exactReadPlan)
+      ? (result as { exactReadPlan: Array<Record<string, unknown>> }).exactReadPlan
+      : []
+    const topFiles = Array.isArray((result as { topFiles?: unknown }).topFiles)
+      ? (result as { topFiles: Array<Record<string, unknown>> }).topFiles
+      : []
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'readBuildFlowContext',
+      phase: 'completed',
+      actionLabel: 'Prepared focused task context',
+      userMessage: `Prepared context with ${countLabel(topFiles.length, 'ranked file')} and ${countLabel(exactReadPlan.length, 'planned read')}.`,
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      readPaths: exactReadPlan.map(item => typeof item.path === 'string' ? item.path : '').filter(Boolean).slice(0, 10),
+      targetPaths: topFiles.map(item => typeof item.path === 'string' ? item.path : '').filter(Boolean).slice(0, 10),
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      nextStep: exactReadPlan.length > 0 ? 'Read the planned paths before editing.' : 'Refine the task query or provide exact paths.'
     }))
   }
   throw new Error('Invalid mode')
@@ -1366,13 +1397,13 @@ export async function startBuildFlowAgentJob(body: Record<string, unknown>, user
   return withActivity(result as Record<string, unknown>, makeActivity({
     operationId: 'startBuildFlowAgentJob',
     phase: job?.requiresConfirmation ? 'waiting_for_confirmation' : 'planning',
-    actionLabel: 'Started Agent Mode job',
-    userMessage: job?.id ? `Agent Mode job started for ${job.sourceId || sourceId}.` : 'Agent Mode job start returned no job id.',
+    actionLabel: 'Started sequential job',
+    userMessage: job?.id ? `Sequential job started for ${job.sourceId || sourceId}.` : 'Sequential job start returned no job id.',
     sourceId,
     riskLevel: job?.requiresConfirmation ? 'medium' : 'low',
     requiresConfirmation: job?.requiresConfirmation === true,
     verified: Boolean(job?.id),
-    nextStep: 'Continue hands-off: inspect, plan, write, validate, repair, and report unless BuildFlow blocks or asks for confirmation.'
+    nextStep: 'Continue the bounded loop: inspect, plan, write, validate, commit, and stop with a resume point when needed.'
   }))
 }
 
@@ -1397,13 +1428,13 @@ export async function getBuildFlowAgentJob(body: Record<string, unknown>, userTo
   return withActivity(result as Record<string, unknown>, makeActivity({
     operationId: 'getBuildFlowAgentJob',
     phase: job?.status === 'completed' ? 'completed' : job?.requiresConfirmation ? 'waiting_for_confirmation' : 'checking',
-    actionLabel: 'Checked Agent Mode job',
-    userMessage: job?.id ? `Agent Mode job ${job.id} is ${job.status || 'active'}.` : 'Returned Agent Mode jobs.',
+    actionLabel: 'Checked sequential job',
+    userMessage: job?.id ? `Sequential job ${job.id} is ${job.status || 'active'}.` : 'Returned sequential jobs.',
     sourceId: job?.sourceId,
     riskLevel: job?.requiresConfirmation ? 'medium' : 'low',
     requiresConfirmation: job?.requiresConfirmation === true,
     verified: true,
-    nextStep: job?.requiresConfirmation ? 'Stop only for the explicit blocker.' : 'Continue the hands-off implementation loop through validation, commit, push, and the next task.'
+    nextStep: job?.requiresConfirmation ? 'Stop only for the explicit blocker.' : 'Continue the bounded loop through validation, commit, and the next task.'
   }))
 }
 

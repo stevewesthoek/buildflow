@@ -1,8 +1,8 @@
 # OpenAI Custom GPT Action Limits
 
 **Document type:** Authoritative constraints reference — read before changing schema, routes, or instructions  
-**Last verified:** 2026-05-21  
-**Research method:** OpenAI official docs + community empirical findings (linked below)
+**Last verified:** 2026-05-27  
+**Research method:** OpenAI official docs + community empirical findings for limits not stated in official docs (linked below)
 
 > **CRITICAL FOR ALL FUTURE DEVELOPERS:** Every architecture decision in BuildFlow's Custom GPT layer is constrained by these limits. Do NOT implement features that contradict them. This document was written after discovering that server-side agent polling — which BuildFlow previously used — is fundamentally incompatible with Custom GPTs. Read the "What Does NOT Work" section carefully.
 
@@ -24,6 +24,8 @@
 | Custom request headers | **Not supported** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
 | Images/video in payload | **Not supported** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
 | TLS requirement | TLS 1.2+ on port 443 | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
+| Apps vs Actions | A GPT can use either apps or actions, not both at the same time | [help.openai.com/en/articles/9442513-configuring-actions-in-gpts](https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts) |
+| Pro mode | Actions are not available for Pro mode | [help.openai.com/en/articles/9442513-configuring-actions-in-gpts](https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts) |
 | HTTP methods supported | **GET, POST** (PATCH unreliable in practice) | Community reports |
 
 ---
@@ -32,31 +34,32 @@
 
 > **Custom GPT Actions are synchronous REST calls. Each individual call must complete and return within 45 seconds. There is no streaming, no webhooks, no server-sent events, no background jobs, and no reliable polling.**
 
-This has one unavoidable consequence for agent-style behavior:
+This has one unavoidable consequence for BuildFlow:
 
-**You cannot implement the agent loop on the server. The agent loop must live in the GPT instructions.**
+**BuildFlow must be a fast repo assistant, not an autonomous agent mode.**
 
 ---
 
-## What DOES Work: GPT-Driven Sequential Execution
+## What DOES Work: Fast Repo Assistance
 
 Custom GPTs CAN call multiple actions sequentially within a single conversation turn. OpenAI explicitly supports and documents this pattern — their own weather.gov example requires two sequential calls (get grid point → get forecast).
 
 **Source:** [platform.openai.com/docs/actions/getting-started](https://platform.openai.com/docs/actions/getting-started)
 
-This means the correct architecture for "agent mode" in a Custom GPT is:
+This means the correct architecture for repo work in a Custom GPT is fast, bounded assistance:
 
 ```
-GPT instructions define the loop:
-  1. Read relevant files   → readBuildFlowContext
-  2. Apply the change      → applyBuildFlowFileChange
-  3. Validate              → runBuildFlowCommand (git_diff_stat, type_check_web)
-  4. On success            → proceed immediately to next task (no user prompt)
-  5. All tasks done        → git_add_paths → git_commit → git_push
-  6. Stop only if          → requiresConfirmation, double failure, or stack unavailable
+GPT instructions define a small assistant workflow:
+  1. Read exact context    → readBuildFlowContext
+  2. Answer or patch       → applyBuildFlowFileChange only when editing
+  3. Validate when useful  → runBuildFlowCommand for the smallest relevant check
+  4. Commit when ready     → commitBuildFlowChanges for explicit paths
+  5. Stop                  → concise result, validation evidence, or resume point
 ```
 
-The backend provides **fast, atomic, bounded tools**. The GPT orchestrates. Each tool call completes in under 30 seconds.
+The backend provides **fast, atomic, bounded tools**. ChatGPT reasons and codes. Each tool call should complete quickly and return compact proof.
+
+BuildFlow intentionally does not use the OpenAI API, Responses API, or Agents SDK. Therefore the Custom GPT is the only model. Do not simulate a separate runtime with polling-heavy Custom GPT Actions.
 
 ---
 
@@ -80,20 +83,21 @@ BuildFlow previously attempted server-side agent orchestration:
 
 4. **No streaming.** You cannot stream partial progress back from an action endpoint. The full response must be assembled before returning.
 
-**Decision (2026-05-21):** The server-side agent routes (`/api/actions/agent/*`) remain as internal backend infrastructure available to CLI and dashboard tools. They are **not exposed in the Custom GPT schema** and should not be. The Custom GPT uses the sequential action pattern exclusively.
+**Decision (2026-05-29):** Long-running job routes such as `/api/actions/agent/*` are not the Custom GPT integration. They must not be exposed in the GPT schema, marketed as a GPT-facing mode, or used to encourage polling. The Custom GPT path is Fast Repo Assistant only.
 
 ---
 
 ## BuildFlow Schema — Current Operations
 
-**Total: 5 operations** (hard limit: 30)
+**Total: 6 operations** (hard limit: 30)
 
 | `operationId` | Method | Endpoint | Purpose |
 |---|---|---|---|
 | `getBuildFlowStatus` | GET | `/api/actions/status` | Connection + sources + active context |
 | `setBuildFlowActiveContext` | POST | `/api/actions/status` | Set which source(s) to work with |
-| `readBuildFlowContext` | POST | `/api/actions/read-context` | Read files, search, list structure |
+| `readBuildFlowContext` | POST | `/api/actions/read-context` | Read files, search, list structure, or prepare focused task context |
 | `applyBuildFlowFileChange` | POST | `/api/actions/apply-file-change` | Write: create / overwrite / patch / append / delete / move |
+| `commitBuildFlowChanges` | POST | `/api/actions/commit-changes` | Diff + explicit stage + commit in one call |
 | `runBuildFlowCommand` | POST | `/api/actions/run-command` | Allowlisted git + validation commands |
 
 All operations use `x-openai-isConsequential: false` because the backend write policy enforcement is more precise than the ChatGPT confirmation UI.
@@ -109,6 +113,7 @@ Call chain: **ChatGPT → Cloudflare Tunnel → Next.js :3054 → Local Agent :3
 | Status check | 5,000 | Should always be fast |
 | File read (1–3 files) | 10,000 | Depends on file size |
 | Search | 15,000 | Depends on index size |
+| `prepare_task_context` | 10,000 | Deterministic source-index context prep |
 | File write | 10,000 | Should be fast |
 | `git_status_short` | 5,000 | Fast |
 | `git_diff_stat` | 10,000 | Slow on large repos |
@@ -125,7 +130,7 @@ Call chain: **ChatGPT → Cloudflare Tunnel → Next.js :3054 → Local Agent :3
 This is a ChatGPT platform issue, not a BuildFlow timeout. ChatGPT streams its *text generation* to the browser as tokens arrive. If that stream drops (network blip, OpenAI infra hiccup), the browser shows "streaming interrupted" — but this has nothing to do with action call timeouts. BuildFlow's backend returns in under 200ms, nowhere near the 45s limit. There is no keepalive, heartbeat, or partial response mechanism available on the Custom GPT action interface. Do not attempt to implement one — it is architecturally impossible with synchronous REST actions.
 
 **Perceived slowness between action calls**
-Each action call is ~100ms on our backend. The 20–60 second waits the user experiences are ChatGPT's own model inference time (reasoning before calling, processing response after). This is irreducible from BuildFlow's side. The only mitigation is switching the Custom GPT's model to GPT-4o mini (faster inference, less reasoning overhead for tool-calling tasks).
+When BuildFlow actions return quickly but the chat waits 20-60 seconds, the delay is ChatGPT's own reasoning before/after action calls. BuildFlow can reduce tool loops and payload size, but it cannot make the Custom GPT think faster.
 
 **What to put in Custom GPT instructions vs. what not to**
 - ✅ Put in: action names, execution order, stop conditions, search/write examples, commit rules, isolation rules

@@ -2,7 +2,7 @@
 
 **BuildFlow turns ChatGPT into a local, repo-aware AI workbench.**
 
-Connect a Custom GPT to your own computer, give it safe access to your repos, notes, docs, plans, and knowledge folders, then let it inspect real files, search local context, create plans, apply verified changes, run safe validation commands, and work through long implementation goals.
+Connect a Custom GPT to your own computer, give it safe access to your repos, notes, docs, plans, and knowledge folders, then let it inspect exact files, search local context, apply verified changes, run targeted validation commands, and commit explicit paths without pretending to be an autonomous agent.
 
 BuildFlow is free, self-hosted, and local-first. It is for builders who want ChatGPT to work with their actual project context instead of guessing from pasted snippets.
 
@@ -17,14 +17,14 @@ flowchart LR
   Agent --> Sources["Repos · notes · docs · skills"]
   Agent --> Writes["Verified writes"]
   Agent --> Commands["Safe commands"]
-  GPT --> Goal["Agentic Goal Mode"]
-  Goal --> Loop["Plan · execute · review · validate · repair"]
+  GPT --> Assistant["Fast Repo Assistant"]
+  Assistant --> Flow["Read · answer or edit · validate when needed · stop"]
 
   classDef dark fill:#0f172a,stroke:#2563eb,color:#f8fafc;
   classDef local fill:#ecfeff,stroke:#0891b2,color:#0f172a;
   classDef safe fill:#f0fdf4,stroke:#16a34a,color:#0f172a;
 
-  class You,GPT,Endpoint,Web,Agent,Goal,Loop dark;
+  class You,GPT,Endpoint,Web,Agent,Assistant,Flow dark;
   class Sources local;
   class Writes,Commands safe;
 ```
@@ -53,7 +53,7 @@ You can use it to:
 - create and update project documentation
 - generate implementation plans, specs, runbooks, and task lists
 - improve your personal knowledge repo, brain repo, or notes system
-- maintain local AI skill folders and prompt libraries
+- maintain prompt libraries, skill folders, and project docs
 - search across multiple projects from ChatGPT
 - review repo structure before starting work
 - safely apply code edits with verified file operations
@@ -82,11 +82,12 @@ Your GPT can:
 - choose active context
 - inspect file trees
 - search indexed local files
+- prepare focused task context with a deterministic exact read plan
 - read exact files
 - create planning artifacts
 - apply safe file changes
 - run allowlisted validation commands
-- track Agentic Goal Mode jobs
+- complete small, explicit repo-assistant tasks without autonomous loops
 
 ### Local source management
 
@@ -123,7 +124,7 @@ It supports:
 - confirmation-required operations
 - verified write results with `verified:true`
 
-The current repo-maintainer profile is intentionally practical for Agentic Goal Mode. It can edit normal app code, tests, docs, scripts, package manifests, framework config, Docker files, Prisma files, migrations, and source-controlled project assets without stopping for every routine change.
+The current repo-maintainer profile is intentionally practical for fast repo-assistant work. It can edit normal app code, tests, docs, scripts, package manifests, framework config, Docker files, Prisma files, migrations, and source-controlled project assets without stopping for every routine change.
 
 A write is not considered successful unless BuildFlow verifies it on disk.
 
@@ -136,7 +137,7 @@ Supported command families include:
 - git status, diff, branch, and log checks
 - cached git diff checks
 - explicit `git add -- <paths>` only
-- hands-off commit and push flows when explicitly requested, with safe path, message, remote, branch, and force-push checks
+- commit flows after validation, plus push flows only when explicitly requested, with safe path, message, remote, branch, and force-push checks
 - JSON validation with `python3 -m json.tool`
 - package type checks and tests
 - safe package scripts by name, including scripts from the repo root
@@ -146,69 +147,46 @@ Supported command families include:
 
 BuildFlow does **not** expose arbitrary shell execution. More command capability should be added as named, source-relative command kinds instead of unrestricted terminal access.
 
-### Agentic Goal Mode
+### Fast Repo Assistant workflow
 
-Agentic Goal Mode is the newest BuildFlow workflow.
+BuildFlow has one Custom GPT workflow: fast repo assistance.
 
-It is designed for prompts like:
+ChatGPT does the reasoning and coding. BuildFlow provides exact local context, guarded file writes, targeted validation, and explicit Git operations. It does not run a separate autonomous agent loop.
 
-```text
-Use BuildFlow Agentic Goal Mode on source my-app.
-
-Goal:
-Build a complete project intake module with pages, API routes, validation, tests, and documentation.
-
-Work hands-off until complete, blocked, or confirmation-required. Create or update progress documentation, execute one task at a time, review each task, validate, repair failures, commit, push, and continue until done unless a hard blocker requires manual intervention.
-```
-
-When started, BuildFlow creates a repo-agnostic goal job and guides the Custom GPT through this cycle:
-
-1. inspect the selected source
-2. document the goal, assumptions, constraints, tasks, and validation plan
-3. execute the next task with verified local writes
-4. review changed files and command output
-5. update progress documentation
-6. run validation
-7. repair failures
-8. continue immediately to the next task instead of stopping after a report
-9. repeat until complete, blocked, failed, or a hard blocker is reached
-10. commit and push the finished work after validation passes
-11. produce a final report with validation evidence and git state
-
-Default Agentic Goal Mode settings:
+Use this default flow:
 
 ```text
-Autonomy: hands_off_safe
-Review: after every task
-Progress doc: docs/product/agent-mode-progress.md
-Max loop iterations: bounded
-Commit/push: automatic after validation
+Question -> minimal exact read -> answer
+Small edit -> exact read -> patch -> smallest validation -> optional commit -> stop
+Large goal -> concise plan -> first safe slice -> resume point
 ```
 
-This gives you a Codex-style goal loop inside ChatGPT while keeping BuildFlow as the local safety and execution layer.
-
-Agentic Goal Mode follows a durable **GPT-led, backend-assisted** split:
+Recommended task budget:
 
 ```text
-GPT side: reasoning, planning, implementation choices, code review, repair decisions, next-step control.
-Backend side: deterministic execution, validation, diagnostics, indexing, batching, compact summaries, safety policy.
+Default: 1 task per response
+Clear small batch: up to 3 tightly related tasks
+Hard maximum: 5 small tasks
+Push: only when explicitly requested
 ```
 
-BuildFlow should not move open-ended planning and repair into a server-side state machine unless a separate local model runtime is introduced. For speed, BuildFlow should instead batch mechanical work into compact tools: preflight checks, package diagnostics, validation bundles, response-size enforcement, and concise status/diff summaries.
+This keeps ChatGPT powerful while avoiding the main latency failure mode: long chains of model reasoning plus action calls.
+
+BuildFlow should not move open-ended planning, coding, review, or repair into a server-side state machine. For speed, BuildFlow should only batch deterministic mechanical work when it reduces action chatter, such as exact multi-file reads, write preflight, targeted validation, compact diagnostics, and commit-specific-paths operations.
 
 ### Persistent resume and handoff
 
-Agentic Goal Mode keeps a repo-local handoff path and a persistent local job record. Jobs are stored outside the chat process, so a new Custom GPT conversation can list or resume them after an interruption, browser refresh, or local service restart.
+For larger work, use a repo-local progress document or handoff file. A new Custom GPT conversation can read it, verify source scope and git status, and continue from the next unchecked task.
 
 The Custom GPT should update the handoff after each meaningful chunk with completed work, next task, validation evidence, blockers, rollback notes, and resume instructions.
 
 That means a later conversation can say:
 
 ```text
-Resume Agent Mode on source <sourceId> where it left off.
+Resume BuildFlow work on source <sourceId> from the progress document.
 ```
 
-BuildFlow can then list the latest job, read the handoff document, verify source scope and git status, and continue from the next unchecked task.
+BuildFlow can then read the handoff document, verify source scope and git status, and continue from the next unchecked task.
 
 ### OpenAI Custom GPT interface limits
 
@@ -216,87 +194,85 @@ BuildFlow cannot directly rename ChatGPT’s native conversation titles, batch n
 
 The practical workaround is to use one source per conversation, start prompts with the source name, and rely on persistent repo-local handoff documents. If your ChatGPT client supports manually renaming a conversation, rename it to the repo or goal.
 
-## Effective Agentic Goal Mode prompts
+## Effective Fast Repo Assistant Prompts
 
 Use this pattern for serious work:
 
 ```text
-Use BuildFlow Agentic Goal Mode on source <sourceId>.
+Use BuildFlow on source <sourceId>.
 
 Goal:
 <describe the feature, fix, refactor, or app you want built>
 
 Work mode:
-- Work hands-off.
-- Create or update progress documentation.
-- Execute one task at a time.
-- Review each task.
-- Run validation after changes.
-- Repair failures and continue.
-- Do not stop unless complete, blocked by BuildFlow policy, or explicit confirmation is required.
+- Read only the exact context needed.
+- Make the smallest safe change or create a concise plan.
+- Run the smallest relevant validation after code/config/schema changes.
+- Commit explicit changed paths when validation is clean or the change is docs-only.
+- Stop with a concise result and the next concrete action.
 
 Validation:
-Run the relevant type checks, tests, JSON validation, security scans, and git status checks available through BuildFlow.
+Use targeted type checks, tests, JSON validation, security scans, or git status checks only when they add useful evidence.
 
 Git:
-Commit and push the finished work after validation passes.
+Commit only explicit paths. Push only if I explicitly ask.
 ```
 
 ### Example: build a feature
 
 ```text
-Use BuildFlow Agentic Goal Mode on source tradebot.
+Use BuildFlow on source tradebot.
 
 Goal:
 Implement the missing failing endpoint fixes and make the API test suite pass.
 
-Work hands-off. Create or update progress documentation, inspect the repo, make an implementation plan, execute each task, review changed files, run validation, repair failures, and continue until complete or blocked.
+Inspect the repo, make a concise implementation plan, complete the first safe slice, run targeted validation, and stop with the next concrete action.
 
-Do not ask for intermediate approval unless BuildFlow requires confirmation. Commit and push after validation passes.
+Do not ask for intermediate approval unless BuildFlow requires confirmation. Commit explicit validated paths when appropriate.
 ```
 
 ### Example: build a module
 
 ```text
-Use BuildFlow Agentic Goal Mode on source my-app.
+Use BuildFlow on source my-app.
 
 Goal:
 Build a complete project intake module with pages, API routes, validation, tests, and documentation.
 
-Use repo-local conventions. Inspect before writing. Continue through planning, implementation, review, validation, repair, and documentation updates until complete.
+Use repo-local conventions. Inspect before writing. Complete the first safe slice, validate only what is relevant, commit explicit paths when appropriate, and report the next task.
 ```
 
 ### Example: refactor safely
 
 ```text
-Use BuildFlow Agentic Goal Mode on source prochat.
+Use BuildFlow on source prochat.
 
 Goal:
 Refactor the account settings flow into a cleaner service/module structure without changing external behavior.
 
-Document the current structure and risks, plan the refactor, execute task by task, review each task, run validation, repair failures, and update progress documentation until complete.
+Document the current structure and risks, plan the refactor, complete the first safe task, run targeted validation, and stop with a resume point.
 ```
 
 ### Example: improve a knowledge repo
 
 ```text
-Use BuildFlow Agentic Goal Mode on source brain.
+Use BuildFlow on source brain.
 
 Goal:
 Clean up my AI skills folder, improve naming consistency, add README files where useful, and create an index of the most important skills.
 
-Work hands-off, but stop if BuildFlow blocks access to private or secret folders.
+Complete a bounded batch, but stop if BuildFlow blocks access to private or secret folders.
 ```
 
 ### Example: prepare a commit
 
 ```text
-Use BuildFlow Agentic Goal Mode on source buildflow.
+Use BuildFlow on source buildflow.
 
 Goal:
 Improve the dashboard source picker onboarding flow.
 
-Work hands-off until validation passes. Then prepare a clear commit message, commit, push, and continue.
+Validate the change, commit it with a clear message, and stop before pushing unless I ask.
 ```
 
 ## What BuildFlow can do today
@@ -323,8 +299,8 @@ BuildFlow Local currently includes:
 - local plan import/export
 - dynamic handoff prompts for Codex and Claude Code
 - safe command runner for validation and git workflow checks
-- Agentic Goal Mode for long-running implementation loops
-- persistent Agent Mode jobs with handoff and resume instructions
+- fast repo-assistant workflow for small explicit tasks
+- repo-local handoff docs with resume instructions
 - conversation source-locking guidance for multiple simultaneous GPT chats
 - first-run setup checklist
 - user-owned Custom GPT OpenAPI endpoint setup
@@ -337,13 +313,13 @@ BuildFlow is powerful because it connects ChatGPT to your local workspace. That 
 
 - ChatGPT can work with real files instead of pasted snippets.
 - Your local repos remain the source of truth.
-- Long implementation work can be planned, executed, reviewed, and validated in one ChatGPT workflow.
+- Short implementation batches can be planned, executed, reviewed, validated, and committed in one ChatGPT workflow.
 - Writes are policy-checked and verified.
 - Commands are allowlisted instead of arbitrary.
 - Routine repo-maintainer work can continue without constant confirmation stops.
 - Sensitive paths require confirmation or remain blocked.
 - You can keep project planning, implementation notes, and final reports together.
-- Interrupted Agent Mode work can resume from persisted job state and repo-local handoff docs.
+- Interrupted work can resume from repo-local handoff docs.
 
 ### Risks
 
@@ -352,7 +328,7 @@ BuildFlow is powerful because it connects ChatGPT to your local workspace. That 
 - Long-running work can touch many files, so review diffs before committing.
 - Command execution must stay allowlisted; unrestricted shell would be unsafe.
 - Secrets and real environment values should not be exposed to ChatGPT.
-- Push flows should run only when explicitly requested or enabled by Agent Mode policy. Deployment flows should stay allowlisted rather than arbitrary shell.
+- Push flows should run only when explicitly requested. Deployment flows should stay allowlisted rather than arbitrary shell.
 
 ### Important limitations
 
@@ -444,7 +420,7 @@ Read the README and suggest improvements.
 For implementation work, be explicit:
 
 ```text
-Use BuildFlow Agentic Goal Mode on source <sourceId>. Work hands-off until complete, blocked, or confirmation-required.
+Use BuildFlow on source <sourceId>. Complete up to 3 small tasks, validate and commit each one, then stop with the next task.
 ```
 
 For protected work, add boundaries:
@@ -458,7 +434,7 @@ Do not change dependencies, edit migrations, touch deployment files, or run dest
 ```mermaid
 flowchart TD
   Idea["High-level goal"] --> Chat["Custom GPT"]
-  Chat --> Job["Start Agentic Goal Mode"]
+  Chat --> Job["Start bounded batch"]
   Job --> Inspect["Inspect repo"]
   Inspect --> Doc["Document goal and tasks"]
   Doc --> Task["Execute next task"]
@@ -477,18 +453,13 @@ flowchart TD
 BuildFlow exposes a focused action surface:
 
 - `getBuildFlowStatus`
-- `listBuildFlowSources`
-- `getBuildFlowActiveContext`
 - `setBuildFlowActiveContext`
-- `inspectBuildFlowContext`
 - `readBuildFlowContext`
-- `startBuildFlowAgentJob`
-- `getBuildFlowAgentJob`
-- `runBuildFlowCommand`
-- `writeBuildFlowArtifact`
 - `applyBuildFlowFileChange`
+- `commitBuildFlowChanges`
+- `runBuildFlowCommand`
 
-These actions let ChatGPT inspect, read, plan, write, validate, track progress, and continue a goal loop without pretending it has unrestricted local access.
+These actions let ChatGPT inspect, read, plan, write, validate, commit, and continue a bounded goal loop without pretending it has unrestricted local access.
 
 ## Who BuildFlow is for
 
@@ -515,7 +486,7 @@ Use it to reason, plan, inspect, read, write verified changes, run safe validati
 Useful docs:
 
 - [`docs/product/README.md`](docs/product/README.md) — product index
-- [`docs/product/agent-mode.md`](docs/product/agent-mode.md) — Agentic Goal Mode
+- [`docs/product/agent-mode.md`](docs/product/agent-mode.md) — Bounded Sequential Mode
 - [`docs/product/chatgpt-first-workflow.md`](docs/product/chatgpt-first-workflow.md) — ChatGPT-first strategy
 - [`docs/product/public-scope.md`](docs/product/public-scope.md) — public BuildFlow Local scope
 - [`docs/product/local/feature-scope.md`](docs/product/local/feature-scope.md) — Local feature scope
@@ -524,13 +495,13 @@ Useful docs:
 
 ## Roadmap ideas
 
-BuildFlow is moving toward a more complete ChatGPT-first local agent workspace.
+BuildFlow is moving toward a more complete ChatGPT-first local repo workspace.
 
 Areas worth exploring:
 
 - richer activity history
 - better dashboard progress views
-- stronger long-running job persistence
+- clearer handoff and resume persistence
 - more repo-agnostic command recipes
 - safer deployment command profiles
 - better diff previews
