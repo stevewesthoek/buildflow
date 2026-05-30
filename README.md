@@ -79,7 +79,7 @@ Your GPT can:
 
 - check BuildFlow status
 - list connected sources
-- choose active context
+- lock an explicit `sourceId` for the chat
 - inspect file trees
 - search indexed local files
 - prepare focused task context with a deterministic exact read plan

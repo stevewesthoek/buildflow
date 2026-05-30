@@ -38,18 +38,17 @@ The product should not present a separate agent mode, autonomous mode, polling m
 
 ## Custom GPT Action Architecture
 
-The Custom GPT surface is limited to six compact operations:
+The Custom GPT surface is limited to five compact operations:
 
 ```text
 getBuildFlowStatus         -> check connection + sources
-setBuildFlowActiveContext  -> lock sourceId for this conversation
 readBuildFlowContext       -> deterministic task context / read / search / list
 applyBuildFlowFileChange   -> create / overwrite / patch / append / delete_file / move
 commitBuildFlowChanges     -> diff + explicit stage + commit in one call
 runBuildFlowCommand        -> git status, diff, type-check, validation, optional push
 ```
 
-These actions are the whole GPT-facing product surface. Add new GPT actions only when they reduce action chatter through deterministic, bounded work.
+These actions are the whole GPT-facing product surface. Shared dashboard context changes are not exposed to the GPT. Add new GPT actions only when they reduce action chatter through deterministic, bounded work.
 
 ## Conversation Isolation
 
