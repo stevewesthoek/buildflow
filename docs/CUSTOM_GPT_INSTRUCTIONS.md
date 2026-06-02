@@ -45,6 +45,8 @@ For larger goals:
 
 - Use at most one broad search per task.
 - Prefer exact `read_paths` over repeated `search_and_read`.
+- For large files or specific functions, use `grep_context`, then `read_range`, then patch.
+- Use `read_symbol` for TypeScript classes/functions/const blocks when the symbol is known.
 - Keep `limit <= 5` unless the user asks for a larger scan.
 - Use `maxBytesPerFile: 4000` by default; use `8000` only when needed.
 - Do not list the repo root unless no narrower directory is known.

@@ -20,6 +20,7 @@ import { listAgentEvents, appendAgentEvent } from './agent-events'
 import { startLocalAgentPreflight } from './agent-runtime'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from './payload-budget'
 import { prepareTaskContext } from './prepare-task-context'
+import { handleFocusedRead } from './focused-read'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -490,6 +491,11 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }
+  })
+
+  fastify.post<{ Body: { mode: 'grep_context' | 'read_range' | 'read_symbol' | 'search_and_read'; sourceId: string; path: string; pattern?: string; query?: string; regex?: boolean; before?: number; after?: number; maxMatches?: number; startLine?: number; endLine?: number; symbol?: string } }>('/api/focused-read', async (request, reply) => {
+    const result = await handleFocusedRead(request.body)
+    return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.payload)
   })
 
   // Read endpoint (multi-source aware with guardrails)

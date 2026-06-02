@@ -22,6 +22,13 @@ The current Custom GPT surface is exactly these 5 operations. `applyBuildFlowFil
 
 Long-running job or polling routes are intentionally not exposed in this Custom GPT schema. Do not add them to GPT Actions; the GPT-facing product is Fast Repo Assistant only.
 
+Large-file inspection should use bounded focused reads through `readBuildFlowContext`:
+
+- `grep_context` finds literal or regex matches in one file with bounded line context.
+- `read_range` returns only a requested line range with line numbers.
+- `read_symbol` returns the enclosing TypeScript class/function/const block for a known symbol.
+- File-specific `search_and_read` with one `paths` entry degrades to bounded grep-style output instead of returning a huge top-of-file excerpt.
+
 ## Notes
 
 - Do not import legacy context actions such as `setBuildFlowContext`.
