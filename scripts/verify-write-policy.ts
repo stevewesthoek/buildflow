@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { getDefaultWritePolicy, validateWriteTarget } from '../packages/cli/src/agent/safe-access'
 import { validatePath } from '../packages/cli/src/agent/permissions'
 import { attachWriteConfirmation, composeArtifactRelativePath } from '../apps/web/src/lib/actions/gpt'
@@ -143,6 +145,48 @@ assert.equal(validatePath('.env.local').valid, false)
 const generatedDelete = validateWriteTarget({ requestedPath: 'tsconfig.tsbuildinfo', changeType: 'delete_file', sourceRoot: root })
 assert.equal(generatedDelete.ok, true)
 
+const trackedAssetRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-write-policy-assets-'))
+execFileSync('git', ['init'], { cwd: trackedAssetRoot, stdio: 'ignore' })
+execFileSync('git', ['config', 'user.email', 'buildflow@example.test'], { cwd: trackedAssetRoot, stdio: 'ignore' })
+execFileSync('git', ['config', 'user.name', 'BuildFlow Test'], { cwd: trackedAssetRoot, stdio: 'ignore' })
+fs.mkdirSync(path.join(trackedAssetRoot, 'public/assets'), { recursive: true })
+fs.writeFileSync(path.join(trackedAssetRoot, 'public/assets/file.pdf'), 'fake pdf\n')
+execFileSync('git', ['add', '--', 'public/assets/file.pdf'], { cwd: trackedAssetRoot, stdio: 'ignore' })
+execFileSync('git', ['commit', '-m', 'test: add asset'], { cwd: trackedAssetRoot, stdio: 'ignore' })
+
+const trackedAssetDelete = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/file.pdf', changeType: 'delete_file', sourceRoot: trackedAssetRoot, confirmedByUser: true })
+assert.equal(trackedAssetDelete.ok, true)
+const trackedAssetDeleteNoConfirmation = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/file.pdf', changeType: 'delete_file', sourceRoot: trackedAssetRoot })
+assert.equal(trackedAssetDeleteNoConfirmation.ok, false)
+if (!trackedAssetDeleteNoConfirmation.ok) {
+  assert.equal(trackedAssetDeleteNoConfirmation.error.code, 'PATH_NOT_ALLOWED')
+}
+fs.writeFileSync(path.join(trackedAssetRoot, 'public/assets/untracked.pdf'), 'fake pdf\n')
+const untrackedAssetDelete = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/untracked.pdf', changeType: 'delete_file', sourceRoot: trackedAssetRoot, confirmedByUser: true })
+assert.equal(untrackedAssetDelete.ok, false)
+if (!untrackedAssetDelete.ok) {
+  assert.equal(untrackedAssetDelete.error.code, 'PATH_NOT_ALLOWED')
+}
+const trackedAssetCreate = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/new.pdf', changeType: 'create', sourceRoot: trackedAssetRoot, content: 'fake pdf\n', confirmedByUser: true })
+assert.equal(trackedAssetCreate.ok, false)
+if (!trackedAssetCreate.ok) assert.equal(trackedAssetCreate.error.code, 'BINARY_WRITE_BLOCKED')
+const trackedAssetOverwrite = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/file.pdf', changeType: 'overwrite', sourceRoot: trackedAssetRoot, content: 'fake pdf\n', confirmedByUser: true })
+assert.equal(trackedAssetOverwrite.ok, false)
+if (!trackedAssetOverwrite.ok) assert.equal(trackedAssetOverwrite.error.code, 'BINARY_WRITE_BLOCKED')
+const docsAssetCreate = validateWriteTarget({ sourceId: 'test', requestedPath: 'docs/assets/new.pdf', changeType: 'create', sourceRoot: trackedAssetRoot, content: 'fake pdf\n', confirmedByUser: true })
+assert.equal(docsAssetCreate.ok, false)
+if (!docsAssetCreate.ok) assert.equal(docsAssetCreate.error.code, 'BINARY_WRITE_BLOCKED')
+const envDelete = validateWriteTarget({ sourceId: 'test', requestedPath: '.env', changeType: 'delete_file', sourceRoot: trackedAssetRoot, confirmedByUser: true })
+assert.equal(envDelete.ok, false)
+if (!envDelete.ok) assert.equal(envDelete.error.code, 'SECRET_PATH_BLOCKED')
+const keyDelete = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/private.key', changeType: 'delete_file', sourceRoot: trackedAssetRoot, confirmedByUser: true })
+assert.equal(keyDelete.ok, false)
+if (!keyDelete.ok) assert.equal(keyDelete.error.code, 'SECRET_PATH_BLOCKED')
+const nodeModulesDelete = validateWriteTarget({ sourceId: 'test', requestedPath: 'node_modules/pkg/file.pdf', changeType: 'delete_file', sourceRoot: trackedAssetRoot, confirmedByUser: true })
+assert.equal(nodeModulesDelete.ok, false)
+if (!nodeModulesDelete.ok) assert.equal(nodeModulesDelete.error.code, 'PROTECTED_PATH')
+fs.rmSync(trackedAssetRoot, { recursive: true, force: true })
+
 const blockedCases = [
   { requestedPath: '.env', code: 'SECRET_PATH_BLOCKED' },
   { requestedPath: '.env.local', code: 'SECRET_PATH_BLOCKED' },
@@ -173,23 +217,28 @@ for (const testCase of blockedCases) {
 const openapiSource = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/openapi/route.ts'), 'utf8')
 const serverSource = fs.readFileSync(path.join(process.cwd(), 'packages/cli/src/agent/server.ts'), 'utf8')
 const instructionsSource = fs.readFileSync(path.join(process.cwd(), 'docs/CUSTOM_GPT_INSTRUCTIONS.md'), 'utf8')
+const gptActionsSource = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
 const staticOpenapiSource = fs.readFileSync(path.join(process.cwd(), 'docs/openapi.chatgpt.json'), 'utf8')
 const staticOpenapi = JSON.parse(staticOpenapiSource) as {
-  components?: { schemas?: { Source?: { properties?: Record<string, unknown> } } }
   paths?: Record<string, any>
 }
 assert(openapiSource.includes('dryRun'))
-assert(openapiSource.includes('preflight'))
-assert(openapiSource.includes('writable'))
-assert(openapiSource.includes('writePolicy'))
-assert(openapiSource.includes('writeProfile'))
-assert(openapiSource.includes('activitySchema'))
+assert(openapiSource.includes('confirmedByUser'))
+assert(openapiSource.includes('allowMultiple'))
+assert(gptActionsSource.includes('preflight'))
+assert(gptActionsSource.includes('makeActivity'))
+assert(gptActionsSource.includes('withActivity'))
+assert(gptActionsSource.includes('writable'))
+assert(gptActionsSource.includes('writePolicy'))
+assert(gptActionsSource.includes('writeProfile'))
 assert(serverSource.includes('allowMultiple?: boolean'))
 assert(serverSource.includes('allowMultiple = false'))
 assert(serverSource.includes('allowMultiple === true ? original.split(find).join(replace) : original.replace(find, replace)'))
-assert(instructionsSource.includes('allowMultiple only when replacing every identical match is intended'))
+assert(instructionsSource.includes('`allowMultiple` only when replacing every identical match is intended'))
 assert(instructionsSource.includes('BuildFlow narration and activity feedback'))
-assert(staticOpenapi.components?.schemas?.Source?.properties?.writePolicy)
+assert(instructionsSource.includes('already tracked static/binary asset'))
 assert(staticOpenapi.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.allowMultiple)
+assert(staticOpenapi.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.confirmedByUser)
+assert(staticOpenapi.paths?.['/api/actions/commit-changes']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.confirmedByUser)
 
 console.log('write policy contract checks passed')

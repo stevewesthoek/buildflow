@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import { execFileSync } from 'child_process'
 import { getActiveSourceContext, getEnabledSources } from './config'
 
 export type WriteChangeType =
@@ -256,6 +257,46 @@ const BLOCKED_DIRECTORY_NAMES = new Set(['node_modules', '.next', 'dist', 'build
 const ALLOWED_DOTFILES = new Set(['.github', '.kiro', '.ai', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example', '.gitignore', '.buildflow', '.nvmrc', '.prettierrc', '.eslintrc'])
 const CONFIRMATION_REQUIRED_GLOBS = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'LICENSE']
 const BLOCKED_CONTENT_PATTERNS = ['BEGIN RSA PRIVATE KEY', 'BEGIN OPENSSH PRIVATE KEY', 'BEGIN EC PRIVATE KEY', 'ghp_', 'github_pat_', 'sk_live_', 'rk_live_', 'xoxb-', 'AKIA', 'AIza']
+const STATIC_ASSET_EXTENSIONS = new Set([
+  '.pdf',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.svg',
+  '.ico',
+  '.bmp',
+  '.tiff',
+  '.avif',
+  '.mp4',
+  '.mov',
+  '.avi',
+  '.webm',
+  '.mkv',
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.m4a',
+  '.flac',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.otf',
+  '.eot',
+  '.zip',
+  '.gz',
+  '.tar',
+  '.tgz'
+])
+const STATIC_ASSET_ROOT_PATTERNS = [
+  'public/**',
+  'assets/**',
+  'static/**',
+  'docs/assets/**',
+  'docs/images/**',
+  'docs/media/**'
+]
 
 export function isSafeRelativePath(relativePath: string): boolean {
   if (!relativePath || relativePath.includes('..') || relativePath.startsWith('/')) return false
@@ -372,6 +413,49 @@ function isConfirmationRequiredPath(normalizedPath: string): boolean {
   return CONFIRMATION_REQUIRED_GLOBS.some(pattern => matchesGlob(pattern, normalizedPath))
 }
 
+function isGitTracked(sourceRoot: string | undefined, normalizedPath: string): boolean {
+  if (!sourceRoot) return false
+  try {
+    const root = path.resolve(sourceRoot)
+    if (!fs.existsSync(path.join(root, '.git'))) return false
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', normalizedPath], { cwd: root, stdio: 'ignore' })
+    return true
+  } catch {
+    try {
+      const root = path.resolve(sourceRoot)
+      execFileSync('git', ['cat-file', '-e', `HEAD:${normalizedPath}`], { cwd: root, stdio: 'ignore' })
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+function isStaticAssetPath(normalizedPath: string): boolean {
+  const ext = path.extname(normalizedPath).toLowerCase()
+  return STATIC_ASSET_EXTENSIONS.has(ext) && STATIC_ASSET_ROOT_PATTERNS.some(pattern => matchesGlob(pattern, normalizedPath))
+}
+
+export function isDeleteOnlyTrackedBinaryAllowed(params: {
+  sourceId?: string
+  sourceRoot?: string
+  normalizedPath: string
+  changeType: WriteChangeType
+  confirmedByUser?: boolean
+  confirmationToken?: string
+}): boolean {
+  if (params.changeType !== 'delete_file') return false
+  if (!isStaticAssetPath(params.normalizedPath)) return false
+  if (!hasValidConfirmation({
+    sourceId: params.sourceId,
+    changeType: params.changeType,
+    normalizedPath: params.normalizedPath,
+    confirmedByUser: params.confirmedByUser,
+    confirmationToken: params.confirmationToken
+  })) return false
+  return isGitTracked(params.sourceRoot, params.normalizedPath)
+}
+
 function isDependencyChange(content?: string): boolean {
   if (typeof content !== 'string' || !content.trim()) return false
   try {
@@ -413,8 +497,20 @@ export function validateWriteTarget(params: {
   }
 
   const deleteOperation = params.changeType === 'delete_file' || params.changeType === 'delete_directory' || params.changeType === 'rmdir'
+  const writeOperation = params.changeType === 'create' || params.changeType === 'overwrite' || params.changeType === 'append' || params.changeType === 'patch'
+  if (writeOperation && policy.binaryWriteBlocked && STATIC_ASSET_EXTENSIONS.has(path.extname(normalizedPath).toLowerCase())) {
+    return { ok: false, requestedPath, normalizedPath, sourceRootRelativePath, policy, error: { code: 'BINARY_WRITE_BLOCKED', message: 'Binary/static asset writes are blocked by policy.', userMessage: 'BuildFlow can delete confirmed tracked static assets, but it cannot create, overwrite, or modify binary/static asset files.', reason: 'binary_write_blocked', hint: 'Use a text source path, or delete an already tracked asset with explicit confirmation.', requiresConfirmation: false } }
+  }
   const generatedDeleteAllowed = deleteOperation && matchesGlobAny(policy.generatedDeleteAllowedGlobs, normalizedPath)
-  if (!generatedDeleteAllowed && !isWithinAllowedRoots(normalizedPath)) {
+  const trackedStaticAssetDeleteAllowed = isDeleteOnlyTrackedBinaryAllowed({
+    sourceId: params.sourceId,
+    sourceRoot: params.sourceRoot,
+    normalizedPath,
+    changeType: params.changeType,
+    confirmedByUser: params.confirmedByUser,
+    confirmationToken: params.confirmationToken
+  })
+  if (!generatedDeleteAllowed && !trackedStaticAssetDeleteAllowed && !isWithinAllowedRoots(normalizedPath)) {
     return { ok: false, requestedPath, normalizedPath, sourceRootRelativePath, policy, error: { code: 'PATH_NOT_ALLOWED', message: 'This path is blocked by the source write policy.', userMessage: 'BuildFlow can read this file, but the current write policy blocks changes to this path.', reason: 'path_not_allowed', hint: 'Choose an allowed repo-local path or update the source write policy.', requiresConfirmation: false } }
   }
 

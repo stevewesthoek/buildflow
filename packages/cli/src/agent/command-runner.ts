@@ -1,7 +1,7 @@
 import fs from 'fs'
 import { execFileSync, spawn } from 'child_process'
 import path from 'path'
-import { validateWriteTarget } from './safe-access'
+import { normalizeRepoRelativePath, validateWriteTarget } from './safe-access'
 
 const MAX_OUTPUT_BYTES = 60_000
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -178,12 +178,55 @@ function assertTextFilePath(relativePath: string): void {
   if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error(`Binary path is blocked: ${relativePath}`)
 }
 
-function assertWriteAllowed(sourceId: string, sourceRoot: string, relativePath: string, confirmedByUser?: boolean, confirmationToken?: string): { needsConfirmation: boolean; reason?: string } {
-  const validation = validateWriteTarget({ sourceId, requestedPath: relativePath, changeType: 'patch', sourceRoot, confirmedByUser, confirmationToken })
+function assertWriteAllowed(sourceId: string, sourceRoot: string, relativePath: string, changeType: 'patch' | 'delete_file' = 'patch', confirmedByUser?: boolean, confirmationToken?: string): { needsConfirmation: boolean; reason?: string } {
+  const validation = validateWriteTarget({ sourceId, requestedPath: relativePath, changeType, sourceRoot, confirmedByUser, confirmationToken })
   if (validation.ok === true) return { needsConfirmation: false }
   const blocked = validation as Extract<typeof validation, { ok: false }>
   if (blocked.error.code === 'REQUIRES_EXPLICIT_CONFIRMATION') return { needsConfirmation: true, reason: blocked.error.reason }
   throw new Error(`${relativePath} is blocked by write policy: ${blocked.error.code}`)
+}
+
+function isTrackedDeletionInWorktree(sourceRoot: string, relativePath: string): boolean {
+  try {
+    const output = execFileSync('git', ['ls-files', '--deleted', '--', relativePath], { cwd: sourceRoot, encoding: 'utf8' }).trim()
+    return output.split('\n').map(item => normalizeRepoRelativePath(item)).includes(relativePath)
+  } catch {
+    return false
+  }
+}
+
+function getStagedPathStatuses(sourceRoot: string): Array<{ status: string; path: string }> {
+  const output = fs.existsSync(path.join(sourceRoot, '.git'))
+    ? execFileSync('git', ['diff', '--cached', '--name-status'], { cwd: sourceRoot, encoding: 'utf8' })
+    : ''
+  return output.split('\n').map(item => item.trim()).filter(Boolean).map(line => {
+    const parts = line.split(/\t+/)
+    const status = parts[0] || ''
+    const relPath = parts.length > 2 ? parts[2] : parts[1]
+    return { status, path: normalizeRepoRelativePath(relPath || '') }
+  }).filter(item => item.path)
+}
+
+function assertStagePathAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string): void {
+  if (isTrackedDeletionInWorktree(sourceRoot, relativePath)) {
+    assertWriteAllowed(request.sourceId, sourceRoot, relativePath, 'delete_file', request.confirmedByUser, request.confirmationToken)
+    return
+  }
+  if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
+    throw new Error(`Binary path is blocked: ${relativePath}`)
+  }
+  assertWriteAllowed(request.sourceId, sourceRoot, relativePath, 'patch', request.confirmedByUser, request.confirmationToken)
+}
+
+function assertCommitPathAllowed(request: SafeCommandRequest, sourceRoot: string, item: { status: string; path: string }): void {
+  if (item.status.startsWith('D')) {
+    assertWriteAllowed(request.sourceId, sourceRoot, item.path, 'delete_file', request.confirmedByUser, request.confirmationToken)
+    return
+  }
+  if (BINARY_EXTENSIONS.has(path.extname(item.path).toLowerCase())) {
+    throw new Error(`Binary path is blocked: ${item.path}`)
+  }
+  assertWriteAllowed(request.sourceId, sourceRoot, item.path, 'patch', request.confirmedByUser, request.confirmationToken)
 }
 
 function commandConfirmationToken(request: SafeCommandRequest, reason: string): string {
@@ -291,21 +334,18 @@ async function runAndAppendGitLog(request: SafeCommandRequest, command: string[]
   return { ...result, stdout: `${result.stdout}${result.stdout ? '\n' : ''}${log.stdout}`.trim(), outputTruncated: result.outputTruncated || log.outputTruncated }
 }
 
-function assertExplicitPaths(paths?: string[]): string[] {
+function assertExplicitPaths(paths?: string[], options: { allowBinaryPaths?: boolean } = {}): string[] {
   if (!Array.isArray(paths) || paths.length === 0) throw new Error('paths must be a non-empty explicit file list')
   if (paths.some(item => item === '.' || item === '-A' || item === '--all')) throw new Error('paths must not include git add shortcuts')
   return paths.map(item => {
     const normalized = assertSafeRepoPath(item, 'path')
-    assertTextFilePath(normalized)
+    if (options.allowBinaryPaths !== true) assertTextFilePath(normalized)
     return normalized
   })
 }
 
 function getStagedPaths(sourceRoot: string): string[] {
-  const output = fs.existsSync(path.join(sourceRoot, '.git'))
-    ? execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: sourceRoot, encoding: 'utf8' })
-    : ''
-  return output.split('\n').map((item: string) => item.trim()).filter(Boolean)
+  return getStagedPathStatuses(sourceRoot).map(item => item.path)
 }
 
 function assertNoSecretLikeText(text: string, label: string): void {
@@ -544,15 +584,16 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
   if (request.commandKind === 'security_scan_paths') return scanSecurityPaths(request)
 
   if (request.commandKind === 'git_add_paths') {
-    const paths = assertExplicitPaths(request.paths)
-    for (const relPath of paths) assertWriteAllowed(request.sourceId, sourceRoot, relPath, true, request.confirmationToken)
+    const paths = assertExplicitPaths(request.paths, { allowBinaryPaths: true })
+    for (const relPath of paths) assertStagePathAllowed(request, sourceRoot, relPath)
     return runProcess(request, ['git', 'add', '--', ...paths], sourceRoot)
   }
 
   if (request.commandKind === 'git_commit') {
-    const staged = getStagedPaths(sourceRoot)
+    const stagedStatuses = getStagedPathStatuses(sourceRoot)
+    const staged = stagedStatuses.map(item => item.path)
     if (staged.length === 0) throw new Error('git_commit requires staged changes')
-    for (const relPath of staged) assertWriteAllowed(request.sourceId, sourceRoot, relPath, request.confirmedByUser, request.confirmationToken)
+    for (const item of stagedStatuses) assertCommitPathAllowed(request, sourceRoot, item)
     const message = typeof request.message === 'string' ? request.message.trim() : ''
     const body = typeof request.body === 'string' ? request.body.trim() : ''
     if (!message || /[\r\n]/.test(message) || message.length > 200) throw new Error('message must be a short single-line string')

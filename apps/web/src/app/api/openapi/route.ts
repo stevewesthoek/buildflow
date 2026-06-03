@@ -107,8 +107,11 @@ const openapi = {
                   content: { type: 'string', description: 'Full file content for create/overwrite, appended text for append' },
                   find: { type: 'string', description: 'Exact string to find for patch changeType' },
                   replace: { type: 'string', description: 'Replacement string for patch changeType' },
+                  allowMultiple: { type: 'boolean', description: 'For patch only, replace every identical match. Defaults to false.' },
                   to: { type: 'string', description: 'Destination path for move changeType' },
                   reason: { type: 'string', description: 'Why this change is being made (logged for audit)' },
+                  confirmedByUser: { type: 'boolean', description: 'Only set true when the user explicitly approved a confirmation-gated delete or write.' },
+                  confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated file changes.' },
                   dryRun: { type: 'boolean', description: 'If true, validates the write policy without writing. Use to check if a path is allowed before writing.' }
                 },
                 required: ['sourceId', 'changeType', 'path']
@@ -140,7 +143,9 @@ const openapi = {
                 properties: {
                   sourceId: { type: 'string' },
                   paths: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 50, description: 'Specific files to stage — never commit everything at once' },
-                  message: { type: 'string', description: 'Commit message, e.g. "fix: normalize path in read-context route"' }
+                  message: { type: 'string', description: 'Commit message, e.g. "fix: normalize path in read-context route"' },
+                  confirmedByUser: { type: 'boolean', description: 'Only set true when committing a confirmation-gated exact-path change the user explicitly approved.' },
+                  confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated commits.' }
                 },
                 required: ['sourceId', 'paths', 'message']
               }

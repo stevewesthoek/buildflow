@@ -72,6 +72,12 @@ Commit only explicit paths. Use `commitBuildFlowChanges` to collapse diff, stagi
 
 Push only when the user explicitly asks.
 
+## Tracked Static Asset Deletion
+
+BuildFlow may delete an already tracked static/binary asset only when the user explicitly approved that exact deletion. The delete must be `delete_file`, the file must be tracked by Git, the path must not be secret-sensitive or protected, and staging/commit must name the exact deleted path.
+
+This is repo-agnostic and applies to safe static/document asset paths such as PDFs, images, video, audio, archives, and fonts. Creation, overwrite, and modification of binary/static assets remain blocked unless a separate policy explicitly supports them.
+
 ## Stop Conditions
 
 Stop and report a concise result when:

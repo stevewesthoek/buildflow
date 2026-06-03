@@ -17,6 +17,8 @@ export async function POST(request: NextRequest) {
     const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
     const paths = Array.isArray(body.paths) ? body.paths as string[] : []
     const message = typeof body.message === 'string' ? body.message : ''
+    const confirmedByUser = body.confirmedByUser === true
+    const confirmationToken = typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
 
     if (!sourceId) {
       return NextResponse.json(buildActionErrorEnvelope({ code: 'MISSING_PARAM', message: 'sourceId is required' }), { status: 400 })
@@ -35,13 +37,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 2: stage specific paths
-    const add = await dispatchBuildFlowCommand({ sourceId, commandKind: 'git_add_paths', paths, timeoutMs: 8000 }, auth.bearerToken) as Record<string, unknown>
+    const add = await dispatchBuildFlowCommand({ sourceId, commandKind: 'git_add_paths', paths, confirmedByUser, confirmationToken, timeoutMs: 8000 }, auth.bearerToken) as Record<string, unknown>
     if ((add as { exitCode?: number }).exitCode !== 0) {
       return NextResponse.json({ ok: false, step: 'add', add })
     }
 
     // Step 3: commit with provided message
-    const commit = await dispatchBuildFlowCommand({ sourceId, commandKind: 'git_commit', message, timeoutMs: 12000 }, auth.bearerToken) as Record<string, unknown>
+    const commit = await dispatchBuildFlowCommand({ sourceId, commandKind: 'git_commit', message, confirmedByUser, confirmationToken, timeoutMs: 12000 }, auth.bearerToken) as Record<string, unknown>
     const committed = (commit as { exitCode?: number }).exitCode === 0
 
     return NextResponse.json({

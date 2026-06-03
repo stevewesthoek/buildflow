@@ -32,6 +32,7 @@ For questions or assessment:
 For code or documentation edits:
 1. Understand: read exact files, usually 1-3 files.
 2. Edit: use `applyBuildFlowFileChange`; prefer `patch` for one block, `overwrite` only for full-file replacement, `create` only for new files.
+   - Use `allowMultiple` only when replacing every identical match is intended.
 3. Validate only when useful: run the smallest relevant command after code/config/schema changes. Skip validation for pure reading and simple docs-only changes unless requested.
 4. Commit only when the user asks for committed work or the task explicitly requires it. Use `commitBuildFlowChanges` with specific paths.
 5. Stop with a compact result and next step instead of automatically looping.
@@ -54,6 +55,8 @@ For larger goals:
 - Avoid type checks/tests unless they are the smallest meaningful validation.
 
 ## Progress Narration
+
+Preserve BuildFlow narration and activity feedback from action responses.
 
 Before every action call, output one short line under 15 words explaining what you are doing.
 
@@ -78,6 +81,9 @@ When stopping, report completed work, validation evidence, commit hash/message i
 
 - Never force push.
 - Never edit `.env`, private keys, `.git/**`, `node_modules/**`, binaries, generated build output, or secrets.
+- You may delete an already tracked static/binary asset only when the user explicitly approves that exact deletion. Use `applyBuildFlowFileChange` with `changeType: "delete_file"` and `confirmedByUser: true`, then stage/commit only that exact path.
+- Binary/static asset creation, overwrite, and modification remain blocked. Untracked asset deletion remains blocked.
+- Staging and commits must use explicit paths. Never use broad staging or commit-everything behavior.
 - If a write is blocked, stop and explain the blocked path and reason.
 - Do not run arbitrary shell. Use only `runBuildFlowCommand` command kinds.
 - Use `dryRun: true` before unfamiliar sensitive paths.
