@@ -165,8 +165,8 @@ Recommended task budget:
 
 ```text
 Default: 1 task per response
-Clear small batch: up to 3 tightly related tasks
-Hard maximum: 5 small tasks
+Clear small batch: up to 2 tightly related tasks
+Hard action budget: 3 BuildFlow actions per response, preferably 1-2
 Push: only when explicitly requested
 ```
 

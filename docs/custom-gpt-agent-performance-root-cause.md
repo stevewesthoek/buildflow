@@ -33,11 +33,13 @@ Fast repo assistance works when the GPT keeps action chatter low:
 5. optionally commit explicit paths
 6. stop with a concise result or resume point
 
+Custom GPT Actions do not give BuildFlow a reliable way to stream live progress into the ChatGPT message while a single action is running. The product therefore makes progress visible by requiring short narration before each action and a compact evidence summary after each action result. Long-running work must be split into smaller conversation slices instead of hidden inside one request.
+
 Recommended task budget:
 
 - default: 1 task per response
-- up to 3 tightly related small tasks when paths and validation are clear
-- maximum: 5 small tasks
+- up to 2 tightly related small tasks when paths and validation are clear
+- hard action budget: 3 BuildFlow actions per response, preferably 1-2
 - larger work: plan first, complete only the first safe slice, then stop with a resume point
 
 ## What Does Not Work
@@ -92,9 +94,17 @@ Further optimization should reduce action chatter:
 - keep schema small
 - keep responses compact
 - prefer exact reads
+- use focused large-file reads before patching
 - run targeted validation only when useful
 - batch deterministic mechanical work when it removes repeated calls
+- preserve compact action activity so the GPT can summarize progress after each action
 - add compact diagnostics when field diagnosis needs visibility
 - keep relay parity with the direct local API
+
+## UI Stability Boundary
+
+BuildFlow cannot control the ChatGPT client UI state, including temporary "talking to BuildFlow" banners, action spinners, or cases where the ChatGPT app re-renders a message while an action is still pending. BuildFlow can only reduce the likelihood of unstable UI behavior by returning faster, smaller action responses and by instructing the GPT to narrate before and after each action.
+
+Do not attempt to solve UI flipping with server-side polling, streaming, or background jobs. Those are incompatible with the Custom GPT action path. The mitigation is smaller action slices, shorter action chains, and explicit resume points.
 
 The correct user-facing promise is: **fast local repo assistance through ChatGPT with guardrails**.

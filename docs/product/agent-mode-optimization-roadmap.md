@@ -57,8 +57,9 @@ large goal -> concise plan -> first safe slice only -> resume point
 Normal task budget:
 
 - 1 task per response by default
-- up to 3 tightly related small tasks when all paths and validations are clear
-- never more than 5
+- up to 2 tightly related small tasks when all paths and validations are clear
+- hard action budget: 3 BuildFlow actions per response, preferably 1-2
+- larger work stops with a resume point instead of continuing the loop
 
 ## Implementation Phases
 
@@ -74,7 +75,7 @@ Status: implemented in this direction.
 
 Status: active.
 
-- Keep the six GPT-facing operations compact.
+- Keep the five GPT-facing operations compact.
 - Keep OpenAPI descriptions short and direct.
 - Reimport schema into the Custom GPT after schema wording changes.
 

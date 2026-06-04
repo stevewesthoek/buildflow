@@ -89,16 +89,17 @@ BuildFlow previously attempted server-side agent orchestration:
 
 ## BuildFlow Schema — Current Operations
 
-**Total: 6 operations** (hard limit: 30)
+**Total: 5 operations** (hard limit: 30)
 
 | `operationId` | Method | Endpoint | Purpose |
 |---|---|---|---|
-| `getBuildFlowStatus` | GET | `/api/actions/status` | Connection + sources + active context |
-| `setBuildFlowActiveContext` | POST | `/api/actions/status` | Set which source(s) to work with |
-| `readBuildFlowContext` | POST | `/api/actions/read-context` | Read files, search, list structure, or prepare focused task context |
+| `getBuildFlowStatus` | GET | `/api/actions/status` | Connection + sources |
+| `readBuildFlowContext` | POST | `/api/actions/read-context` | Read files, focused large-file context, search, list structure, or prepare task context |
 | `applyBuildFlowFileChange` | POST | `/api/actions/apply-file-change` | Write: create / overwrite / patch / append / delete / move |
 | `commitBuildFlowChanges` | POST | `/api/actions/commit-changes` | Diff + explicit stage + commit in one call |
 | `runBuildFlowCommand` | POST | `/api/actions/run-command` | Allowlisted git + validation commands |
+
+The GPT schema does not expose shared dashboard context setters. The GPT locks a `sourceId` conversationally and passes it explicitly on every repo action.
 
 All operations use `x-openai-isConsequential: false` because the backend write policy enforcement is more precise than the ChatGPT confirmation UI.
 

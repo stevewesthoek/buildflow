@@ -102,6 +102,38 @@ function ensureNoStaleSchemaFragments() {
   return { skipped: false }
 }
 
+function ensureDocumentationAlignment() {
+  const docsToCheck = [
+    'README.md',
+    'docs/CUSTOM_GPT_INSTRUCTIONS.md',
+    'docs/openapi.chatgpt/README.md',
+    'docs/product/agent-mode.md',
+    'docs/product/agent-mode-optimization-roadmap.md',
+    'docs/custom-gpt-agent-performance-root-cause.md',
+    'docs/openai-custom-gpt-limits.md'
+  ]
+  const forbidden = [
+    'compact 6-action',
+    'schema is 6 operations',
+    'Total: 6 operations',
+    'Keep the six GPT-facing operations',
+    'setBuildFlowActiveContext` | POST',
+    'Clear small batch: up to 3 tightly related tasks',
+    'Hard maximum: 5 small tasks'
+  ]
+  const scanned = []
+  for (const rel of docsToCheck) {
+    const file = path.join(ROOT, rel)
+    if (!fs.existsSync(file)) continue
+    const text = fs.readFileSync(file, 'utf8')
+    scanned.push(rel)
+    for (const phrase of forbidden) {
+      assert(!text.includes(phrase), `Documentation drift in ${rel}: ${phrase}`)
+    }
+  }
+  return { scanned }
+}
+
 async function requestJson(pathname, options = {}, timeoutMs = 15_000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -142,6 +174,7 @@ async function main() {
   ensureSchemaRules(schema)
   const instructions = ensureInstructions()
   const staleFragments = ensureNoStaleSchemaFragments()
+  const documentationAlignment = ensureDocumentationAlignment()
   const live = await runLiveSmokeChecks()
 
   console.log(JSON.stringify({
@@ -149,6 +182,7 @@ async function main() {
     schemaBytes: byteLength(schema),
     instructionsBytes: instructions.bytes,
     expectedOperationCount: EXPECTED_OPERATION_IDS.length,
+    documentationAlignment,
     payloadBudgets: {
       targetBytes: TARGET_ACTION_RESPONSE_BYTES,
       hardBudgetBytes: HARD_ACTION_RESPONSE_BYTES
