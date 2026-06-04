@@ -16,7 +16,7 @@ Therefore the product should optimize for fewer, smaller, clearer actions instea
 
 ```text
 Custom GPT
-  -> compact 6-action schema
+  -> compact 5-action schema
   -> web action adapter
   -> local agent process
   -> deterministic source-scoped repo tools
@@ -39,7 +39,6 @@ Core invariants:
 Keep exactly the compact action surface unless a new deterministic macro-action removes more chatter than it adds:
 
 - `getBuildFlowStatus`
-- `setBuildFlowActiveContext`
 - `readBuildFlowContext`
 - `applyBuildFlowFileChange`
 - `commitBuildFlowChanges`

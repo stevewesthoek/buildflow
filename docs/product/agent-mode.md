@@ -18,7 +18,7 @@ This is not an autonomous agent product. The Custom GPT remains the reasoning la
 
 ## Why This Is The Only GPT Workflow
 
-Custom GPT Actions are synchronous external API calls. Every extra action requires ChatGPT to reason, call the endpoint, wait for a full response, parse JSON, and reason again. Long loops create slow responses, timeouts, and context drift.
+Custom GPT Actions are synchronous external API calls. Every extra action requires ChatGPT to reason, call the endpoint, wait for a full response, parse JSON, and reason again. Long loops create slow responses, timeouts, and context drift. Actions do not provide reliable mid-call progress streaming, so the GPT must narrate before each action and summarize after each result.
 
 BuildFlow therefore optimizes for fast, bounded assistance:
 
@@ -32,8 +32,10 @@ The product should not present a separate agent mode, autonomous mode, polling m
 
 - Questions: read minimal context and answer. No validation. No commit.
 - Small edits: read exact files, patch, validate the smallest relevant command, report or commit.
+- Large files: use `grep_context`, `read_range`, or `read_symbol`; never read huge files just to find one block.
 - Larger goals: create or update a concise plan, complete only the first small safe slice, then stop.
-- Task lists: normally complete 1 task per response; up to 3 tightly related small tasks when all paths and validations are clear; never exceed 5.
+- Task lists: normally complete 1 task per response; up to 2 tightly related small tasks when all paths and validations are clear.
+- Action budget: target 1-2 BuildFlow actions per response; hard stop at 3 actions unless the user explicitly asks to continue.
 - Slow or broad work: stop with the next concrete action instead of continuing to loop.
 
 ## Custom GPT Action Architecture
@@ -104,6 +106,22 @@ Do not add these to the Custom GPT path:
 
 Internal dashboard or CLI experiments must not redefine the Custom GPT product direction. The GPT-facing direction is Fast Repo Assistant only.
 
+## Timeout And Stability Policy
+
+BuildFlow cannot stream progress while a Custom GPT Action is running. The GPT must make progress visible by narrating before each action and summarizing the compact action result after each action.
+
+The user may see platform-level UI states such as "talking to BuildFlow" while ChatGPT waits for the action response. BuildFlow reduces that risk by making each action small, bounded, and deterministic; it does not try to solve this with background jobs, polling, or hidden agents.
+
+For large requests, the GPT must slice work:
+
+1. plan the first safe slice
+2. read only the smallest evidence needed
+3. patch one focused block when editing
+4. validate only when useful
+5. stop with the exact next action or resume prompt
+
+Default action budget per response is 1-2 BuildFlow actions, with a hard budget of 3. Larger goals continue across user-visible turns instead of one long loop.
+
 ## Optimization Rule
 
 The fastest BuildFlow is not more agentic. It is fewer, smaller, clearer tool calls.
@@ -111,9 +129,11 @@ The fastest BuildFlow is not more agentic. It is fewer, smaller, clearer tool ca
 Good:
 - compact task context prep
 - exact multi-file reads
+- focused large-file reads with `grep_context`, `read_range`, and `read_symbol`
 - write policy preflight
 - targeted validation
 - commit-specific-paths action
+- compact action activity feedback
 - compact diagnostics on demand
 
 Bad:
@@ -122,3 +142,4 @@ Bad:
 - local AI in GPT-facing actions
 - broad unrestricted shell
 - repeated status endpoints that return large state
+- broad searches when a path, symbol, or line range is known

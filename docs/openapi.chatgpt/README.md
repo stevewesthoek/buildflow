@@ -10,7 +10,7 @@ Use one of these for schema import/generation:
 
 For actual ChatGPT Actions, the server URL inside the imported schema must be reachable by ChatGPT over HTTPS. A `localhost` server URL is not a valid runtime endpoint for ChatGPT-hosted action calls.
 
-BuildFlow v1.2.13-beta actions return compact structured results for a Fast Repo Assistant Custom GPT. The GPT must be instructed to narrate progress before each action; the schema alone does not make the assistant explain what it is doing.
+BuildFlow v1.2.13-beta actions return compact structured results for a Fast Repo Assistant Custom GPT. The GPT must be instructed to narrate progress before each action and summarize compact action results after each action; the schema alone does not make the assistant explain what it is doing. Custom GPT Actions are external API calls, so BuildFlow keeps progress visible by using small, bounded calls rather than hidden loops or streaming claims.
 
 The current Custom GPT surface is exactly these 5 operations. `applyBuildFlowFileChange` carries maintainer sub-operations through `changeType`; `runBuildFlowCommand` is the only raw command/validation/Git execution surface; `commitBuildFlowChanges` batches diff, explicit staging, and commit into one bounded action.
 

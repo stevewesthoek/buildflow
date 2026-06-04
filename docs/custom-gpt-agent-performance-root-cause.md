@@ -16,7 +16,7 @@ BuildFlow will not use the OpenAI API, Responses API, Agents SDK, local AI, or a
 
 ```text
 Custom GPT
-  -> compact 6-action OpenAPI schema
+  -> compact 5-action OpenAPI schema
   -> BuildFlow web action adapter
   -> local BuildFlow service
   -> deterministic source index, exact reads, guarded writes, targeted validation, explicit commits
@@ -65,10 +65,12 @@ Decision: keep local AI out of the GPT-facing path.
 
 ## Current Optimizations
 
-- Custom GPT schema is 6 operations.
-- Custom GPT instructions are compact and repo-assistant oriented.
+- Custom GPT schema is 5 operations.
+- Custom GPT instructions are compact, repo-assistant oriented, and action-budgeted.
 - Default read budget is compact.
 - Search/list limits default narrow.
+- `grep_context`, `read_range`, and `read_symbol` keep large-file inspection bounded.
+- File-specific `search_and_read` degrades to focused grep output instead of huge full-file context.
 - `prepare_task_context` collapses broad search/read discovery into one deterministic planning call.
 - `commitBuildFlowChanges` collapses diff, explicit staging, and commit into one bounded action.
 - Push is not automatic; it runs only when the user explicitly asks.

@@ -3,7 +3,8 @@ import { NextResponse } from 'next/server'
 export function stripBloat(data: unknown): unknown {
   if (!data || typeof data !== 'object') return data
   const obj = { ...(data as Record<string, unknown>) }
-  delete obj.activity
+  // Keep compact `activity` feedback so the Custom GPT can summarize what happened after each action.
+  // Drop only noisy timing/debug payloads that increase latency and token use.
   delete obj._diagnostics
   delete obj.timings
   return obj
