@@ -15,20 +15,43 @@ export type ActionErrorCode =
   | 'LOCAL_STACK_TIMEOUT'
   | 'EMPTY_RELAY_RESPONSE'
   | 'INVALID_RELAY_RESPONSE'
+  | 'BUILDFLOW_ACTION_DEADLINE_EXCEEDED'
+  | 'BUILDFLOW_NEEDS_NARROWER_SCOPE'
   | 'BUILDFLOW_STATUS_ERROR'
   | 'ACTION_TRANSPORT_ERROR'
   | string
 
+export type ActionStatus = 'unavailable' | 'error' | 'timeout' | 'needs_narrower_scope'
+
+export type ActionDiagnostics = {
+  operationId?: string
+  route?: string
+  actionDeadlineMs?: number
+  elapsedMs?: number
+  deadlineMs?: number
+  phase?: string
+  sourceId?: string
+  path?: string
+  paths?: string[]
+  mode?: string
+  commandKind?: string
+  responseBytes?: number
+  suggestedNarrowerMode?: string
+  suggestedNextAction?: string
+  [key: string]: unknown
+}
+
 export type ActionErrorEnvelope = {
   ok: false
-  connected: false
-  status: 'unavailable' | 'error'
+  connected: boolean
+  status: ActionStatus
   error: {
     code: ActionErrorCode
     message: string
     details?: string
     recovery?: string[]
   }
+  diagnostics?: ActionDiagnostics
 }
 
 export function buildActionErrorEnvelope(params: {
@@ -36,18 +59,21 @@ export function buildActionErrorEnvelope(params: {
   message: string
   details?: string
   recovery?: string[]
-  status?: 'unavailable' | 'error'
+  status?: ActionStatus
+  connected?: boolean
+  diagnostics?: ActionDiagnostics
 }): ActionErrorEnvelope {
   return {
     ok: false,
-    connected: false,
+    connected: params.connected ?? false,
     status: params.status || 'error',
     error: {
       code: params.code,
       message: params.message,
       ...(params.details ? { details: params.details } : {}),
       ...(params.recovery && params.recovery.length > 0 ? { recovery: params.recovery } : {})
-    }
+    },
+    ...(params.diagnostics ? { diagnostics: params.diagnostics } : {})
   }
 }
 
@@ -57,7 +83,9 @@ export function buildActionErrorResponse(params: {
   details?: string
   recovery?: string[]
   statusCode?: number
-  status?: 'unavailable' | 'error'
+  status?: ActionStatus
+  connected?: boolean
+  diagnostics?: ActionDiagnostics
 }) {
   return NextResponse.json(
     buildActionErrorEnvelope(params),

@@ -7,7 +7,7 @@ const openapi = {
   info: {
     title: 'BuildFlow API',
     version: '4.0.0',
-    description: 'Fast Repo Assistant actions for local repo status, source context, exact reads, guarded writes, validation commands, and commits.'
+    description: 'Fast Repo Assistant actions. Each action is bounded by a short BuildFlow deadline and returns structured JSON before platform timeouts.'
   },
   servers: [
     {
@@ -25,11 +25,11 @@ const openapi = {
     '/api/actions/status': {
       get: {
         operationId: 'getBuildFlowStatus',
-        summary: 'Status + sources + active context in one call',
+        summary: 'Fast status check with a 4s BuildFlow deadline',
         'x-openai-isConsequential': false,
         security: [bearer],
         parameters: [
-          { name: 'include', in: 'query', schema: { type: 'string', enum: ['sources', 'active', 'all'] }, description: 'Include sources and/or active context. Use all for first call.' }
+          { name: 'include', in: 'query', schema: { type: 'string', enum: ['sources', 'active', 'all'] }, description: 'Include sources and/or active context. Use sources for the first call.' }
         ],
         responses: {
           200: {
@@ -42,7 +42,7 @@ const openapi = {
     '/api/actions/read-context': {
       post: {
         operationId: 'readBuildFlowContext',
-        summary: 'Read files, search, or prepare focused task context',
+        summary: 'Bounded repo context read with an 8s BuildFlow deadline',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -55,20 +55,20 @@ const openapi = {
                 properties: {
                   mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol'] },
                   sourceId: { type: 'string' },
-                  paths: { type: 'array', items: { type: 'string' }, maxItems: 10 },
-                  query: { type: 'string', description: 'Task goal or search query. Use prepare_task_context first for coding tasks so BuildFlow can return a deterministic exact read plan. For file-specific search_and_read with one path, large files degrade to grep_context.' },
-                  path: { type: 'string', description: 'Folder for list_files, or repo-relative file path for grep_context/read_range/read_symbol.' },
-                  pattern: { type: 'string', description: 'Literal or regex pattern for grep_context.' },
+                  paths: { type: 'array', items: { type: 'string' }, maxItems: 5, description: 'At most 5 exact repo-relative paths for GPT use.' },
+                  query: { type: 'string', description: 'Concrete task goal or search query. Broad unscoped queries fail fast with narrower-mode guidance.' },
+                  path: { type: 'string', description: 'Folder for list_files, or exact repo-relative file path for grep_context/read_range/read_symbol.' },
+                  pattern: { type: 'string', description: 'Literal pattern for grep_context. Regex is opt-in and tightly bounded.' },
                   regex: { type: 'boolean', description: 'If true, interpret pattern as a regular expression. Defaults to literal matching.' },
-                  before: { type: 'integer', minimum: 0, maximum: 80, description: 'Lines before each grep_context match.' },
-                  after: { type: 'integer', minimum: 0, maximum: 80, description: 'Lines after each grep_context match.' },
-                  maxMatches: { type: 'integer', minimum: 1, maximum: 25, description: 'Maximum bounded grep_context matches.' },
-                  startLine: { type: 'integer', minimum: 1, description: 'First line for read_range.' },
-                  endLine: { type: 'integer', minimum: 1, description: 'Last line for read_range.' },
-                  symbol: { type: 'string', description: 'TypeScript symbol name for read_symbol.' },
+                  before: { type: 'integer', minimum: 0, maximum: 40, description: 'Lines before each grep_context match. Defaults to 8.' },
+                  after: { type: 'integer', minimum: 0, maximum: 60, description: 'Lines after each grep_context match. Defaults to 12.' },
+                  maxMatches: { type: 'integer', minimum: 1, maximum: 10, description: 'Maximum grep_context matches. Defaults to 5.' },
+                  startLine: { type: 'integer', minimum: 1, description: 'First line for read_range. Output is capped at 250 lines.' },
+                  endLine: { type: 'integer', minimum: 1, description: 'Last line for read_range. Output is capped at 250 lines.' },
+                  symbol: { type: 'string', description: 'TypeScript class/function/const symbol for read_symbol.' },
                   depth: { type: 'integer', minimum: 1, maximum: 5 },
-                  limit: { type: 'integer', minimum: 1, maximum: 10 },
-                  maxBytesPerFile: { type: 'integer', minimum: 1000, maximum: 30000 }
+                  limit: { type: 'integer', minimum: 1, maximum: 5, description: 'Search/list result limit. Defaults to 5.' },
+                  maxBytesPerFile: { type: 'integer', minimum: 1000, maximum: 4000, description: 'Exact read byte cap per file. Defaults to 4000; files over 100 KB require focused modes.' }
                 },
                 required: ['mode', 'sourceId']
               }
@@ -86,7 +86,7 @@ const openapi = {
     '/api/actions/apply-file-change': {
       post: {
         operationId: 'applyBuildFlowFileChange',
-        summary: 'Write, patch, delete, or move a file in the repo',
+        summary: 'Guarded file change with an 8s BuildFlow deadline',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -130,7 +130,7 @@ const openapi = {
     '/api/actions/commit-changes': {
       post: {
         operationId: 'commitBuildFlowChanges',
-        summary: 'Diff + stage + commit in one call',
+        summary: 'Diff, stage explicit paths, and commit within 10s',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -163,7 +163,7 @@ const openapi = {
     '/api/actions/run-command': {
       post: {
         operationId: 'runBuildFlowCommand',
-        summary: 'Run fast allowlisted command',
+        summary: 'Run fast allowlisted command with a 12s GPT cap',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -190,7 +190,7 @@ const openapi = {
                   packageDir: { type: 'string', description: 'Required for run_package_script, run_package_test, and run_package_test_marker. Use "." for the selected source root.' },
                   confirmedByUser: { type: 'boolean', description: 'Only use when the user explicitly confirmed a confirmation-gated safe command.' },
                   confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated safe commands.' },
-                  timeoutMs: { type: 'integer', minimum: 1000, maximum: 30000, description: 'Keep Custom GPT actions under the 45s platform timeout.' }
+                  timeoutMs: { type: 'integer', minimum: 1000, maximum: 12000, description: 'GPT-facing command timeout. Defaults to 5-8s and is capped below the 45s platform timeout.' }
                 },
                 required: ['sourceId', 'commandKind']
               }

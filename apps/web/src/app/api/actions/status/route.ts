@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { executeActionGET, ActionTransportError } from '@/lib/actions/transport'
-import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
+import { executeActionGET } from '@/lib/actions/transport'
 import { listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, unwrapActionError } from '@/lib/actions/gpt'
+import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -13,19 +13,35 @@ export async function GET(request: NextRequest) {
 
   const include = request.nextUrl.searchParams.get('include') || ''
 
-  try {
+  return withGptActionDeadline({
+    operationId: 'getBuildFlowStatus',
+    route: '/api/actions/status',
+    deadlineMs: GPT_ACTION_DEADLINES_MS.status,
+    suggestedNextAction: 'Retry status after checking the local BuildFlow stack.'
+  }, async (deadline) => {
+    deadline.setPhase('check_status')
+    deadline.addDiagnostics({ mode: include || 'status' })
     const payload: Record<string, unknown> = {
       ok: true,
       connected: true
     }
 
     if (include !== 'sources' && include !== 'active' && include !== 'all') {
-      await executeActionGET('/api/status', auth.bearerToken)
+      await executeActionGET('/api/status', auth.bearerToken, {
+        signal: deadline.signal,
+        timeoutMs: deadline.transportTimeoutMs(3500),
+        diagnostics: deadline.diagnostics({ phase: 'status_probe' })
+      })
     }
 
     if (include === 'sources' || include === 'all') {
       try {
-        const sourcesData = await listBuildFlowSources(auth.bearerToken)
+        deadline.setPhase('list_sources')
+        const sourcesData = await listBuildFlowSources(auth.bearerToken, {
+          signal: deadline.signal,
+          timeoutMs: deadline.transportTimeoutMs(2500),
+          diagnostics: deadline.diagnostics({ phase: 'list_sources' })
+        })
         const rawSources = (sourcesData as Record<string, unknown>).sources
         if (Array.isArray(rawSources)) {
           payload.sources = rawSources
@@ -41,33 +57,34 @@ export async function GET(request: NextRequest) {
 
     if (include === 'active' || include === 'all') {
       try {
-        const activeData = await getBuildFlowActiveContext(auth.bearerToken) as Record<string, unknown>
+        deadline.setPhase('get_active_context')
+        const activeData = await getBuildFlowActiveContext(auth.bearerToken, {
+          signal: deadline.signal,
+          timeoutMs: deadline.transportTimeoutMs(1500),
+          diagnostics: deadline.diagnostics({ phase: 'get_active_context' })
+        }) as Record<string, unknown>
         payload.activeSourceIds = activeData.activeSourceIds
         payload.contextMode = activeData.contextMode
       } catch {}
     }
 
-    return NextResponse.json(payload, { headers: { 'Cache-Control': 'no-store' } })
-  } catch (err) {
-    if (err instanceof ActionTransportError) {
-      return NextResponse.json(
-        buildActionErrorEnvelope({
-          code: 'LOCAL_STACK_UNAVAILABLE',
-          message: err.message,
-          status: 'unavailable'
-        }),
-        { status: err.statusCode, headers: { 'Cache-Control': 'no-store' } }
-      )
+    payload.activity = {
+      version: '1.2.13-beta',
+      operationId: 'getBuildFlowStatus',
+      phase: 'completed',
+      actionLabel: 'Checked BuildFlow status',
+      userMessage: include ? `BuildFlow status returned ${include}.` : 'BuildFlow is connected.',
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      nextStep: 'Lock one sourceId and use small focused actions.'
     }
-    return NextResponse.json(
-      buildActionErrorEnvelope({
-        code: 'BUILDFLOW_STATUS_ERROR',
-        message: err instanceof Error ? err.message : String(err),
-        status: 'error'
-      }),
-      { status: 503, headers: { 'Cache-Control': 'no-store' } }
-    )
-  }
+
+    return NextResponse.json(payload, { headers: { 'Cache-Control': 'no-store' } })
+  }).catch((err) => {
+    const { error, status } = unwrapActionError(err, 'status error')
+    return NextResponse.json(error && typeof error === 'object' ? error : { error }, { status, headers: { 'Cache-Control': 'no-store' } })
+  })
 }
 
 export async function POST(request: NextRequest) {

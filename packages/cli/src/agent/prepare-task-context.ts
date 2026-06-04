@@ -7,6 +7,7 @@ import { GPT_ACTION_DEFAULT_FILE_BYTES } from './payload-budget'
 const MAX_CANDIDATE_RESULTS = 12
 const MAX_FILES_TO_EXCERPT = 3
 const DEFAULT_CONTEXT_BYTES_PER_FILE = 800
+const LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES = 100 * 1024
 
 type CandidateFile = {
   sourceId: string
@@ -39,6 +40,7 @@ type PreparedContext = {
     path: string
     purpose: string
     maxBytesPerFile: number
+    suggestedMode?: 'read_paths' | 'grep_context'
   }>
   uncertainty: string[]
   searchNotes: string[]
@@ -112,6 +114,7 @@ function summarizeCandidate(candidate: CandidateFile): string {
 function buildPreparedContext(query: string, candidates: CandidateFile[], totalMs: number, searchMs: number, readMs: number): PreparedContext {
   const readable = candidates.filter(candidate => !candidate.error).slice(0, 5)
   const errored = candidates.filter(candidate => candidate.error)
+  const largeCandidates = readable.filter(candidate => typeof candidate.sizeBytes === 'number' && candidate.sizeBytes > LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES)
 
   return {
     mode: 'prepare_task_context',
@@ -128,19 +131,27 @@ function buildPreparedContext(query: string, candidates: CandidateFile[], totalM
       confidence: confidenceFromScore(candidate.score),
       suggestedRead: true
     })),
-    exactReadPlan: readable.slice(0, 3).map(candidate => ({
-      sourceId: candidate.sourceId,
-      path: candidate.path,
-      purpose: 'Read this file to inspect the relevant implementation before changing code.',
-      maxBytesPerFile: GPT_ACTION_DEFAULT_FILE_BYTES
-    })),
+    exactReadPlan: readable.slice(0, 3).map(candidate => {
+      const largeFile = typeof candidate.sizeBytes === 'number' && candidate.sizeBytes > LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES
+      return {
+        sourceId: candidate.sourceId,
+        path: candidate.path,
+        purpose: largeFile
+          ? 'Large file: use grep_context with a specific symbol or text, then read_range around the match.'
+          : 'Read this file to inspect the relevant implementation before changing code.',
+        maxBytesPerFile: GPT_ACTION_DEFAULT_FILE_BYTES,
+        suggestedMode: largeFile ? 'grep_context' as const : 'read_paths' as const
+      }
+    }),
     uncertainty: [
       ...(readable.length === 0 ? ['No matching files found from the current index.'] : []),
       ...(errored.length > 0 ? [`${errored.length} candidate file(s) could not be excerpted.`] : [])
     ],
     searchNotes: [
       'Deterministic source-index ranking was used.',
-      'Use exact read_paths for the planned files before editing.'
+      largeCandidates.length > 0
+        ? 'Large candidates require focused modes; do not request top-of-file fallback content.'
+        : 'Use exact read_paths for the planned files before editing.'
     ],
     candidates: candidates.slice(0, MAX_CANDIDATE_RESULTS).map(candidate => ({
       sourceId: candidate.sourceId,
@@ -185,6 +196,10 @@ export async function prepareTaskContext(params: {
   const readStartedAt = Date.now()
   for (const candidate of candidates.slice(0, MAX_FILES_TO_EXCERPT)) {
     try {
+      if (typeof candidate.sizeBytes === 'number' && candidate.sizeBytes > LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES) {
+        candidate.truncated = true
+        continue
+      }
       const file = await readFile(candidate.path, candidate.sourceId)
       const redacted = redactSecrets(file.content)
       const truncated = truncateContent(redacted, maxBytesPerFile)

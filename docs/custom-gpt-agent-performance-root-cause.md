@@ -12,6 +12,8 @@ ChatGPT does the reasoning and coding. BuildFlow provides the local execution la
 
 BuildFlow will not use the OpenAI API, Responses API, Agents SDK, local AI, or a separate model runtime for coding inside GPT-facing actions.
 
+OpenAI's current GPT Actions production docs define synchronous action calls with a 45-second request timeout and text-only request/response payloads below 100,000 characters. BuildFlow's response is to fail fast well before that ceiling, not to promise that Cloudflare, ChatGPT, or the user's network can never fail.
+
 ## Optimized Architecture
 
 ```text
@@ -42,6 +44,14 @@ Recommended task budget:
 - hard action budget: 3 BuildFlow actions per response, preferably 1-2
 - larger work: plan first, complete only the first safe slice, then stop with a resume point
 
+BuildFlow route deadlines:
+
+- `getBuildFlowStatus`: 4s
+- `readBuildFlowContext`: 8s
+- `applyBuildFlowFileChange`: 8s
+- `commitBuildFlowChanges`: 10s
+- `runBuildFlowCommand`: 12s cap, with smaller command defaults
+
 ## What Does Not Work
 
 Do not build or document these as the Custom GPT path:
@@ -69,11 +79,12 @@ Decision: keep local AI out of the GPT-facing path.
 
 - Custom GPT schema is 5 operations.
 - Custom GPT instructions are compact, repo-assistant oriented, and action-budgeted.
-- Default read budget is compact.
-- Search/list limits default narrow.
+- Default read budget is compact: 4 KB per file, 5 search/list results, and at most 5 read paths.
 - `grep_context`, `read_range`, and `read_symbol` keep large-file inspection bounded.
+- Bulk reads refuse files over 100 KB and return metadata plus a focused-read suggestion instead of top-of-file fallback content.
 - File-specific `search_and_read` degrades to focused grep output instead of huge full-file context.
 - `prepare_task_context` collapses broad search/read discovery into one deterministic planning call.
+- GPT-facing routes return structured timeout or narrower-scope JSON before gateway timeout paths.
 - `commitBuildFlowChanges` collapses diff, explicit staging, and commit into one bounded action.
 - Push is not automatic; it runs only when the user explicitly asks.
 - Long-running job or polling routes are not exposed in the Custom GPT schema.
@@ -100,6 +111,7 @@ Further optimization should reduce action chatter:
 - preserve compact action activity so the GPT can summarize progress after each action
 - add compact diagnostics when field diagnosis needs visibility
 - keep relay parity with the direct local API
+- keep backend fetch timeouts and command process timeouts shorter than the route deadline
 
 ## UI Stability Boundary
 

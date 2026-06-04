@@ -34,6 +34,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   const fastify = Fastify({ logger: true })
   const READ_FILES_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BUDGET_BYTES
   const DEFAULT_READ_FILES_MAX_BYTES_PER_FILE = GPT_ACTION_DEFAULT_FILE_BYTES
+  const MAX_READ_FILES_PATHS = 5
+  const LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES = 100 * 1024
 
   const indexer = new Indexer()
   const config = loadConfig()
@@ -583,7 +585,15 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const targets = getResolvedActiveSources(resolvedSourceIds.length > 0 ? resolvedSourceIds : undefined)
       const files: Array<Record<string, unknown>> = []
       const skipped: Array<Record<string, unknown>> = []
-      const normalizedPaths = relPaths.slice(0, 10)
+      const normalizedPaths = relPaths.slice(0, MAX_READ_FILES_PATHS)
+      for (const relPath of relPaths.slice(MAX_READ_FILES_PATHS)) {
+        skipped.push({
+          path: relPath,
+          reason: 'max_paths_exceeded',
+          suggestedMode: 'read_paths',
+          suggestedNextAction: 'Split read_paths into at most 5 explicit paths.'
+        })
+      }
       let returnedBytes = 0
 
       const approxResponseBytes = (file: { sourceId?: string; path: string; content?: string; truncated?: boolean; sizeBytes?: number; modifiedAt?: string }) =>
@@ -592,14 +602,30 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       for (const relPath of normalizedPaths) {
         let found = false
         const pathErrors: string[] = []
-        let bestCandidate: { sourceId: string; content: string; sizeBytes: number; modifiedAt: string; truncated: boolean; responseBytes: number } | null = null
+        let bestCandidate: { sourceId: string; path: string; content: string; sizeBytes: number; modifiedAt: string; truncated: boolean; responseBytes: number; largeFile?: boolean } | null = null
         for (const source of targets) {
           try {
+            const fullPath = path.resolve(path.join(source.path, path.normalize(relPath)))
+            if (!fullPath.startsWith(path.resolve(source.path))) throw new Error('Path escaped the source root')
+            const stat = await fsp.stat(fullPath)
+            if (!stat.isFile()) throw new Error('Not a file')
+            if (stat.size > LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES) {
+              bestCandidate = {
+                sourceId: source.id,
+                path: relPath,
+                content: '',
+                truncated: true,
+                sizeBytes: stat.size,
+                modifiedAt: stat.mtime.toISOString(),
+                largeFile: true,
+                responseBytes: approxResponseBytes({ sourceId: source.id, path: relPath, sizeBytes: stat.size, modifiedAt: stat.mtime.toISOString() })
+              }
+              found = true
+              break
+            }
             const result = await readFile(relPath, source.id)
             const content = redactSecrets(result.content)
             const truncated = truncateContent(content, maxBytesPerFile)
-            const fullPath = path.join(source.path, path.normalize(relPath))
-            const stat = await fsp.stat(fullPath)
             const candidate = {
               sourceId: source.id,
               path: relPath,
@@ -623,14 +649,46 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           continue
         }
 
+        if (bestCandidate.largeFile) {
+          skipped.push({
+            path: relPath,
+            sourceId: bestCandidate.sourceId,
+            sizeBytes: bestCandidate.sizeBytes,
+            modifiedAt: bestCandidate.modifiedAt,
+            reason: 'large_file_requires_focused_read',
+            suggestedMode: 'grep_context',
+            suggestedNextAction: 'Use grep_context with a specific pattern, then read_range around the matching line.',
+            exampleNextCall: {
+              mode: 'grep_context',
+              sourceId: bestCandidate.sourceId,
+              path: relPath,
+              pattern: '<specific symbol or text>',
+              before: 8,
+              after: 12,
+              maxMatches: 5
+            }
+          })
+          files.push({
+            sourceId: bestCandidate.sourceId,
+            path: relPath,
+            contentReturned: false,
+            sizeBytes: bestCandidate.sizeBytes,
+            modifiedAt: bestCandidate.modifiedAt,
+            reason: 'large_file_requires_focused_read',
+            suggestedMode: 'grep_context'
+          })
+          continue
+        }
+
         const wouldExceedBudget = returnedBytes + bestCandidate.responseBytes > READ_FILES_RESPONSE_BUDGET_BYTES
-        const fileTooLarge = bestCandidate.sizeBytes > maxBytesPerFile
         if (wouldExceedBudget) {
           skipped.push({
             path: relPath,
             sourceId: bestCandidate.sourceId,
             sizeBytes: bestCandidate.sizeBytes,
-            reason: fileTooLarge ? 'file_too_large' : 'response_budget_exceeded'
+            reason: 'response_budget_exceeded',
+            suggestedMode: 'read_range',
+            suggestedNextAction: 'Use read_range or grep_context for this file.'
           })
           continue
         }

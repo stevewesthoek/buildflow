@@ -1,8 +1,8 @@
 export declare const GPT_ACTION_RESPONSE_BUDGET_BYTES = 32000;
 export declare const GPT_ACTION_TARGET_BYTES = 8000;
 export declare const GPT_ACTION_WARNING_BYTES = 16000;
-export declare const GPT_ACTION_DEFAULT_FILE_BYTES = 6000;
-export declare const GPT_ACTION_DEFAULT_INSPECT_LIMIT = 10;
+export declare const GPT_ACTION_DEFAULT_FILE_BYTES = 4000;
+export declare const GPT_ACTION_DEFAULT_INSPECT_LIMIT = 5;
 export type PayloadBudgetReport = {
     bytes: number;
     targetBytes: number;

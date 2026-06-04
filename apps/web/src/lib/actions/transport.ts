@@ -1,5 +1,5 @@
 import { getBackendUrl, getBackendMode } from './config'
-import { buildActionErrorEnvelope } from './action-response'
+import { buildActionErrorEnvelope, type ActionDiagnostics } from './action-response'
 
 export class ActionTransportError extends Error {
   constructor(message: string, public statusCode: number, public payload?: unknown) {
@@ -31,10 +31,16 @@ type TransportDiagnostics = {
   proxyMs?: number
 }
 
-const REQUEST_TIMEOUT_MS = 30000
+const REQUEST_TIMEOUT_MS = 12000
+
+export type ActionTransportOptions = {
+  timeoutMs?: number
+  signal?: AbortSignal
+  diagnostics?: ActionDiagnostics
+}
 
 function isTimeoutError(err: unknown) {
-  return err instanceof DOMException && err.name === 'AbortError'
+  return err instanceof Error && err.name === 'AbortError'
 }
 
 function isConnectionError(err: unknown) {
@@ -80,10 +86,22 @@ async function readJsonResponse(response: Response, endpoint: string): Promise<F
   return { response, text, data, readMs, parseMs: Date.now() - parseStartedAt, responseBytes }
 }
 
-function normalizeTransportFailure(err: unknown, endpoint: string, timeoutMs = REQUEST_TIMEOUT_MS) {
+function compactDiagnostics(input: ActionDiagnostics): ActionDiagnostics {
+  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined && value !== null)) as ActionDiagnostics
+}
+
+function normalizeTransportFailure(err: unknown, endpoint: string, options: { timeoutMs: number; startedAt: number; diagnostics?: ActionDiagnostics }) {
   if (err instanceof ActionTransportError) {
     return err
   }
+
+  const diagnostics = compactDiagnostics({
+    ...(options.diagnostics || {}),
+    endpoint,
+    elapsedMs: Date.now() - options.startedAt,
+    deadlineMs: options.timeoutMs,
+    responseBytes: 0
+  })
 
   if (isTimeoutError(err)) {
     return new ActionTransportError(
@@ -92,9 +110,10 @@ function normalizeTransportFailure(err: unknown, endpoint: string, timeoutMs = R
       buildActionErrorEnvelope({
         code: 'LOCAL_STACK_TIMEOUT',
         message: 'BuildFlow local stack timed out.',
-        details: `The request to ${endpoint} exceeded ${timeoutMs}ms.`,
+        details: `The request to ${endpoint} exceeded ${options.timeoutMs}ms.`,
         recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
-        status: 'unavailable'
+        status: 'timeout',
+        diagnostics
       })
     )
   }
@@ -108,7 +127,8 @@ function normalizeTransportFailure(err: unknown, endpoint: string, timeoutMs = R
         message: 'BuildFlow local stack is unavailable.',
         details: 'Docker/OrbStack may be stopped or the relay is not running.',
         recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
-        status: 'unavailable'
+        status: 'unavailable',
+        diagnostics
       })
     )
   }
@@ -120,18 +140,31 @@ function normalizeTransportFailure(err: unknown, endpoint: string, timeoutMs = R
       code: 'ACTION_TRANSPORT_ERROR',
       message: 'Backend request failed.',
       details: err instanceof Error ? err.message : String(err),
-      status: 'error'
+      status: 'error',
+      diagnostics
     })
   )
 }
 
-export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS) {
+export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS, options: { signal?: AbortSignal } = {}) {
   const controller = new AbortController()
+  const parentSignals = [options.signal, init.signal].filter((signal): signal is AbortSignal => Boolean(signal))
+  const abortFromParent = () => controller.abort()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
+    for (const signal of parentSignals) {
+      if (signal.aborted) {
+        controller.abort()
+        break
+      }
+      signal.addEventListener('abort', abortFromParent, { once: true })
+    }
     return await fetch(url, { ...init, signal: controller.signal })
   } finally {
     clearTimeout(timer)
+    for (const signal of parentSignals) {
+      signal.removeEventListener('abort', abortFromParent)
+    }
   }
 }
 
@@ -171,13 +204,15 @@ function proxyMsFrom(response: Response): number | undefined {
 export async function executeAction(
   endpoint: string,
   body: Record<string, unknown>,
-  userToken?: string
+  userToken?: string,
+  options: ActionTransportOptions = {}
 ): Promise<unknown> {
   const backendUrl = getBackendUrl()
   const mode = getBackendMode()
   const url = `${backendUrl}${endpoint}`
   const totalStartedAt = Date.now()
   const requestBytes = bytesOfJson(body)
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -192,7 +227,7 @@ export async function executeAction(
       method: 'POST',
       headers,
       body: bodyJson
-    })
+    }, timeoutMs, { signal: options.signal })
     const fetchMs = Date.now() - fetchStartedAt
 
     if (!response.ok) {
@@ -208,7 +243,21 @@ export async function executeAction(
       const message = typeof (errorData as Record<string, unknown>).error === 'string'
         ? (errorData as Record<string, unknown>).error as string
         : `Action failed: ${response.status}`
-      throw new ActionTransportError(message, response.status, errorData)
+      const payload = errorData && typeof errorData === 'object' && !Array.isArray(errorData)
+        ? {
+            ...(errorData as Record<string, unknown>),
+            diagnostics: compactDiagnostics({
+              ...(options.diagnostics || {}),
+              ...(((errorData as Record<string, unknown>).diagnostics && typeof (errorData as Record<string, unknown>).diagnostics === 'object')
+                ? (errorData as Record<string, unknown>).diagnostics as Record<string, unknown>
+                : {}),
+              endpoint,
+              elapsedMs: Date.now() - totalStartedAt,
+              responseBytes: Buffer.byteLength(errorText, 'utf8')
+            })
+          }
+        : errorData
+      throw new ActionTransportError(message, response.status, payload)
     }
 
     const parsed = await readJsonResponse(response, endpoint)
@@ -226,17 +275,19 @@ export async function executeAction(
       ...(proxyMsFrom(response) !== undefined ? { proxyMs: proxyMsFrom(response) } : {})
     })
   } catch (err) {
-    throw normalizeTransportFailure(err, endpoint)
+    throw normalizeTransportFailure(err, endpoint, { timeoutMs, startedAt: totalStartedAt, diagnostics: options.diagnostics })
   }
 }
 
 export async function executeActionGET(
   endpoint: string,
-  userToken?: string
+  userToken?: string,
+  options: ActionTransportOptions = {}
 ): Promise<{ data: unknown; status: number }> {
   const mode = getBackendMode()
   const backendUrl = getBackendUrl()
   const totalStartedAt = Date.now()
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS
 
   // In relay-agent mode: convert to POST through proxy endpoint (cleaner than bridge GET support)
   if (mode === 'relay-agent') {
@@ -256,7 +307,7 @@ export async function executeActionGET(
         method: 'POST',
         headers,
         body: JSON.stringify({})
-      })
+      }, timeoutMs, { signal: options.signal })
       const fetchMs = Date.now() - fetchStartedAt
 
       const parsed = await readJsonResponse(response, endpoint)
@@ -275,7 +326,7 @@ export async function executeActionGET(
       })
       return { data, status: response.status }
     } catch (err) {
-      throw normalizeTransportFailure(err, endpoint)
+      throw normalizeTransportFailure(err, endpoint, { timeoutMs, startedAt: totalStartedAt, diagnostics: options.diagnostics })
     }
   }
 
@@ -290,7 +341,7 @@ export async function executeActionGET(
       method: 'GET',
       headers,
       cache: 'no-store'
-    })
+    }, timeoutMs, { signal: options.signal })
     const fetchMs = Date.now() - fetchStartedAt
 
     const parsed = await readJsonResponse(response, endpoint)
@@ -309,6 +360,6 @@ export async function executeActionGET(
     })
     return { data, status: response.status }
   } catch (err) {
-    throw normalizeTransportFailure(err, endpoint)
+    throw normalizeTransportFailure(err, endpoint, { timeoutMs, startedAt: totalStartedAt, diagnostics: options.diagnostics })
   }
 }

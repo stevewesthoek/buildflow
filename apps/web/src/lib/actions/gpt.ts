@@ -1,4 +1,4 @@
-import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout } from './transport'
+import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout, type ActionTransportOptions } from './transport'
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_DEFAULT_INSPECT_LIMIT } from '@buildflow/shared'
@@ -238,6 +238,12 @@ function countLabel(count: number, singular: string, plural?: string): string {
   return `${count} ${count === 1 ? singular : plural || `${singular}s`}`
 }
 
+function boundedActionInt(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return fallback
+  return Math.max(min, Math.min(max, Math.floor(numeric)))
+}
+
 type SearchAttemptResult = {
   result: Record<string, unknown>
   results: Array<Record<string, unknown>>
@@ -251,9 +257,9 @@ function hasExplicitSearchMode(query: string): boolean {
   return /^(content|full):/i.test(query.trim())
 }
 
-async function executeSearchWithContentFallback(payload: Record<string, unknown>, userToken?: string): Promise<SearchAttemptResult> {
+async function executeSearchWithContentFallback(payload: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions): Promise<SearchAttemptResult> {
   const query = typeof payload.query === 'string' ? payload.query : ''
-  const firstResult = await executeAction('/api/search', payload, userToken) as Record<string, unknown>
+  const firstResult = await executeAction('/api/search', payload, userToken, transportOptions) as Record<string, unknown>
   const firstResults = Array.isArray(firstResult.results) ? firstResult.results as Array<Record<string, unknown>> : []
   const firstTimings = firstResult.timings && typeof firstResult.timings === 'object' && !Array.isArray(firstResult.timings)
     ? firstResult.timings as Record<string, unknown>
@@ -271,7 +277,7 @@ async function executeSearchWithContentFallback(payload: Record<string, unknown>
   }
 
   const fallbackQuery = `content:${query}`
-  const fallbackResult = await executeAction('/api/search', { ...payload, query: fallbackQuery }, userToken) as Record<string, unknown>
+  const fallbackResult = await executeAction('/api/search', { ...payload, query: fallbackQuery }, userToken, transportOptions) as Record<string, unknown>
   const fallbackResults = Array.isArray(fallbackResult.results) ? fallbackResult.results as Array<Record<string, unknown>> : []
   const fallbackTimings = fallbackResult.timings && typeof fallbackResult.timings === 'object' && !Array.isArray(fallbackResult.timings)
     ? fallbackResult.timings as Record<string, unknown>
@@ -511,13 +517,54 @@ function assertVerifiedWriteResult(result: unknown, fallback: string): VerifiedW
   }
 }
 
-async function fetchJson(endpoint: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetchWithTimeout(`${getBackendUrl()}${endpoint}`, init ?? {}, 10000)
+async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?: ActionTransportOptions): Promise<unknown> {
+  const startedAt = Date.now()
+  const timeoutMs = transportOptions?.timeoutMs ?? 10000
+  let response: Response
+  try {
+    response = await fetchWithTimeout(
+      `${getBackendUrl()}${endpoint}`,
+      init ?? {},
+      timeoutMs,
+      { signal: transportOptions?.signal }
+    )
+  } catch (err) {
+    const isAbort = err instanceof Error && err.name === 'AbortError'
+    throw new ActionTransportError(
+      isAbort ? `Timed out waiting for ${endpoint}` : `Action failed: ${endpoint}`,
+      isAbort ? 504 : 503,
+      buildActionErrorEnvelope({
+        code: isAbort ? 'LOCAL_STACK_TIMEOUT' : 'ACTION_TRANSPORT_ERROR',
+        message: isAbort ? 'BuildFlow local stack timed out.' : 'Backend request failed.',
+        details: isAbort ? `The request to ${endpoint} exceeded ${timeoutMs}ms.` : err instanceof Error ? err.message : String(err),
+        status: isAbort ? 'timeout' : 'error',
+        diagnostics: {
+          ...(transportOptions?.diagnostics || {}),
+          endpoint,
+          elapsedMs: Date.now() - startedAt,
+          deadlineMs: timeoutMs
+        }
+      })
+    )
+  }
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}))
     throw new ActionTransportError(
       (errorData as Record<string, unknown>).error as string || `Action failed: ${response.status}`,
-      response.status
+      response.status,
+      errorData && typeof errorData === 'object' && !Array.isArray(errorData)
+        ? {
+            ...(errorData as Record<string, unknown>),
+            diagnostics: {
+              ...(transportOptions?.diagnostics || {}),
+              ...(((errorData as Record<string, unknown>).diagnostics && typeof (errorData as Record<string, unknown>).diagnostics === 'object')
+                ? (errorData as Record<string, unknown>).diagnostics as Record<string, unknown>
+                : {}),
+              endpoint,
+              elapsedMs: Date.now() - startedAt
+            }
+          }
+        : errorData
     )
   }
   return response.json()
@@ -560,20 +607,20 @@ function validateContextSelection(body: Record<string, unknown>) {
   }
 }
 
-async function loadSourceMap(userToken?: string) {
+async function loadSourceMap(userToken?: string, transportOptions?: ActionTransportOptions) {
   const mode = getBackendMode()
   const headers: Record<string, string> = { method: 'GET' }
   if (mode === 'relay-agent' && userToken) {
     headers['Authorization'] = `Bearer ${userToken}`
   }
-  const sourcesPayload = await fetchJson('/api/sources/list', { method: 'GET', headers })
+  const sourcesPayload = await fetchJson('/api/sources/list', { method: 'GET', headers }, transportOptions)
   const sources = normalizeSourcesList(sourcesPayload)
   const map = new Map(sources.map(source => [source.id, source]))
   return { sourcesPayload, sources, map }
 }
 
-async function ensureContextSourcesAllowed(sourceIds: string[], userToken?: string) {
-  const { map } = await loadSourceMap(userToken)
+async function ensureContextSourcesAllowed(sourceIds: string[], userToken?: string, transportOptions?: ActionTransportOptions) {
+  const { map } = await loadSourceMap(userToken, transportOptions)
   for (const id of sourceIds) {
     const source = map.get(id)
     if (!source) {
@@ -593,13 +640,13 @@ export function attachWriteConfirmation(payload: Record<string, unknown>, body: 
   }
 }
 
-async function preflightWrite(body: Record<string, unknown>, userToken?: string) {
+async function preflightWrite(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const sourceError = await requireExplicitSourceId(body, userToken)
   if (sourceError) return sourceError
   const sourceId = typeof body.sourceId === 'string' ? body.sourceId : undefined
   const path = typeof body.path === 'string' ? body.path : typeof body.from === 'string' ? body.from : ''
   const changeType = body.changeType === 'append' || body.changeType === 'overwrite' || body.changeType === 'patch' || body.changeType === 'delete_file' || body.changeType === 'delete_directory' || body.changeType === 'move' || body.changeType === 'rename' || body.changeType === 'mkdir' || body.changeType === 'rmdir' ? body.changeType : 'create'
-  const sourceMap = await loadSourceMap(userToken)
+  const sourceMap = await loadSourceMap(userToken, transportOptions)
   const source = sourceId ? sourceMap.map.get(sourceId) : sourceMap.sources[0]
   const policy = (source?.writePolicy || {}) as WritePolicy
   const normalizedPath = normalizePath(path)
@@ -647,13 +694,13 @@ async function preflightWrite(body: Record<string, unknown>, userToken?: string)
 }
 
 // List all connected sources with their indexed/writable status and write policy; returns activity narration.
-export async function listBuildFlowSources(userToken?: string) {
+export async function listBuildFlowSources(userToken?: string, transportOptions?: ActionTransportOptions) {
   const mode = getBackendMode()
   const headers: Record<string, string> = { method: 'GET' }
   if (mode === 'relay-agent' && userToken) {
     headers['Authorization'] = `Bearer ${userToken}`
   }
-  const sourcesPayload = await fetchJson('/api/sources/list?lite=1', { method: 'GET', headers })
+  const sourcesPayload = await fetchJson('/api/sources/list?lite=1', { method: 'GET', headers }, transportOptions)
   const sources = normalizeSourcesList(sourcesPayload).map(source => ({
     id: source.id,
     label: source.label,
@@ -684,8 +731,8 @@ export async function listBuildFlowSources(userToken?: string) {
 }
 
 // Get the currently active source context (single or multi-mode); returns activity narration.
-export async function getBuildFlowActiveContext(userToken?: string) {
-  const activePayload = await executeAction('/api/get-active-sources?lite=1', {}, userToken)
+export async function getBuildFlowActiveContext(userToken?: string, transportOptions?: ActionTransportOptions) {
+  const activePayload = await executeAction('/api/get-active-sources?lite=1', {}, userToken, transportOptions)
   const context = normalizeActiveContext(activePayload)
   return withActivity(context, makeActivity({
     operationId: 'getBuildFlowActiveContext',
@@ -704,13 +751,13 @@ export async function getBuildFlowActiveContext(userToken?: string) {
 }
 
 // Change the active source context to single or multi-mode; validates selection and returns updated context with activity narration.
-export async function setBuildFlowActiveContext(body: Record<string, unknown>, userToken?: string) {
+export async function setBuildFlowActiveContext(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   validateContextSelection(body)
-  await ensureContextSourcesAllowed(body.sourceIds as string[], userToken)
+  await ensureContextSourcesAllowed(body.sourceIds as string[], userToken, transportOptions)
   const result = await executeAction('/api/set-active-sources', {
     mode: body.contextMode,
     activeSourceIds: body.sourceIds
-  }, userToken)
+  }, userToken, transportOptions)
   const context = normalizeContextResult(result, result)
   return withActivity(context, makeActivity({
     operationId: 'setBuildFlowActiveContext',
@@ -727,22 +774,22 @@ export async function setBuildFlowActiveContext(body: Record<string, unknown>, u
 }
 
 // Route context operations (list, get, set) to specialized handlers; dispatches based on action field.
-export async function dispatchBuildFlowContext(body: Record<string, unknown>, userToken?: string) {
+export async function dispatchBuildFlowContext(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const action = body.action
   if (action === 'list_sources') {
-    return listBuildFlowSources(userToken)
+    return listBuildFlowSources(userToken, transportOptions)
   }
   if (action === 'get_active') {
-    return getBuildFlowActiveContext(userToken)
+    return getBuildFlowActiveContext(userToken, transportOptions)
   }
   if (action === 'set_active') {
-    return setBuildFlowActiveContext(body, userToken)
+    return setBuildFlowActiveContext(body, userToken, transportOptions)
   }
   throw new Error('Invalid action')
 }
 
 // Inspect vault structure or search; supports list_files and search modes; returns results with activity narration.
-export async function dispatchBuildFlowInspect(body: Record<string, unknown>, userToken?: string) {
+export async function dispatchBuildFlowInspect(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const scopeError = requireExplicitReadScope(body)
   if (scopeError) return scopeError
   const mode = body.mode
@@ -750,11 +797,11 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
     const payload: Record<string, unknown> = {
       path: typeof body.path === 'string' ? body.path : '',
       depth: typeof body.depth === 'number' ? body.depth : 3,
-      limit: typeof body.limit === 'number' ? body.limit : GPT_ACTION_DEFAULT_INSPECT_LIMIT
+      limit: boundedActionInt(body.limit, GPT_ACTION_DEFAULT_INSPECT_LIMIT, 1, 5)
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
-    const result = await executeAction('/api/list-files', payload, userToken)
+    const result = await executeAction('/api/list-files', payload, userToken, transportOptions)
     const entries = Array.isArray((result as { entries?: unknown }).entries) ? (result as { entries: unknown[] }).entries : []
     const pathList = entries
       .map(entry => typeof entry === 'object' && entry !== null && typeof (entry as Record<string, unknown>).path === 'string' ? (entry as Record<string, unknown>).path as string : '')
@@ -776,11 +823,11 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
     if (typeof body.query !== 'string' || !body.query) throw new Error('Missing query parameter')
     const payload: Record<string, unknown> = {
       query: body.query,
-      limit: typeof body.limit === 'number' ? body.limit : GPT_ACTION_DEFAULT_INSPECT_LIMIT
+      limit: boundedActionInt(body.limit, GPT_ACTION_DEFAULT_INSPECT_LIMIT, 1, 5)
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
-    const search = await executeSearchWithContentFallback(payload, userToken)
+    const search = await executeSearchWithContentFallback(payload, userToken, transportOptions)
     const result = search.result
     const results = search.results
     const paths = results
@@ -806,19 +853,20 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
 }
 
 // Read files from vault; supports read_paths and search_and_read modes; handles source routing and truncation; returns activity narration.
-export async function dispatchBuildFlowRead(body: Record<string, unknown>, userToken?: string) {
+export async function dispatchBuildFlowRead(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const scopeError = requireExplicitReadScope(body)
   if (scopeError) return scopeError
   const mode = body.mode
   if (mode === 'read_paths') {
     if (!Array.isArray(body.paths) || body.paths.length === 0) throw new Error('Missing paths parameter')
+    const paths = body.paths.filter(path => typeof path === 'string' && path.trim().length > 0).slice(0, 5)
     const payload: Record<string, unknown> = {
-      paths: body.paths,
-      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : GPT_ACTION_DEFAULT_FILE_BYTES
+      paths,
+      maxBytesPerFile: boundedActionInt(body.maxBytesPerFile, GPT_ACTION_DEFAULT_FILE_BYTES, 1000, 4000)
     }
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
-    const result = await executeAction('/api/read-files', payload, userToken)
+    const result = await executeAction('/api/read-files', payload, userToken, transportOptions)
     const files = Array.isArray((result as { files?: unknown }).files) ? (result as { files: Array<Record<string, unknown>> }).files : []
     const skipped = Array.isArray((result as { skipped?: unknown }).skipped) ? (result as { skipped: Array<Record<string, unknown>> }).skipped : []
     const nextBatch = (result as { nextBatch?: Record<string, unknown> }).nextBatch
@@ -830,6 +878,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     return withActivity({
       mode: 'read_paths',
       files,
+      ...(Array.isArray(body.paths) && body.paths.length > paths.length ? { refusedPaths: (body.paths as unknown[]).slice(paths.length).filter(path => typeof path === 'string') } : {}),
       ...(skipped.length > 0 ? { skipped } : {}),
       ...(nextBatch ? { nextBatch } : {}),
       ...(typeof budgetBytes === 'number' ? { budgetBytes } : {}),
@@ -857,12 +906,12 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     if (typeof body.query !== 'string' || !body.query) throw new Error('Missing query parameter')
     const searchPayload: Record<string, unknown> = {
       query: body.query,
-      limit: typeof body.limit === 'number' ? body.limit : 3
+      limit: boundedActionInt(body.limit, GPT_ACTION_DEFAULT_INSPECT_LIMIT, 1, 5)
     }
     if (Array.isArray(body.sourceIds)) searchPayload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') searchPayload.sourceId = body.sourceId
 
-    const search = await executeSearchWithContentFallback(searchPayload, userToken)
+    const search = await executeSearchWithContentFallback(searchPayload, userToken, transportOptions)
     const searchTimings = search.timings
     const results = search.results
 
@@ -896,12 +945,12 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
         return path ? { path, sourceId } : null
       })
       .filter((entry): entry is { path: string; sourceId: string | undefined } => entry !== null)
-      .slice(0, typeof body.limit === 'number' ? body.limit : 3)
+      .slice(0, boundedActionInt(body.limit, GPT_ACTION_DEFAULT_INSPECT_LIMIT, 1, 5))
 
     const sourceIds = Array.from(new Set(pathEntries.map(entry => entry.sourceId).filter((id): id is string => typeof id === 'string' && id.length > 0)))
     const readPayload: Record<string, unknown> = {
       paths: pathEntries.map(entry => entry.path),
-      maxBytesPerFile: typeof body.maxBytesPerFile === 'number' ? body.maxBytesPerFile : GPT_ACTION_DEFAULT_FILE_BYTES
+      maxBytesPerFile: boundedActionInt(body.maxBytesPerFile, GPT_ACTION_DEFAULT_FILE_BYTES, 1000, 4000)
     }
     if (sourceIds.length > 0) {
       readPayload.sourceIds = sourceIds
@@ -909,7 +958,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
       readPayload.sourceId = body.sourceId
     }
 
-    const readResult = await executeAction('/api/read-files', readPayload, userToken)
+    const readResult = await executeAction('/api/read-files', readPayload, userToken, transportOptions)
     const readTimings = (readResult as { timings?: Record<string, unknown> }).timings
     const files = Array.isArray((readResult as { files?: unknown }).files)
       ? ((readResult as { files: Array<Record<string, unknown>> }).files || [])
@@ -973,13 +1022,13 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
     if (typeof body.query !== 'string' || !body.query) throw new Error('Missing query parameter')
     const payload: Record<string, unknown> = {
       query: body.query,
-      limit: typeof body.limit === 'number' ? body.limit : 8
+      limit: boundedActionInt(body.limit, GPT_ACTION_DEFAULT_INSPECT_LIMIT, 1, 5)
     }
-    if (Array.isArray(body.paths)) payload.paths = body.paths
-    if (typeof body.maxBytesPerFile === 'number') payload.maxBytesPerFile = body.maxBytesPerFile
+    if (Array.isArray(body.paths)) payload.paths = body.paths.filter(path => typeof path === 'string' && path.trim().length > 0).slice(0, 5)
+    payload.maxBytesPerFile = boundedActionInt(body.maxBytesPerFile, GPT_ACTION_DEFAULT_FILE_BYTES, 1000, 4000)
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
-    const result = await executeAction('/api/prepare-task-context', payload, userToken)
+    const result = await executeAction('/api/prepare-task-context', payload, userToken, transportOptions)
     const exactReadPlan = Array.isArray((result as { exactReadPlan?: unknown }).exactReadPlan)
       ? (result as { exactReadPlan: Array<Record<string, unknown>> }).exactReadPlan
       : []
@@ -1031,7 +1080,7 @@ const SAFE_COMMAND_KINDS = new Set([
 ])
 
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
-export async function dispatchBuildFlowCommand(body: Record<string, unknown>, userToken?: string) {
+export async function dispatchBuildFlowCommand(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
   const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''
   if (!sourceId) throw new Error('sourceId is required')
@@ -1051,7 +1100,7 @@ export async function dispatchBuildFlowCommand(body: Record<string, unknown>, us
     patternSet: typeof body.patternSet === 'string' ? body.patternSet : undefined,
     confirmedByUser: typeof body.confirmedByUser === 'boolean' ? body.confirmedByUser : undefined,
     confirmationToken: typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
-  }, userToken)
+  }, userToken, transportOptions)
   const status = typeof (result as Record<string, unknown>).status === 'string' ? (result as Record<string, unknown>).status : 'failed'
   const exitCode = typeof (result as Record<string, unknown>).exitCode === 'number' ? (result as Record<string, unknown>).exitCode : null
   const outputTruncated = (result as Record<string, unknown>).outputTruncated === true
@@ -1075,7 +1124,7 @@ export async function dispatchBuildFlowCommand(body: Record<string, unknown>, us
 }
 
 // Create an artifact (personal note) in vault; supports preflight and dry-run; enforces write policy; returns activity narration.
-export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, userToken?: string) {
+export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const artifactPath = composeArtifactRelativePath({
     title: typeof body.title === 'string' ? body.title : 'artifact',
     folder: typeof body.folder === 'string' ? body.folder : undefined,
@@ -1084,7 +1133,7 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
   if (body.dryRun === true || body.preflight === true) {
     const sourceError = await requireExplicitSourceId(body, userToken)
     if (sourceError) return sourceError
-    const sourceMap = await loadSourceMap(userToken)
+    const sourceMap = await loadSourceMap(userToken, transportOptions)
     const sourceId = typeof body.sourceId === 'string' ? body.sourceId : undefined
     const source = sourceId ? sourceMap.map.get(sourceId) : sourceMap.sources[0]
     const policy = (source?.writePolicy || {}) as WritePolicy
@@ -1110,7 +1159,7 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
         nextStep: contentRisk.hint || 'Use redacted placeholders or choose another file.'
       }))
     }
-    const result = await preflightWrite({ ...body, path: artifactPath, changeType: 'create' }, userToken) as {
+    const result = await preflightWrite({ ...body, path: artifactPath, changeType: 'create' }, userToken, transportOptions) as {
       status: 'allowed' | 'needs_confirmation' | 'error'
       allowed?: boolean
       verified: boolean
@@ -1143,7 +1192,7 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
   }
   const sourceError = await requireExplicitSourceId(body, userToken)
   if (sourceError) return sourceError
-  const result = await executeAction('/api/create-artifact', { ...body, path: artifactPath }, userToken)
+  const result = await executeAction('/api/create-artifact', { ...body, path: artifactPath }, userToken, transportOptions)
   const verified = assertVerifiedWriteResult(result, 'writeBuildFlowArtifact')
   const sourceId = typeof (result as Record<string, unknown>).sourceId === 'string' ? (result as Record<string, unknown>).sourceId as string : typeof body.sourceId === 'string' ? body.sourceId : undefined
   const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : artifactPath
@@ -1163,9 +1212,9 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
 }
 
 // Apply file operations (create, append, overwrite, patch, delete, move, mkdir); supports preflight, dry-run, and confirmation tokens; enforces write policy; returns activity narration.
-export async function dispatchBuildFlowFileChange(body: Record<string, unknown>, userToken?: string) {
+export async function dispatchBuildFlowFileChange(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   if (body.dryRun === true || body.preflight === true) {
-    const result = await preflightWrite(body, userToken) as {
+    const result = await preflightWrite(body, userToken, transportOptions) as {
       status: 'allowed' | 'needs_confirmation' | 'error'
       allowed?: boolean
       verified: boolean
@@ -1214,7 +1263,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     payload.content = body.content
     payload.separator = body.separator ?? '\n\n'
     attachWriteConfirmation(payload, body)
-    const result = await executeAction('/api/append-file', payload, userToken)
+    const result = await executeAction('/api/append-file', payload, userToken, transportOptions)
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange append')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
@@ -1236,7 +1285,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     payload.content = body.content
     payload.mode = 'createOnly'
     attachWriteConfirmation(payload, body)
-    const result = await executeAction('/api/write-file', payload, userToken)
+    const result = await executeAction('/api/write-file', payload, userToken, transportOptions)
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange create')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
@@ -1258,7 +1307,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     payload.content = body.content
     payload.mode = 'overwrite'
     attachWriteConfirmation(payload, body)
-    const result = await executeAction('/api/write-file', payload, userToken)
+    const result = await executeAction('/api/write-file', payload, userToken, transportOptions)
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange overwrite')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
@@ -1281,7 +1330,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     payload.replace = body.replace
     payload.allowMultiple = body.allowMultiple ?? false
     attachWriteConfirmation(payload, body)
-    const result = await executeAction('/api/patch-file', payload, userToken)
+    const result = await executeAction('/api/patch-file', payload, userToken, transportOptions)
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange patch')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
@@ -1304,7 +1353,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     payload.onlyIfEmpty = body.onlyIfEmpty !== false
     payload.confirmedByUser = body.confirmedByUser === true
     payload.confirmationToken = typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
-    const result = await executeAction('/api/delete-file', payload, userToken)
+    const result = await executeAction('/api/delete-file', payload, userToken, transportOptions)
     const deletedPath = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity(result as Record<string, unknown>, makeActivity({
       operationId: 'applyBuildFlowFileChange',
@@ -1335,7 +1384,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     payload.createParents = body.createParents === true || body.createParentDirectories === true
     payload.confirmedByUser = body.confirmedByUser === true
     payload.confirmationToken = typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
-    const result = await executeAction('/api/move-file', payload, userToken)
+    const result = await executeAction('/api/move-file', payload, userToken, transportOptions)
     const from = typeof (result as Record<string, unknown>).from === 'string' ? (result as Record<string, unknown>).from as string : typeof body.path === 'string' ? body.path : typeof body.from === 'string' ? body.from : undefined
     const to = typeof (result as Record<string, unknown>).to === 'string' ? (result as Record<string, unknown>).to as string : typeof body.to === 'string' ? body.to : undefined
     return withActivity(result as Record<string, unknown>, makeActivity({
@@ -1356,7 +1405,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
   if (changeType === 'mkdir') {
     payload.createParents = body.createParents === true || body.createParentDirectories === true
     attachWriteConfirmation(payload, body)
-    const result = await executeAction('/api/mkdir', payload, userToken)
+    const result = await executeAction('/api/mkdir', payload, userToken, transportOptions)
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity(result as Record<string, unknown>, makeActivity({
       operationId: 'applyBuildFlowFileChange',

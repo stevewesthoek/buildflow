@@ -20,6 +20,8 @@ This is not an autonomous agent product. The Custom GPT remains the reasoning la
 
 Custom GPT Actions are synchronous external API calls. Every extra action requires ChatGPT to reason, call the endpoint, wait for a full response, parse JSON, and reason again. Long loops create slow responses, timeouts, and context drift. Actions do not provide reliable mid-call progress streaming, so the GPT must narrate before each action and summarize after each result.
 
+OpenAI's current GPT Actions production documentation lists a 45-second action request timeout. BuildFlow does not spend that whole window. The web action adapter enforces shorter GPT-facing deadlines and returns structured JSON first: status 4s, read-context 8s, apply-file-change 8s, commit-changes 10s, and run-command 12s maximum. This is a fail-fast contract, not a guarantee against Cloudflare, ChatGPT, or network outages.
+
 BuildFlow therefore optimizes for fast, bounded assistance:
 
 ```text
@@ -32,11 +34,12 @@ The product should not present a separate agent mode, autonomous mode, polling m
 
 - Questions: read minimal context and answer. No validation. No commit.
 - Small edits: read exact files, patch, validate the smallest relevant command, report or commit.
-- Large files: use `grep_context`, `read_range`, or `read_symbol`; never read huge files just to find one block.
+- Large files: use `grep_context`, `read_range`, or `read_symbol`; bulk reads refuse files over 100 KB instead of returning top-of-file fallback content.
 - Larger goals: create or update a concise plan, complete only the first small safe slice, then stop.
 - Task lists: normally complete 1 task per response; up to 2 tightly related small tasks when all paths and validations are clear.
 - Action budget: target 1-2 BuildFlow actions per response; hard stop at 3 actions unless the user explicitly asks to continue.
 - Slow or broad work: stop with the next concrete action instead of continuing to loop.
+- Read defaults: search/list limit 5, exact read `maxBytesPerFile` 4000, max 5 paths, grep context `before <= 40`, `after <= 60`, `maxMatches <= 10`, and range reads up to 250 lines.
 
 ## Progress And UI Reality
 
@@ -121,7 +124,9 @@ Internal dashboard or CLI experiments must not redefine the Custom GPT product d
 
 BuildFlow cannot stream progress while a Custom GPT Action is running. The GPT must make progress visible by narrating before each action and summarizing the compact action result after each action.
 
-The user may see platform-level UI states such as "talking to BuildFlow" while ChatGPT waits for the action response. BuildFlow reduces that risk by making each action small, bounded, and deterministic; it does not try to solve this with background jobs, polling, or hidden agents.
+The user may see platform-level UI states such as "talking to BuildFlow" while ChatGPT waits for the action response. BuildFlow reduces that risk by making each action small, bounded, deterministic, and fail-fast. It does not try to solve this with background jobs, polling, or hidden agents.
+
+When an action exceeds its BuildFlow deadline, the route returns a compact error envelope with `BUILDFLOW_ACTION_DEADLINE_EXCEEDED`, elapsed time, route, phase, source/path/mode or command kind when known, and a narrower next action. When a bulk read is too broad, it returns `BUILDFLOW_NEEDS_NARROWER_SCOPE` instead of launching an expensive search/read.
 
 For large requests, the GPT must slice work:
 
@@ -141,6 +146,7 @@ Good:
 - compact task context prep
 - exact multi-file reads
 - focused large-file reads with `grep_context`, `read_range`, and `read_symbol`
+- fast-fail diagnostics before gateway timeouts
 - write policy preflight
 - targeted validation
 - commit-specific-paths action

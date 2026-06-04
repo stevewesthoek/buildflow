@@ -6,8 +6,8 @@ exports.payloadBudgetReport = payloadBudgetReport;
 exports.GPT_ACTION_RESPONSE_BUDGET_BYTES = 32000;
 exports.GPT_ACTION_TARGET_BYTES = 8000;
 exports.GPT_ACTION_WARNING_BYTES = 16000;
-exports.GPT_ACTION_DEFAULT_FILE_BYTES = 6000;
-exports.GPT_ACTION_DEFAULT_INSPECT_LIMIT = 10;
+exports.GPT_ACTION_DEFAULT_FILE_BYTES = 4000;
+exports.GPT_ACTION_DEFAULT_INSPECT_LIMIT = 5;
 function measureJsonPayload(value) {
     return Buffer.byteLength(JSON.stringify(value !== null && value !== void 0 ? value : {}), 'utf8');
 }

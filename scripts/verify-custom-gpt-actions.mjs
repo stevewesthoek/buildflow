@@ -79,6 +79,25 @@ function ensureSchemaRules(schema) {
   for (const legacy of ['setBuildFlowContext', 'executeBuildFlowTask', 'manageBuildFlowAgent', '/api/actions/agent/execute-task', '/api/actions/agent/manage', 'action=list_sources', 'action=get_active', 'action=set_active', '/api/actions/sources', '/api/actions/context/active']) {
     assert(!schemaText.includes(legacy), `Legacy reference exposed in schema: ${legacy}`)
   }
+  assert(!schemaText.includes('/api/actions/agent/'), 'Schema must not expose agent-mode action routes')
+
+  const readContext = ops.find(op => op.operationId === 'readBuildFlowContext')
+  const readSchema = readContext?.requestBody?.content?.['application/json']?.schema
+  const readProps = readSchema?.properties || {}
+  const modes = readProps.mode?.enum || []
+  for (const mode of ['grep_context', 'read_range', 'read_symbol']) {
+    assert(modes.includes(mode), `readBuildFlowContext schema missing focused mode: ${mode}`)
+  }
+  assert(readProps.paths?.maxItems <= 5, 'readBuildFlowContext paths must be capped at 5 for GPT use')
+  assert(readProps.limit?.maximum <= 5, 'readBuildFlowContext limit must be capped at 5 for GPT use')
+  assert(readProps.maxBytesPerFile?.maximum <= 4000, 'readBuildFlowContext maxBytesPerFile must be capped at 4000 for GPT use')
+  assert(readProps.before?.maximum <= 40, 'grep_context before must be capped at 40')
+  assert(readProps.after?.maximum <= 60, 'grep_context after must be capped at 60')
+  assert(readProps.maxMatches?.maximum <= 10, 'grep_context maxMatches must be capped at 10')
+
+  const runCommand = ops.find(op => op.operationId === 'runBuildFlowCommand')
+  const commandProps = runCommand?.requestBody?.content?.['application/json']?.schema?.properties || {}
+  assert(commandProps.timeoutMs?.maximum <= 12000, 'runBuildFlowCommand timeoutMs must be capped at 12000')
 }
 
 function ensureInstructions() {
@@ -91,6 +110,11 @@ function ensureInstructions() {
   }
   assert(text.includes('sourceId'), 'Instructions must require explicit sourceId usage')
   assert(text.includes('maxBytesPerFile'), 'Instructions must include read-size guidance')
+  assert(text.includes('Hard action budget per response: 3 BuildFlow actions'), 'Instructions must include hard action budget')
+  assert(/deadline|fail fast|timeout/i.test(text), 'Instructions must include timeout/deadline guidance')
+  for (const mode of ['grep_context', 'read_range', 'read_symbol']) {
+    assert(text.includes(mode), `Instructions must mention ${mode}`)
+  }
   assert(text.includes('Never force push'), 'Instructions must preserve git safety (no force push)')
   return { bytes }
 }
@@ -134,6 +158,26 @@ function ensureDocumentationAlignment() {
   return { scanned }
 }
 
+function ensureSourceDeadlineLayer() {
+  const files = {
+    deadline: path.join(ROOT, 'apps/web/src/lib/actions/deadline.ts'),
+    transport: path.join(ROOT, 'apps/web/src/lib/actions/transport.ts'),
+    readContext: path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'),
+    runCommand: path.join(ROOT, 'apps/web/src/app/api/actions/run-command/route.ts')
+  }
+  for (const [label, file] of Object.entries(files)) {
+    assert(fs.existsSync(file), `Missing source file for deadline verification: ${label}`)
+  }
+  const deadlineText = fs.readFileSync(files.deadline, 'utf8')
+  assert(deadlineText.includes('BUILDFLOW_ACTION_DEADLINE_EXCEEDED'), 'Deadline helper must emit structured deadline code')
+  assert(deadlineText.includes('GPT_ACTION_DEADLINES_MS'), 'Deadline helper must define action deadlines')
+  const transportText = fs.readFileSync(files.transport, 'utf8')
+  assert(transportText.includes('signal?: AbortSignal'), 'Transport must accept AbortSignal')
+  assert(transportText.includes('const REQUEST_TIMEOUT_MS = 12000'), 'Transport default timeout must be below the old 30s value')
+  assert(fs.readFileSync(files.readContext, 'utf8').includes('withGptActionDeadline'), 'read-context route must use deadline wrapper')
+  assert(fs.readFileSync(files.runCommand, 'utf8').includes('commandTimeoutMs'), 'run-command route must clamp GPT command timeouts')
+}
+
 async function requestJson(pathname, options = {}, timeoutMs = 15_000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -175,6 +219,7 @@ async function main() {
   const instructions = ensureInstructions()
   const staleFragments = ensureNoStaleSchemaFragments()
   const documentationAlignment = ensureDocumentationAlignment()
+  ensureSourceDeadlineLayer()
   const live = await runLiveSmokeChecks()
 
   console.log(JSON.stringify({

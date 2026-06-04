@@ -35,3 +35,9 @@ Durable decisions for buildflow. Append-only archive.
 - Safety: Symlink is valid relative path; local agent sees `mind/` as directory within connected vault; writes permitted
 - Removed: `.unprocessed/` subfolder (not needed; captures land directly in `01-inbox/` same as n8n workflow); old `brain/notes/inbox/` removed
 - Impact: Legacy personal-note writes were routed to the correct inbox; captures co-exist with n8n webhook captures; user reviews all in one place in Obsidian
+
+## 2026-06-04 -- Custom GPT fail-fast action contract
+
+- Decision: Keep the Custom GPT surface to five Fast Repo Assistant actions and enforce short GPT-facing route deadlines: status 4s, read-context 8s, apply-file-change 8s, commit-changes 10s, run-command 12s.
+- Reason: OpenAI GPT Actions are synchronous requests with a 45-second timeout; BuildFlow should return compact structured JSON before ChatGPT or Cloudflare times out.
+- Impact: Broad reads fail with narrower-scope diagnostics, large files require focused reads, command timeouts are capped at the GPT boundary, and docs/schema/verifier now encode this contract.
