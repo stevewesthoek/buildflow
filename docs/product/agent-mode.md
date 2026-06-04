@@ -38,6 +38,17 @@ The product should not present a separate agent mode, autonomous mode, polling m
 - Action budget: target 1-2 BuildFlow actions per response; hard stop at 3 actions unless the user explicitly asks to continue.
 - Slow or broad work: stop with the next concrete action instead of continuing to loop.
 
+## Progress And UI Reality
+
+Custom GPT Actions call external APIs and return a completed response. BuildFlow cannot stream progress into the ChatGPT UI while one action is running. The assistant must therefore explain progress before and after each action:
+
+1. say what it is about to call
+2. call the smallest useful action
+3. summarize the action result or compact activity feedback
+4. decide whether another action is still inside the small action budget
+
+If ChatGPT shows only "talking to BuildFlow" for a long time, the remedy is not a long-running worker or polling loop. The remedy is to split work into smaller user-visible action slices.
+
 ## Custom GPT Action Architecture
 
 The Custom GPT surface is limited to five compact operations:
