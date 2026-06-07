@@ -99,7 +99,7 @@ export async function POST(request: NextRequest) {
     const mode = typeof body.mode === 'string' ? body.mode : ''
     const sourceId = typeof body.sourceId === 'string' ? body.sourceId : undefined
     const paths = Array.isArray(body.paths) ? body.paths.filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 5) : undefined
-    const maxBytesPerFile = boundedInt(body.maxBytesPerFile, 4000, 1000, 4000)
+    const maxBytesPerFile = boundedInt(body.maxBytesPerFile, 3000, 1000, 4000)
     const baseBody = {
       ...body,
       ...(paths ? { paths } : {}),

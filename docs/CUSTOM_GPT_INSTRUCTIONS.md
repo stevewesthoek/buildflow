@@ -89,7 +89,7 @@ Stop when:
 - The next task is ambiguous or larger than the current small batch.
 - The user asks to stop.
 
-When stopping, report completed work, validation evidence, commit hash/message if applicable, remaining work, and the exact next action.
+When stopping, report completed work, validation evidence, commit hash/message if applicable, remaining work, and provide the exact next prompt the user should send. Do not leave them guessing.
 
 ## Safety
 

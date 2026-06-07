@@ -7,24 +7,28 @@ import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/de
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
+let activeRequests = 0
+
 export async function GET(request: NextRequest) {
-  const auth = checkActionAuth(request)
-  if (!auth.valid) return auth.error
+  activeRequests++
+  try {
+    const auth = checkActionAuth(request)
+    if (!auth.valid) return auth.error
 
-  const include = request.nextUrl.searchParams.get('include') || ''
+    const include = request.nextUrl.searchParams.get('include') || ''
 
-  return withGptActionDeadline({
-    operationId: 'getBuildFlowStatus',
-    route: '/api/actions/status',
-    deadlineMs: GPT_ACTION_DEADLINES_MS.status,
-    suggestedNextAction: 'Retry status after checking the local BuildFlow stack.'
-  }, async (deadline) => {
-    deadline.setPhase('check_status')
-    deadline.addDiagnostics({ mode: include || 'status' })
-    const payload: Record<string, unknown> = {
-      ok: true,
-      connected: true
-    }
+    return withGptActionDeadline({
+      operationId: 'getBuildFlowStatus',
+      route: '/api/actions/status',
+      deadlineMs: GPT_ACTION_DEADLINES_MS.status,
+      suggestedNextAction: 'Retry status after checking the local BuildFlow stack.'
+    }, async (deadline) => {
+      deadline.setPhase('check_status')
+      deadline.addDiagnostics({ mode: include || 'status' })
+      const payload: Record<string, unknown> = {
+        ok: true,
+        connected: true
+      }
 
     if (include !== 'sources' && include !== 'active' && include !== 'all') {
       await executeActionGET('/api/status', auth.bearerToken, {
@@ -68,6 +72,13 @@ export async function GET(request: NextRequest) {
       } catch {}
     }
 
+    const mem = process.memoryUsage()
+    payload.runtime = {
+      activeRequests,
+      heapUsedMb: Math.round(mem.heapUsed / 1_048_576),
+      rssMb: Math.round(mem.rss / 1_048_576)
+    }
+
     payload.activity = {
       version: '1.2.13-beta',
       operationId: 'getBuildFlowStatus',
@@ -81,10 +92,13 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json(payload, { headers: { 'Cache-Control': 'no-store' } })
-  }).catch((err) => {
-    const { error, status } = unwrapActionError(err, 'status error')
-    return NextResponse.json(error && typeof error === 'object' ? error : { error }, { status, headers: { 'Cache-Control': 'no-store' } })
-  })
+    }).catch((err) => {
+      const { error, status } = unwrapActionError(err, 'status error')
+      return NextResponse.json(error && typeof error === 'object' ? error : { error }, { status, headers: { 'Cache-Control': 'no-store' } })
+    })
+  } finally {
+    activeRequests--
+  }
 }
 
 export async function POST(request: NextRequest) {

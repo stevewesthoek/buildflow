@@ -178,6 +178,28 @@ function ensureSourceDeadlineLayer() {
   assert(fs.readFileSync(files.runCommand, 'utf8').includes('commandTimeoutMs'), 'run-command route must clamp GPT command timeouts')
 }
 
+function ensureActionBudgetAndTimeoutLanguage() {
+  const text = fs.readFileSync(INSTRUCTIONS_FILE, 'utf8')
+  assert(text.includes('Prefer 1-2'), 'Instructions must document action count preference (1-2 preferred)')
+  assert(text.includes('exact next'), 'Instructions must include "exact next" prompt guidance for stop conditions')
+  assert(/fail fast|deadline/i.test(text), 'Instructions must include fail-fast or deadline language')
+
+  const deadlineText = fs.readFileSync(path.join(ROOT, 'apps/web/src/lib/actions/deadline.ts'), 'utf8')
+  assert(deadlineText.includes('suggestedNextAction'), 'Deadline helper must support suggestedNextAction parameter')
+}
+
+function ensureFocusedModeGuardrails() {
+  const readContextText = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'), 'utf8')
+  assert(readContextText.includes('boundedInt(body.maxBytesPerFile'), 'read-context must clamp maxBytesPerFile with boundedInt')
+  assert(readContextText.includes('needsNarrowerScope'), 'read-context must enforce needsNarrowerScope guardrail')
+
+  const focusedReadFile = path.join(ROOT, 'packages/cli/src/agent/focused-read.ts')
+  if (fs.existsSync(focusedReadFile)) {
+    const focusedText = fs.readFileSync(focusedReadFile, 'utf8')
+    assert(focusedText.includes('MAX_RESPONSE_BYTES'), 'focused-read must define MAX_RESPONSE_BYTES limit')
+  }
+}
+
 async function requestJson(pathname, options = {}, timeoutMs = 15_000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -220,6 +242,8 @@ async function main() {
   const staleFragments = ensureNoStaleSchemaFragments()
   const documentationAlignment = ensureDocumentationAlignment()
   ensureSourceDeadlineLayer()
+  ensureActionBudgetAndTimeoutLanguage()
+  ensureFocusedModeGuardrails()
   const live = await runLiveSmokeChecks()
 
   console.log(JSON.stringify({
