@@ -229,6 +229,7 @@ function ensureFocusedModeGuardrails() {
 
   const safeAccessText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/safe-access.ts'), 'utf8')
   assert(safeAccessText.includes("'.gitignore'"), 'write policy must allow root .gitignore for repo hygiene')
+  assert(safeAccessText.includes("'.buildflow/**', '.gitignore', 'README.md'"), 'write policy summary must expose root .gitignore as allowed')
   assert(safeAccessText.includes("'.env', '.env.*'"), 'write policy must keep environment files blocked')
 
   const focusedReadFile = path.join(ROOT, 'packages/cli/src/agent/focused-read.ts')
