@@ -227,6 +227,10 @@ function ensureFocusedModeGuardrails() {
   assert(!graphContextText.includes('<suggested-file>'), 'graph-context must not return placeholder file suggestions')
   assert(!graphContextText.includes('graphify update'), 'graph-context must not build/update Graphify graphs inside GPT actions')
 
+  const safeAccessText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/safe-access.ts'), 'utf8')
+  assert(safeAccessText.includes("'.gitignore'"), 'write policy must allow root .gitignore for repo hygiene')
+  assert(safeAccessText.includes("'.env', '.env.*'"), 'write policy must keep environment files blocked')
+
   const focusedReadFile = path.join(ROOT, 'packages/cli/src/agent/focused-read.ts')
   if (fs.existsSync(focusedReadFile)) {
     const focusedText = fs.readFileSync(focusedReadFile, 'utf8')

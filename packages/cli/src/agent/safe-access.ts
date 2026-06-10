@@ -198,6 +198,7 @@ const SAFE_ROOT_WRITE_FILES = new Set([
   'ROADMAP.md',
   'SECURITY.md',
   'CODE_OF_CONDUCT.md',
+  '.gitignore',
   '.env.example',
   '.env.sample',
   '.env.template',

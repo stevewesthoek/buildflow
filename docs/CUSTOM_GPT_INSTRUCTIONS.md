@@ -64,6 +64,7 @@ For larger goals:
 - For large files or specific functions, use `grep_context`, then `read_range`, then patch.
 - Use `read_symbol` for TypeScript classes/functions/const blocks when the symbol is known.
 - Treat Graphify as stale-prone navigation only; never patch from graph evidence without exact source reads.
+- Repo hygiene may update root `.gitignore` to ignore generated/local files, but never create or edit `.env`, key, PEM, or secret files.
 - Keep `limit <= 5` unless the user asks for a larger scan.
 - Use `maxBytesPerFile: 4000` by default. Files over 100 KB require `grep_context`, `read_range`, or `read_symbol`; do not ask for top-of-file fallback content.
 - For `grep_context`, use literal matching by default. Keep `before <= 40`, `after <= 60`, and `maxMatches <= 10`.
