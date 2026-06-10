@@ -26,7 +26,7 @@ const openapi = {
       get: {
         operationId: 'getBuildFlowStatus',
         summary: 'Fast status check with a 4s BuildFlow deadline. Response budget: ~8 KB max.',
-        description: 'Returns compact BuildFlow health: ok/connected flags, optional sources list, optional active context, runtime stats, and activity narration. Response is guaranteed to be under 8 KB; diagnostics and internal state are stripped to keep responses fast. Status is not a context dump—use readBuildFlowContext for detailed repo information.',
+        description: 'Compact health check: ok/connected flags, optional sources and context, runtime stats. Response is always under 8 KB with diagnostics stripped. Status is not a context dump; use readBuildFlowContext for repo details.',
         'x-openai-isConsequential': false,
         security: [bearer],
         parameters: [
