@@ -8,6 +8,25 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 let activeRequests = 0
+const STATUS_RESPONSE_BUDGET_BYTES = 8_000
+
+function ensureSerializable(value: unknown): unknown {
+  if (value === null || value === undefined) return value
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
+  if (Array.isArray(value)) {
+    return value.map(item => ensureSerializable(item))
+  }
+  if (typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, val] of Object.entries(value)) {
+      if (key.startsWith('_') || key === 'diagnostics' || key === 'activity') continue
+      const safe = ensureSerializable(val)
+      if (safe !== undefined) result[key] = safe
+    }
+    return result
+  }
+  return undefined
+}
 
 export async function GET(request: NextRequest) {
   activeRequests++
@@ -15,7 +34,8 @@ export async function GET(request: NextRequest) {
     const auth = checkActionAuth(request)
     if (!auth.valid) return auth.error
 
-    const include = request.nextUrl.searchParams.get('include') || ''
+    const include = request.nextUrl.searchParams.get('include')
+    const validInclude = include === 'sources' || include === 'active' || include === 'all'
 
     return withGptActionDeadline({
       operationId: 'getBuildFlowStatus',
@@ -24,77 +44,129 @@ export async function GET(request: NextRequest) {
       suggestedNextAction: 'Retry status after checking the local BuildFlow stack.'
     }, async (deadline) => {
       deadline.setPhase('check_status')
-      deadline.addDiagnostics({ mode: include || 'status' })
+      deadline.addDiagnostics({ mode: validInclude ? include : 'status' })
+
       const payload: Record<string, unknown> = {
         ok: true,
         connected: true
       }
 
-    if (include !== 'sources' && include !== 'active' && include !== 'all') {
-      await executeActionGET('/api/status', auth.bearerToken, {
-        signal: deadline.signal,
-        timeoutMs: deadline.transportTimeoutMs(3500),
-        diagnostics: deadline.diagnostics({ phase: 'status_probe' })
-      })
-    }
-
-    if (include === 'sources' || include === 'all') {
-      try {
-        deadline.setPhase('list_sources')
-        const sourcesData = await listBuildFlowSources(auth.bearerToken, {
+      if (!validInclude) {
+        await executeActionGET('/api/status', auth.bearerToken, {
           signal: deadline.signal,
-          timeoutMs: deadline.transportTimeoutMs(2500),
-          diagnostics: deadline.diagnostics({ phase: 'list_sources' })
+          timeoutMs: deadline.transportTimeoutMs(3500),
+          diagnostics: deadline.diagnostics({ phase: 'status_probe' })
         })
-        const rawSources = (sourcesData as Record<string, unknown>).sources
-        if (Array.isArray(rawSources)) {
-          payload.sources = rawSources
-            .filter((s: Record<string, unknown>) => s.enabled)
-            .map((s: Record<string, unknown>) => ({
-              id: s.id,
-              label: s.label,
-              active: s.active
-            }))
+      }
+
+      if (validInclude && (include === 'sources' || include === 'all')) {
+        try {
+          deadline.setPhase('list_sources')
+          const sourcesData = await listBuildFlowSources(auth.bearerToken, {
+            signal: deadline.signal,
+            timeoutMs: deadline.transportTimeoutMs(2500),
+            diagnostics: deadline.diagnostics({ phase: 'list_sources' })
+          })
+          const rawSources = (sourcesData as Record<string, unknown>).sources
+          if (Array.isArray(rawSources)) {
+            payload.sources = rawSources
+              .filter((s: unknown) => {
+                const src = s as Record<string, unknown>
+                return src.enabled === true || src.enabled !== false
+              })
+              .map((s: unknown) => {
+                const src = s as Record<string, unknown>
+                return {
+                  id: typeof src.id === 'string' ? src.id : '',
+                  label: typeof src.label === 'string' ? src.label : '',
+                  active: src.active === true
+                }
+              })
+              .slice(0, 20)
+          }
+        } catch (e) {
+          payload.sources_error = e instanceof Error ? e.message : 'Failed to list sources'
         }
-      } catch {}
-    }
+      }
 
-    if (include === 'active' || include === 'all') {
-      try {
-        deadline.setPhase('get_active_context')
-        const activeData = await getBuildFlowActiveContext(auth.bearerToken, {
-          signal: deadline.signal,
-          timeoutMs: deadline.transportTimeoutMs(1500),
-          diagnostics: deadline.diagnostics({ phase: 'get_active_context' })
-        }) as Record<string, unknown>
-        payload.activeSourceIds = activeData.activeSourceIds
-        payload.contextMode = activeData.contextMode
-      } catch {}
-    }
+      if (validInclude && (include === 'active' || include === 'all')) {
+        try {
+          deadline.setPhase('get_active_context')
+          const activeData = await getBuildFlowActiveContext(auth.bearerToken, {
+            signal: deadline.signal,
+            timeoutMs: deadline.transportTimeoutMs(1500),
+            diagnostics: deadline.diagnostics({ phase: 'get_active_context' })
+          })
+          const normalized = activeData as Record<string, unknown>
+          if (Array.isArray(normalized.activeSourceIds)) {
+            payload.activeSourceIds = normalized.activeSourceIds
+              .filter((id: unknown) => typeof id === 'string')
+              .slice(0, 20)
+          }
+          if (normalized.contextMode === 'single' || normalized.contextMode === 'multi') {
+            payload.contextMode = normalized.contextMode
+          }
+        } catch (e) {
+          payload.context_error = e instanceof Error ? e.message : 'Failed to get active context'
+        }
+      }
 
-    const mem = process.memoryUsage()
-    payload.runtime = {
-      activeRequests,
-      heapUsedMb: Math.round(mem.heapUsed / 1_048_576),
-      rssMb: Math.round(mem.rss / 1_048_576)
-    }
+      const mem = process.memoryUsage()
+      payload.runtime = {
+        activeRequests,
+        heapUsedMb: Math.round(mem.heapUsed / 1_048_576),
+        rssMb: Math.round(mem.rss / 1_048_576)
+      }
 
-    payload.activity = {
-      version: '1.2.13-beta',
-      operationId: 'getBuildFlowStatus',
-      phase: 'completed',
-      actionLabel: 'Checked BuildFlow status',
-      userMessage: include ? `BuildFlow status returned ${include}.` : 'BuildFlow is connected.',
-      riskLevel: 'low',
-      requiresConfirmation: false,
-      verified: true,
-      nextStep: 'Lock one sourceId and use small focused actions.'
-    }
+      payload.activity = {
+        version: '1.2.13-beta',
+        operationId: 'getBuildFlowStatus',
+        phase: 'completed',
+        actionLabel: 'Checked BuildFlow status',
+        userMessage: validInclude ? `BuildFlow status OK (${include} included).` : 'BuildFlow is connected.',
+        riskLevel: 'low',
+        requiresConfirmation: false,
+        verified: true,
+        nextStep: 'Choose a sourceId and use focused read modes.'
+      }
 
-    return NextResponse.json(payload, { headers: { 'Cache-Control': 'no-store' } })
+      const safePayload = ensureSerializable(payload) as Record<string, unknown>
+      const payloadBytes = Buffer.byteLength(JSON.stringify(safePayload), 'utf8')
+
+      if (payloadBytes > STATUS_RESPONSE_BUDGET_BYTES) {
+        return NextResponse.json({
+          ok: false,
+          connected: true,
+          error: {
+            code: 'STATUS_PAYLOAD_EXCEEDS_BUDGET',
+            message: `Status payload exceeds ${STATUS_RESPONSE_BUDGET_BYTES} bytes (was ${payloadBytes} bytes)`,
+            recovery: ['Retry with fewer sources', 'Use a narrower include parameter', 'Check local BuildFlow logs']
+          },
+          activity: {
+            version: '1.2.13-beta',
+            operationId: 'getBuildFlowStatus',
+            phase: 'failed',
+            actionLabel: 'BuildFlow status check failed',
+            userMessage: 'Status response was too large; check local BuildFlow for issues.',
+            riskLevel: 'low',
+            requiresConfirmation: false,
+            verified: false,
+            nextStep: 'Retry status after investigating BuildFlow logs.'
+          }
+        }, { status: 200, headers: { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' } })
+      }
+
+      return NextResponse.json(safePayload, {
+        status: 200,
+        headers: { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' }
+      })
     }).catch((err) => {
       const { error, status } = unwrapActionError(err, 'status error')
-      return NextResponse.json(error && typeof error === 'object' ? error : { error }, { status, headers: { 'Cache-Control': 'no-store' } })
+      const safe = ensureSerializable(error)
+      return NextResponse.json(
+        safe && typeof safe === 'object' ? safe : { error: 'Unknown status error' },
+        { status, headers: { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' } }
+      )
     })
   } finally {
     activeRequests--
@@ -108,13 +180,18 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => ({}))
     const data = await setBuildFlowActiveContext(body, auth.bearerToken) as Record<string, unknown>
+    const safeData = ensureSerializable(data) as Record<string, unknown>
     return NextResponse.json({
       ok: true,
-      contextMode: data.contextMode,
-      activeSourceIds: data.activeSourceIds
-    })
+      contextMode: safeData.contextMode,
+      activeSourceIds: safeData.activeSourceIds
+    }, { headers: { 'Content-Type': 'application/json' } })
   } catch (err) {
     const { error, status } = unwrapActionError(err, 'set-context error')
-    return NextResponse.json(error && typeof error === 'object' ? error : { error }, { status })
+    const safe = ensureSerializable(error)
+    return NextResponse.json(
+      safe && typeof safe === 'object' ? safe : { error: 'Unknown error' },
+      { status, headers: { 'Content-Type': 'application/json' } }
+    )
   }
 }

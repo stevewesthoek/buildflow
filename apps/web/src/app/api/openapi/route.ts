@@ -25,15 +25,16 @@ const openapi = {
     '/api/actions/status': {
       get: {
         operationId: 'getBuildFlowStatus',
-        summary: 'Fast status check with a 4s BuildFlow deadline',
+        summary: 'Fast status check with a 4s BuildFlow deadline. Response budget: ~8 KB max.',
+        description: 'Returns compact BuildFlow health: ok/connected flags, optional sources list, optional active context, runtime stats, and activity narration. Response is guaranteed to be under 8 KB; diagnostics and internal state are stripped to keep responses fast. Status is not a context dump—use readBuildFlowContext for detailed repo information.',
         'x-openai-isConsequential': false,
         security: [bearer],
         parameters: [
-          { name: 'include', in: 'query', schema: { type: 'string', enum: ['sources', 'active', 'all'] }, description: 'Include sources and/or active context. Use sources for the first call.' }
+          { name: 'include', in: 'query', schema: { type: 'string', enum: ['sources', 'active', 'all'] }, description: 'Include sources list and/or active context. Use sources for the first call to lock a sourceId.' }
         ],
         responses: {
           200: {
-            description: 'Status',
+            description: 'Status with optional context (max ~8 KB)',
             content: { 'application/json': { schema: { type: 'object', properties: {}, additionalProperties: true } } }
           }
         }

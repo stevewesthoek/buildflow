@@ -55,6 +55,28 @@ function collectOperations(schema) {
   return ops
 }
 
+function verifyStatusOperationContract(ops) {
+  const statusOp = ops.find(op => op.operationId === 'getBuildFlowStatus')
+  assert(statusOp, 'getBuildFlowStatus operation must exist')
+  assert(statusOp.routePath === '/api/actions/status', 'getBuildFlowStatus path must be /api/actions/status')
+  assert(statusOp.method === 'get', 'getBuildFlowStatus method must be GET')
+  assert(statusOp.operationId === 'getBuildFlowStatus', 'getBuildFlowStatus operationId must be stable')
+
+  const params = statusOp.parameters || []
+  const includeParam = params.find(p => p.name === 'include')
+  assert(includeParam, 'status operation must have include parameter')
+  const validValues = includeParam.schema?.enum || []
+  assert(validValues.includes('sources'), 'include parameter must support sources')
+  assert(validValues.includes('active'), 'include parameter must support active')
+  assert(validValues.includes('all'), 'include parameter must support all')
+
+  const auth = statusOp.security || []
+  assert(auth.length > 0, 'status operation must have bearer auth')
+
+  assert(statusOp['x-openai-isConsequential'] === false, 'status must be non-consequential')
+  return { path: statusOp.routePath, method: statusOp.method, verified: true }
+}
+
 function ensureSchemaRules(schema) {
   const schemaBytes = byteLength(schema)
   assert(schemaBytes < MAX_SCHEMA_BYTES, `OpenAPI schema too large: ${schemaBytes} bytes`)
@@ -64,6 +86,8 @@ function ensureSchemaRules(schema) {
   assert(ids.length === EXPECTED_OPERATION_IDS.length, `Expected ${EXPECTED_OPERATION_IDS.length} operations, found ${ids.length}: ${ids.join(', ')}`)
   assert(new Set(ids).size === ids.length, 'OperationIds must be unique')
   assert(JSON.stringify([...ids].sort()) === JSON.stringify([...EXPECTED_OPERATION_IDS].sort()), `OperationIds mismatch: ${ids.join(', ')}`)
+
+  verifyStatusOperationContract(ops)
 
   for (const op of ops) {
     assert(Array.isArray(op.security) && op.security.length > 0, `${op.operationId} missing security`)
@@ -254,13 +278,18 @@ async function main() {
   ensureFocusedModeGuardrails()
   const live = await runLiveSmokeChecks()
 
+  const ops = collectOperations(schema)
+  const statusContractVerified = verifyStatusOperationContract(ops)
+
   console.log(JSON.stringify({
     status: 'ok',
     schemaBytes: byteLength(schema),
     instructionsBytes: instructions.bytes,
     expectedOperationCount: EXPECTED_OPERATION_IDS.length,
+    statusContractVerified,
     documentationAlignment,
     payloadBudgets: {
+      statusBudgetBytes: 8_000,
       targetBytes: TARGET_ACTION_RESPONSE_BYTES,
       hardBudgetBytes: HARD_ACTION_RESPONSE_BYTES
     },
