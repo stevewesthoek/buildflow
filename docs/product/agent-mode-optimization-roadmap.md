@@ -153,3 +153,43 @@ Status: optional hardening.
 - Larger work produces a concise progress document and resume point instead of looping.
 - The OpenAPI schema contains no autonomous-agent or long-running-polling promises.
 - Multi-source tasks remain isolated by explicit source IDs.
+
+
+
+
+### Phase 6: Safe Auto-Commit
+
+Status: planned.
+
+Goal: make BuildFlow smoother after verified edits by optionally committing safe completed slices without requiring the user to remember a separate commit prompt.
+
+Inspiration: `autogit` demonstrates useful workflow ideas such as per-repo opt-in, no-op when there are no changes, pre-commit secret checks, task-derived commit messages, generated commit trailers, and an undo path. BuildFlow should copy the safety patterns, not the exact behavior.
+
+BuildFlow policy:
+
+- Auto-commit must be per-source opt-in.
+- Push remains explicit unless a future policy explicitly enables it with confirmation.
+- Stage explicit BuildFlow-changed paths only; never use `git add -A`.
+- Run a security scan on changed paths before committing.
+- Require relevant validation for code/config/schema changes; docs-only changes may skip validation when appropriate.
+- Generate concise commit messages from the task goal and changed files.
+- Add an identifiable trailer such as `BuildFlow-Auto-Commit: true`.
+- Provide an undo workflow only for BuildFlow-created auto commits.
+- Never auto-commit `.env`, key, PEM, private, generated build output, or blocked paths.
+
+Initial implementation tasks:
+
+1. Add a per-source `autoCommit` policy with modes such as `off`, `docs_only`, and `after_verified_write`.
+2. Track changed paths returned by `applyBuildFlowFileChange` in the action activity/result.
+3. Add a deterministic auto-commit decision helper that checks policy, changed paths, validation status, and security scan status.
+4. Reuse `commitBuildFlowChanges` internally so commits still stage explicit paths only.
+5. Add a secret/security scan gate for the exact changed paths before auto-commit.
+6. Add verifier coverage that auto-commit never uses `git add -A`, never auto-pushes, and never bypasses blocked paths.
+7. Update Custom GPT instructions so natural-language edit requests can end with a safe auto-commit only when the repo policy allows it.
+
+Exit criteria:
+
+- A completed safe edit can be auto-committed when the source policy allows it.
+- The user can still request manual review/no commit.
+- Auto-push does not happen by default.
+- Commits remain auditable, explicit-path-only, and recoverable.
