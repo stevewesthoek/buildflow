@@ -28,6 +28,22 @@ const GRAPH_MANIFEST = `${GRAPH_DIR}/manifest.json`
 const MAX_REPORT_LINES = 220
 const MAX_COMMUNITIES = 10
 const MAX_MATCHES = 10
+const MAX_GRAPH_JSON_SCAN_BYTES = 2 * 1024 * 1024
+
+type GraphNodeHint = {
+  label?: string
+  norm_label?: string
+  source_file?: string
+  source_location?: string
+  file_type?: string
+  community?: number
+  id?: string
+}
+
+type SuggestedAction =
+  | { mode: 'grep_context'; path: string; pattern: string; before: number; after: number; maxMatches: number }
+  | { mode: 'read_symbol'; path: string; symbol: string }
+  | { mode: 'prepare_task_context'; query: string; limit: number }
 
 function boundedInt(value: unknown, fallback: number, min: number, max: number): number {
   const numeric = typeof value === 'number' ? value : Number(value)
@@ -120,6 +136,118 @@ function matchReportLines(lines: string[], query?: string, limit = MAX_MATCHES):
     if (matches.length >= limit) break
   }
   return matches
+}
+
+function uniqueStrings(values: Array<string | undefined>, limit: number): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    if (!value) continue
+    const clean = value.trim().replace(/[.,;:)]+$/, '')
+    if (!clean || seen.has(clean)) continue
+    seen.add(clean)
+    result.push(clean)
+    if (result.length >= limit) break
+  }
+  return result
+}
+
+function extractBacktickSymbols(lines: string[], limit: number): string[] {
+  const symbols: string[] = []
+  for (const line of lines) {
+    const matches = line.matchAll(/`([^`]+)`/g)
+    for (const match of matches) {
+      const raw = match[1]?.trim()
+      if (!raw || raw.includes('/')) continue
+      symbols.push(raw.replace(/\(\)$/, ''))
+    }
+  }
+  return uniqueStrings(symbols, limit)
+}
+
+function extractFilePaths(lines: string[], limit: number): string[] {
+  const paths: string[] = []
+  const pattern = /[A-Za-z0-9_.@/-]+\.(?:ts|tsx|js|jsx|json|md|mjs|cjs|css|html|yml|yaml)/g
+  for (const line of lines) {
+    for (const match of line.matchAll(pattern)) {
+      paths.push(match[0])
+    }
+  }
+  return uniqueStrings(paths, limit)
+}
+
+async function readGraphNodes(sourceRoot: string, artifact?: GraphArtifact): Promise<GraphNodeHint[]> {
+  if (!artifact?.exists || !artifact.sizeBytes || artifact.sizeBytes > MAX_GRAPH_JSON_SCAN_BYTES) return []
+  try {
+    const raw = await fsp.readFile(safeJoin(sourceRoot, GRAPH_JSON), 'utf8')
+    const parsed = JSON.parse(raw) as { nodes?: unknown[] }
+    if (!Array.isArray(parsed.nodes)) return []
+    return parsed.nodes
+      .filter((node): node is GraphNodeHint => Boolean(node) && typeof node === 'object')
+      .slice(0, 5000)
+  } catch {
+    return []
+  }
+}
+
+function rankGraphNodes(nodes: GraphNodeHint[], query: string | undefined, reportSymbols: string[], limit: number): GraphNodeHint[] {
+  const terms = normalizeTerms(query)
+  const symbolTerms = reportSymbols.map(symbol => symbol.toLowerCase())
+  const ranked: Array<{ node: GraphNodeHint; score: number }> = []
+
+  for (const node of nodes) {
+    const haystack = [node.label, node.norm_label, node.source_file, node.id].filter(Boolean).join(' ').toLowerCase()
+    if (!haystack) continue
+    let score = 0
+    for (const term of terms) if (haystack.includes(term)) score += 2
+    for (const symbol of symbolTerms) if (symbol && haystack.includes(symbol)) score += 3
+    if (node.source_file) score += 1
+    if (score > 0) ranked.push({ node, score })
+  }
+
+  return ranked
+    .sort((a, b) => b.score - a.score)
+    .map(item => item.node)
+    .slice(0, limit)
+}
+
+function buildConcreteNextActions(params: {
+  query?: string
+  matches: string[]
+  godNodes: string[]
+  graphNodes: GraphNodeHint[]
+  limit: number
+}): { suggestedFiles: string[]; suggestedSymbols: string[]; nextActions: SuggestedAction[] } {
+  const reportSymbols = extractBacktickSymbols([...params.matches, ...params.godNodes], params.limit)
+  const reportFiles = extractFilePaths(params.matches, params.limit)
+  const rankedNodes = rankGraphNodes(params.graphNodes, params.query, reportSymbols, params.limit)
+  const nodeFiles = rankedNodes.map(node => node.source_file)
+  const nodeSymbols = rankedNodes.map(node => node.label?.replace(/\(\)$/, ''))
+  const suggestedFiles = uniqueStrings([...reportFiles, ...nodeFiles], params.limit)
+  const suggestedSymbols = uniqueStrings([...reportSymbols, ...nodeSymbols], params.limit)
+  const nextActions: SuggestedAction[] = []
+
+  for (const symbol of suggestedSymbols) {
+    const node = rankedNodes.find(item => item.source_file && [item.label, item.norm_label, item.id].filter(Boolean).join(' ').toLowerCase().includes(symbol.toLowerCase()))
+    if (node?.source_file && /\.(ts|tsx)$/.test(node.source_file)) {
+      nextActions.push({ mode: 'read_symbol', path: node.source_file, symbol })
+      if (nextActions.length >= 3) break
+    }
+  }
+
+  const grepPattern = suggestedSymbols[0] || normalizeTerms(params.query)[0]
+  for (const file of suggestedFiles) {
+    if (!grepPattern) break
+    if (nextActions.some(action => 'path' in action && action.path === file)) continue
+    nextActions.push({ mode: 'grep_context', path: file, pattern: grepPattern, before: 8, after: 12, maxMatches: 5 })
+    if (nextActions.length >= 3) break
+  }
+
+  if (nextActions.length === 0) {
+    nextActions.push({ mode: 'prepare_task_context', query: params.query || 'Describe the concrete task goal.', limit: 5 })
+  }
+
+  return { suggestedFiles, suggestedSymbols, nextActions }
 }
 
 function classifyFreshness(params: {
@@ -222,6 +350,15 @@ export async function handleGraphContext(body: GraphContextBody): Promise<GraphC
     const communityHubs = extractSectionLines(reportLines, '## Community Hubs (Navigation)', limit)
     const godNodes = extractSectionLines(reportLines, '## God Nodes (most connected - your core abstractions)', limit)
     const matches = matchReportLines(reportLines, body.query, limit)
+    const graphArtifact = artifacts.find(artifact => artifact.path === GRAPH_JSON)
+    const graphNodes = await readGraphNodes(source.path, graphArtifact)
+    const suggestions = buildConcreteNextActions({
+      query: body.query,
+      matches,
+      godNodes,
+      graphNodes,
+      limit
+    })
 
     return {
       statusCode: 200,
@@ -234,13 +371,12 @@ export async function handleGraphContext(body: GraphContextBody): Promise<GraphC
         communityHubs,
         godNodes,
         matches,
+        suggestedFiles: suggestions.suggestedFiles,
+        suggestedSymbols: suggestions.suggestedSymbols,
         warning: freshness.status === 'fresh'
           ? 'Graph is a navigation aid. Verify exact source with focused reads before patching.'
           : 'Graph may be stale or freshness is unknown. Use it only as a navigation hint and verify with exact focused reads before patching.',
-        nextActions: [
-          { mode: 'grep_context', path: '<suggested-file>', pattern: '<specific symbol or phrase>', before: 8, after: 12, maxMatches: 5 },
-          { mode: 'read_symbol', path: '<suggested-typescript-file>', symbol: '<suggested-symbol>' }
-        ],
+        nextActions: suggestions.nextActions,
         diagnostics: {
           operation: 'graph_context',
           elapsedMs: Date.now() - startedAt,

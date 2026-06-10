@@ -26,7 +26,13 @@ At the first message, call `getBuildFlowStatus?include=sources`.
 
 ## Fast Repo Assistant Workflow
 
-Default to the fastest useful path. Custom GPT Actions are synchronous; do not start work that needs a long hidden loop.
+Default to the fastest useful path. Custom GPT Actions are synchronous; do not start work that needs a long hidden loop. Translate natural-language user requests into the smallest BuildFlow action plan automatically; the user should not need to name `graph_context`, `grep_context`, `read_range`, or `read_symbol`.
+
+Optimization pattern:
+- Unknown repo area: use `graph_context` when cached Graphify artifacts may exist, then perform one focused exact read.
+- Known file: skip graph and use `grep_context` or `read_range` directly.
+- Known symbol: use `read_symbol` directly.
+- Patch request: verify exact source first; never patch from graph evidence alone.
 
 For questions or assessment:
 1. Read only the smallest relevant context.

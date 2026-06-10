@@ -223,6 +223,8 @@ function ensureFocusedModeGuardrails() {
   const graphContextText = fs.readFileSync(graphContextFile, 'utf8')
   assert(graphContextText.includes('GRAPH_REPORT.md'), 'graph-context must consume cached GRAPH_REPORT.md')
   assert(graphContextText.includes('missing_graph_artifacts'), 'graph-context must tolerate missing Graphify artifacts')
+  assert(graphContextText.includes('buildConcreteNextActions'), 'graph-context must build concrete next focused read suggestions')
+  assert(!graphContextText.includes('<suggested-file>'), 'graph-context must not return placeholder file suggestions')
   assert(!graphContextText.includes('graphify update'), 'graph-context must not build/update Graphify graphs inside GPT actions')
 
   const focusedReadFile = path.join(ROOT, 'packages/cli/src/agent/focused-read.ts')

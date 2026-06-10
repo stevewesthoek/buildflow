@@ -171,25 +171,57 @@ Exit criteria:
 
 ## Phase 2: Report-Based Graph Context
 
+Status: partially implemented; next fine-tuning is active.
+
 Goal: ship a useful first version without parsing the full JSON graph.
 
-Tasks:
+Implemented tasks:
 
-1. Add `readBuildFlowContext` mode `graph_context`.
-2. Read bounded sections from `GRAPH_REPORT.md`:
+1. Added `readBuildFlowContext` mode `graph_context`.
+2. Reads bounded sections from `GRAPH_REPORT.md`:
    - Summary
    - Graph Freshness
    - Community Hubs
    - God Nodes
    - limited matching lines for query terms
-3. Return matched communities, likely files/symbols if present, and next focused read suggestions.
-4. Keep response under the normal action budget.
-5. Update OpenAPI route, generated schema, GPT instructions, docs, and verifier.
+3. Returns matched communities, freshness, graph artifact metadata, and graph warnings.
+4. Keeps response under the normal action budget.
+5. Updated OpenAPI route, generated schema, GPT instructions, docs, and verifier.
+
+Benchmark findings from first live pass:
+
+- `graph_context` on BuildFlow returned in about 73ms and surfaced relevant hubs such as Action Deadlines & Auth, Action Transport, Action Error Handling, and GPT Action Verification.
+- Graph-guided `grep_context` on `apps/web/src/lib/actions/transport.ts` for `executeAction` returned in about 4ms.
+- Missing graph fallback on `brain` returned in about 2ms and did not block the workflow.
+- `graph_context` on `prochattools-prochat-qa-memory` returned in about 38ms with fresh commit metadata.
+
+Immediate fine-tuning tasks:
+
+1. Replace placeholder `nextActions` with concrete suggestions derived from report matches and god nodes where possible.
+2. Extract likely symbols from backticked report entries such as ``executeAction()`` and return `read_symbol` suggestions only when a TypeScript-looking source file is known.
+3. Extract likely file paths from report lines and return concrete `grep_context` suggestions using the strongest query term or symbol.
+4. Keep generic fallback `nextActions` only when no concrete path or symbol can be inferred.
+5. Add verifier coverage so `graph_context` never returns placeholder-only suggestions when concrete evidence exists.
+
+Natural-language GPT behavior requirement:
+
+The user should not need to remember special Graphify prompts. Custom GPT instructions must teach BuildFlow to translate normal natural-language requests into the optimized pattern automatically:
+
+```text
+unknown repo area -> graph_context -> one focused exact read -> answer or propose next patch
+known file        -> focused read directly
+known symbol      -> read_symbol directly
+patch request     -> verify exact source before apply-file-change
+```
+
+This behavior must be part of the GPT instructions, not something the user has to ask for explicitly.
 
 Exit criteria:
 
 - Broad architectural questions can use `graph_context` before grep/search.
 - Known file/symbol questions still skip graph and use focused reads directly.
+- `nextActions` prefer concrete file/symbol suggestions over placeholders.
+- The Custom GPT automatically optimizes natural-language user requests into small BuildFlow action plans.
 
 ## Phase 3: Bounded graph.json Parser
 
