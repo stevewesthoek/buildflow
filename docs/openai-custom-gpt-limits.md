@@ -16,6 +16,7 @@
 | Response payload | **Less than 100,000 characters** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
 | Request payload | **Less than 100,000 characters** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
 | Endpoint summary field | **300 characters** max | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
+| Endpoint description field | **300 characters** max | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
 | Parameter description field | **700 characters** max | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
 | GPT instructions field | **BuildFlow target: under 8 KB** | local verifier |
 | Streaming responses | **Not supported** — synchronous REST only | Architecture constraint |
@@ -155,6 +156,25 @@ From [platform.openai.com/docs/actions/production](https://platform.openai.com/d
 5. Never call LLMs or slow external APIs from inside an action endpoint
 6. Validate at the action boundary — not inside GPT instructions
 7. `x-openai-isConsequential: false` removes the "Always Allow" button suppression; only use it when your backend enforces safety
+
+## OpenAPI Schema Metadata Length Limits (MUST ENFORCE)
+
+**These limits are enforced by OpenAI's CustomGPT UI and will cause import failures or truncation if exceeded.**
+
+| Field | Max Length | Enforcement | Notes |
+|---|---|---|---|
+| Operation `summary` | 300 chars | Hard limit; schema import fails if exceeded | Clear one-line operation name + key detail |
+| Operation `description` | 300 chars | Hard limit; schema import fails if exceeded | Detailed explanation of what the operation does; keep concise and technical |
+| Parameter `description` | 700 chars | Hard limit; schema import fails if exceeded | Parameter guidance for the GPT; can be detailed |
+
+**Verification:** `pnpm run verify:gpt-actions` enforces these via `verify-custom-gpt-actions.mjs`. All OpenAPI operation metadata must pass character count checks before commit.
+
+**When adding or updating operations:**
+1. Write the `summary` (max 300 chars)
+2. Write the `description` (max 300 chars) — if exceeding, trim to essential info
+3. Write parameter `description` fields (max 700 chars each)
+4. Run `pnpm run verify:gpt-actions` to catch violations before commit
+5. Do not commit if verification fails
 
 ---
 
