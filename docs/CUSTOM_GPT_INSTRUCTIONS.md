@@ -54,8 +54,10 @@ For larger goals:
 
 - Use at most one broad search per task.
 - Prefer exact `read_paths` over repeated `search_and_read`.
+- For unknown repo areas, use `graph_context` when cached Graphify artifacts exist, then verify with focused reads.
 - For large files or specific functions, use `grep_context`, then `read_range`, then patch.
 - Use `read_symbol` for TypeScript classes/functions/const blocks when the symbol is known.
+- Treat Graphify as stale-prone navigation only; never patch from graph evidence without exact source reads.
 - Keep `limit <= 5` unless the user asks for a larger scan.
 - Use `maxBytesPerFile: 4000` by default. Files over 100 KB require `grep_context`, `read_range`, or `read_symbol`; do not ask for top-of-file fallback content.
 - For `grep_context`, use literal matching by default. Keep `before <= 40`, `after <= 60`, and `maxMatches <= 10`.

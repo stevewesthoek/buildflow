@@ -137,6 +137,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(stripBloat(withReadActivity(trimEntries(data), { mode, sourceId: body.sourceId, path: body.path })))
     }
 
+    if (mode === 'graph_context') {
+      deadline.setPhase('graph_context')
+      const data = await executeAction('/api/graph-context', {
+        sourceId: body.sourceId,
+        query: typeof body.query === 'string' ? body.query : undefined,
+        limit: boundedInt(body.limit, 8, 1, 10)
+      }, auth.bearerToken, transport('graph_context'))
+      return NextResponse.json(stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId })))
+    }
+
     if (mode === 'grep_context' || mode === 'read_range' || mode === 'read_symbol') {
       deadline.setPhase(mode)
       const data = await executeAction('/api/focused-read', {

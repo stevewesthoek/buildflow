@@ -21,6 +21,7 @@ import { startLocalAgentPreflight } from './agent-runtime'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from './payload-budget'
 import { prepareTaskContext } from './prepare-task-context'
 import { handleFocusedRead } from './focused-read'
+import { handleGraphContext } from './graph-context'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -497,6 +498,11 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { mode: 'grep_context' | 'read_range' | 'read_symbol' | 'search_and_read'; sourceId: string; path: string; pattern?: string; query?: string; regex?: boolean; before?: number; after?: number; maxMatches?: number; startLine?: number; endLine?: number; symbol?: string } }>('/api/focused-read', async (request, reply) => {
     const result = await handleFocusedRead(request.body)
+    return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.payload)
+  })
+
+  fastify.post<{ Body: { sourceId: string; query?: string; limit?: number } }>('/api/graph-context', async (request, reply) => {
+    const result = await handleGraphContext(request.body)
     return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.payload)
   })
 

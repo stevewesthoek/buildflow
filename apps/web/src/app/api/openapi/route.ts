@@ -53,10 +53,10 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol'] },
+                  mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol', 'graph_context'] },
                   sourceId: { type: 'string' },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 5, description: 'At most 5 exact repo-relative paths for GPT use.' },
-                  query: { type: 'string', description: 'Concrete task goal or search query. Broad unscoped queries fail fast with narrower-mode guidance.' },
+                  query: { type: 'string', description: 'Concrete task goal or search query. Broad unscoped queries fail fast with narrower-mode guidance. For graph_context, this is used only to rank cached Graphify navigation hints.' },
                   path: { type: 'string', description: 'Folder for list_files, or exact repo-relative file path for grep_context/read_range/read_symbol.' },
                   pattern: { type: 'string', description: 'Literal pattern for grep_context. Regex is opt-in and tightly bounded.' },
                   regex: { type: 'boolean', description: 'If true, interpret pattern as a regular expression. Defaults to literal matching.' },

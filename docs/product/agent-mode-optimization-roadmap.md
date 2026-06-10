@@ -90,13 +90,53 @@ Status: active.
 
 ### Phase 4: Runtime Metrics
 
-Status: next useful hardening.
+Status: active hardening.
 
 - Record per-action duration, request bytes, response bytes, source ID, mode, and result count.
 - Expose a compact diagnostics summary on demand.
 - Keep timing details out of normal GPT responses.
 
-### Phase 5: Relay Parity
+### Phase 5: Cached Graphify Navigation
+
+Status: planned. This is an optimization layer, not a redesign.
+
+BuildFlow should consume existing `graphify-out/` artifacts when they are present so the GPT can navigate a repo by structure before falling back to narrower exact reads. Graphify should help answer "where should I look?" It must not answer "what should I patch?" without source verification.
+
+Assessment:
+
+- Graphify output is useful because every connected repo can carry a local `graphify-out/GRAPH_REPORT.md`, `graph.json`, `manifest.json`, and related metadata.
+- `GRAPH_REPORT.md` gives a compact human-readable map: summary, freshness, community hubs, god nodes, surprising connections, and likely architectural neighborhoods.
+- `graph.json` is useful for local parsing and ranking, but it must never be returned wholesale to the GPT.
+- The graph can be stale after edits. BuildFlow must treat it as a cached navigation hint only.
+- The source of truth remains exact source reads: `grep_context`, `read_range`, and `read_symbol` before any patch.
+- Graph building or `graphify update` must not run inside GPT-facing actions because it can be slow and timeout-prone.
+
+Freshness model:
+
+- Prefer graph metadata that records the commit the graph was built from.
+- Compare the graph commit to current `git rev-parse HEAD` when cheap.
+- If commit metadata is missing, compare graph artifact modified time to a bounded sample of recent repo file mtimes or the latest commit time.
+- Return `fresh`, `stale`, or `unknown`; do not block graph use solely because freshness is unknown.
+- If stale, return suggestions with a warning and require exact focused reads before patching.
+
+Target workflow:
+
+```text
+unknown area -> graph_context -> suggested files/symbols -> focused read -> answer/patch
+known file   -> grep_context/read_range directly
+known symbol -> read_symbol directly
+patch        -> exact source read required; graph is not enough
+```
+
+Boundaries:
+
+- Add `graph_context` as a new `readBuildFlowContext` mode, not a sixth GPT action.
+- Use only cached graph artifacts during GPT actions.
+- Keep graph_context response below normal action budgets.
+- Return suggested next focused reads instead of large graph data.
+- If no graph exists, return a compact fallback suggesting `prepare_task_context` or `grep_context`.
+
+### Phase 6: Relay Parity
 
 Status: optional hardening.
 

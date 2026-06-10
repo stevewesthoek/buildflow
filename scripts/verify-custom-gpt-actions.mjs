@@ -192,6 +192,14 @@ function ensureFocusedModeGuardrails() {
   const readContextText = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'), 'utf8')
   assert(readContextText.includes('boundedInt(body.maxBytesPerFile'), 'read-context must clamp maxBytesPerFile with boundedInt')
   assert(readContextText.includes('needsNarrowerScope'), 'read-context must enforce needsNarrowerScope guardrail')
+  assert(readContextText.includes("mode === 'graph_context'"), 'read-context must expose graph_context as a bounded read mode')
+
+  const graphContextFile = path.join(ROOT, 'packages/cli/src/agent/graph-context.ts')
+  assert(fs.existsSync(graphContextFile), 'graph-context helper must exist')
+  const graphContextText = fs.readFileSync(graphContextFile, 'utf8')
+  assert(graphContextText.includes('GRAPH_REPORT.md'), 'graph-context must consume cached GRAPH_REPORT.md')
+  assert(graphContextText.includes('missing_graph_artifacts'), 'graph-context must tolerate missing Graphify artifacts')
+  assert(!graphContextText.includes('graphify update'), 'graph-context must not build/update Graphify graphs inside GPT actions')
 
   const focusedReadFile = path.join(ROOT, 'packages/cli/src/agent/focused-read.ts')
   if (fs.existsSync(focusedReadFile)) {
