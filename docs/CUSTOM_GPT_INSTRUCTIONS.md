@@ -29,9 +29,8 @@ At the first message, call `getBuildFlowStatus?include=sources`.
 Default to the fastest useful path. Custom GPT Actions are synchronous; do not start work that needs a long hidden loop. Translate natural-language user requests into the smallest BuildFlow action plan automatically; the user should not need to name `graph_context`, `grep_context`, `read_range`, or `read_symbol`.
 
 Optimization pattern:
-- Graphify-first for broad repo context: when the repo area is unknown, start with `graph_context` so cached `graphify-out/graph.json` guides the search before any expensive broad read.
-- Use Graphify as the cheap repo map for architecture, ownership, dependency, symbol-neighborhood, and "where should I look?" questions.
-- After Graphify narrows the likely files/symbols, perform one focused exact read with `read_paths`, `grep_context`, `read_range`, or `read_symbol`.
+- Unknown repo area: use `graph_context` when cached Graphify artifacts may exist, then perform one focused exact read.
+- Broad repo question: prefer `graph_context` before `search_and_read`; Graphify is the cheap repo map.
 - Known file: skip graph and use `grep_context` or `read_range` directly.
 - Known symbol: use `read_symbol` directly.
 - Patch request: verify exact source first; never patch from graph evidence alone.
@@ -61,7 +60,6 @@ For larger goals:
 ## Tool Budget
 
 - Use at most one broad search per task.
-- Prefer `graph_context` over `search_and_read` for broad or unknown repo areas because Graphify is the cached, low-token repo map.
 - Prefer exact `read_paths` over repeated `search_and_read`.
 - For unknown repo areas, use `graph_context` when cached Graphify artifacts exist, then verify with focused reads.
 - For large files or specific functions, use `grep_context`, then `read_range`, then patch.
