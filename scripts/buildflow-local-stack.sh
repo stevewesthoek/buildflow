@@ -2,11 +2,19 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source the environment compatibility resolver
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/env-compat-resolver.sh"
+
 AGENT_PORT="${AGENT_PORT:-3052}"
 RELAY_PORT="${RELAY_PORT:-3053}"
 WEB_PORT="${WEB_PORT:-3054}"
-WEB_SERVER_MODE="${WORKBENCH_WEB_SERVER_MODE:-${BUILDFLOW_WEB_SERVER_MODE:-production}}"
-AGENT_SERVER_MODE="${WORKBENCH_AGENT_SERVER_MODE:-${BUILDFLOW_AGENT_SERVER_MODE:-dev}}"
+
+# Validate server modes (with conflict detection)
+validate_server_modes || die "Environment variable conflict detected"
+WEB_SERVER_MODE="${WORKBENCH_WEB_SERVER_MODE}"
+AGENT_SERVER_MODE="${WORKBENCH_AGENT_SERVER_MODE}"
 AGENT_HEALTH_URL="http://127.0.0.1:${AGENT_PORT}/health"
 RELAY_HEALTH_URL="http://127.0.0.1:${RELAY_PORT}/health"
 WEB_HEALTH_URL="http://127.0.0.1:${WEB_PORT}/api/openapi"
@@ -475,6 +483,8 @@ case "$cmd" in
     ;;
   start)
     wait_for_docker
+    # Validate build metadata for docker compose (conflicts fail early)
+    validate_build_metadata 0 || die "Build metadata conflict detected"
     start_relay
     start_agent_if_needed
     start_web_if_needed

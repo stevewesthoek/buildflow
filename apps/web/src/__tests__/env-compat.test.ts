@@ -8,14 +8,21 @@ import {
   getBuildSha,
   getBuildTimestamp,
   getActionDiagnostics,
-  getApiBaseUrl
+  getApiBaseUrl,
+  resolveEnvVariable
 } from '../lib/env-compat'
 
 describe('Environment Compatibility Layer', () => {
   const originalEnv = { ...process.env }
 
   afterEach(() => {
-    process.env = { ...originalEnv }
+    // Fully restore original environment
+    Object.keys(process.env).forEach((key) => {
+      if (!(key in originalEnv)) {
+        delete process.env[key]
+      }
+    })
+    Object.assign(process.env, originalEnv)
   })
 
   describe('getBackendMode', () => {
@@ -51,7 +58,7 @@ describe('Environment Compatibility Layer', () => {
       process.env.WORKBENCH_BACKEND_MODE = 'invalid-mode'
       assert.throws(
         () => getBackendMode(),
-        /Invalid WORKBENCH_BACKEND_MODE/
+        /Invalid backend mode/
       )
     })
 
@@ -136,7 +143,7 @@ describe('Environment Compatibility Layer', () => {
       process.env.WORKBENCH_WEB_SERVER_MODE = 'invalid'
       assert.throws(
         () => getWebServerMode(),
-        /Invalid WORKBENCH_WEB_SERVER_MODE/
+        /Invalid web server mode/
       )
     })
   })
@@ -165,7 +172,7 @@ describe('Environment Compatibility Layer', () => {
       process.env.WORKBENCH_AGENT_SERVER_MODE = 'invalid'
       assert.throws(
         () => getAgentServerMode(),
-        /Invalid WORKBENCH_AGENT_SERVER_MODE/
+        /Invalid agent server mode/
       )
     })
   })
@@ -262,6 +269,67 @@ describe('Environment Compatibility Layer', () => {
       delete process.env.WORKBENCH_API
       delete process.env.BUILDFLOW_API
       assert.equal(getApiBaseUrl(), 'http://localhost:3000')
+    })
+  })
+
+  describe('resolveEnvVariable (shared resolver)', () => {
+    it('returns canonical value when set', () => {
+      process.env.TEST_CANONICAL = 'canonical-value'
+      delete process.env.TEST_LEGACY
+      const result = resolveEnvVariable('TEST_CANONICAL', 'TEST_LEGACY')
+      assert.equal(result, 'canonical-value')
+    })
+
+    it('returns legacy value when canonical unset', () => {
+      delete process.env.TEST_CANONICAL
+      process.env.TEST_LEGACY = 'legacy-value'
+      const result = resolveEnvVariable('TEST_CANONICAL', 'TEST_LEGACY')
+      assert.equal(result, 'legacy-value')
+    })
+
+    it('returns canonical when both set identically', () => {
+      process.env.TEST_CANONICAL = 'same-value'
+      process.env.TEST_LEGACY = 'same-value'
+      const result = resolveEnvVariable('TEST_CANONICAL', 'TEST_LEGACY')
+      assert.equal(result, 'same-value')
+    })
+
+    it('throws when canonical and legacy conflict', () => {
+      process.env.TEST_CANONICAL = 'canonical-val'
+      process.env.TEST_LEGACY = 'legacy-val'
+      assert.throws(
+        () => resolveEnvVariable('TEST_CANONICAL', 'TEST_LEGACY'),
+        /Conflicting environment variables/
+      )
+    })
+
+    it('returns default when neither set', () => {
+      delete process.env.TEST_CANONICAL
+      delete process.env.TEST_LEGACY
+      const result = resolveEnvVariable('TEST_CANONICAL', 'TEST_LEGACY', 'default-value')
+      assert.equal(result, 'default-value')
+    })
+
+    it('returns undefined when neither set and no default', () => {
+      delete process.env.TEST_CANONICAL
+      delete process.env.TEST_LEGACY
+      const result = resolveEnvVariable('TEST_CANONICAL', 'TEST_LEGACY')
+      assert.equal(result, undefined)
+    })
+
+    it('does not expose values in error messages', () => {
+      process.env.SECRET_CANONICAL = 'secret-canonical-token-12345'
+      process.env.SECRET_LEGACY = 'secret-legacy-token-67890'
+      try {
+        resolveEnvVariable('SECRET_CANONICAL', 'SECRET_LEGACY')
+        assert.fail('expected error')
+      } catch (err) {
+        const msg = String(err)
+        assert(!msg.includes('secret-canonical-token-12345'), 'error should not contain canonical value')
+        assert(!msg.includes('secret-legacy-token-67890'), 'error should not contain legacy value')
+        assert(msg.includes('SECRET_CANONICAL'), 'error should name canonical var')
+        assert(msg.includes('SECRET_LEGACY'), 'error should name legacy var')
+      }
     })
   })
 })

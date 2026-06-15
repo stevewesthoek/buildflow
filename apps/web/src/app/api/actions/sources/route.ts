@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { listWorkbenchSources, unwrapActionError, withActionRouteDiagnostics } from '@/lib/actions/gpt'
 
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 export async function GET(request: NextRequest) {
   const startedAt = Date.now()
   const auth = checkActionAuth(request)

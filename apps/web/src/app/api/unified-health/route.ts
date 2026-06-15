@@ -3,6 +3,9 @@ import fs from 'fs'
 import path from 'path'
 import { getBuildSha, getBuildTimestamp } from '@/lib/env-compat'
 
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 const LOCAL_AGENT_URL = process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:3052'
 const LOCAL_RELAY_URL = process.env.LOCAL_RELAY_URL || 'http://127.0.0.1:3053'
 
