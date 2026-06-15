@@ -1,12 +1,14 @@
-# Deployment Readiness MVP
+# ProChat Workbench Deployment Readiness
 
-This document describes the runtime contract and deployment workflow for BuildFlow Relay Server.
+This document describes the runtime contract and deployment workflow for ProChat Workbench, powered by the BuildFlow relay engine.
 
 ## Current URL ownership and migration safety
 
-`https://buildflow.prochat.tools` currently points to Steve's working local BuildFlow setup through Cloudflare tunnel. It is not yet the Dokploy production endpoint.
+`https://workbench.prochat.tools` is the canonical public endpoint for ProChat Workbench and is available through the active Cloudflare tunnel.
 
-Steve's current local BuildFlow setup must remain untouched while Dokploy is prepared and tested. Do not stop, restart, clean up, reconfigure, or decommission the local runtime as part of Dokploy planning.
+`https://buildflow.prochat.tools` is the legacy compatibility endpoint. Keep it functional for existing Custom GPT action schemas, bookmarks, and integrations until a separate compatibility retirement is approved. Prefer a proxy or alias to the same service rather than relying on redirects for authenticated POST requests.
+
+Steve's current local Workbench setup must remain untouched while any Dokploy deployment is prepared and tested. Do not stop, restart, clean up, reconfigure, or decommission the local runtime as part of deployment planning.
 
 Protected local configuration:
 - Do not edit `apps/web/.env.local`.
@@ -14,13 +16,14 @@ Protected local configuration:
 - Do not change Steve's current local `BUILDFLOW_ACTION_TOKEN`.
 - Do not reuse, regenerate, replace, or copy Steve's local `BUILDFLOW_ACTION_TOKEN` into Dokploy.
 
-Migration sequence:
-1. **Current local phase:** `buildflow.prochat.tools` remains pointed at Steve's local BuildFlow setup.
-2. **Dokploy staging phase:** test the Dokploy BuildFlow deployment in parallel at `buildflow-staging.prochat.tools`.
-3. **Phase 4 production cutover:** only after staging is proven and Steve explicitly approves Phase 4, switch `buildflow.prochat.tools` from the local setup to Dokploy production.
-4. **Phase 5 local cleanup:** only after Dokploy production is proven stable and Steve explicitly approves Phase 5, clean up or decommission Steve's old local runtime.
+Endpoint policy:
+1. **Canonical public endpoint:** `workbench.prochat.tools`.
+2. **Legacy compatibility endpoint:** `buildflow.prochat.tools` must continue reaching the same service during the migration period.
+3. **Staging:** use a clearly separate staging hostname before any production infrastructure cutover.
+4. **Production cutover:** only after staging is proven and Steve explicitly approves the cutover.
+5. **Local cleanup:** only after production is proven stable and Steve explicitly approves decommissioning the old local runtime.
 
-The intended final production URL is `https://buildflow.prochat.tools`, but the active migration target before cutover is `https://buildflow-staging.prochat.tools`.
+Reserve `api.prochat.tools` for the future suite-wide ProChat API rather than using it as a Workbench-specific hostname.
 
 ## Overview
 
