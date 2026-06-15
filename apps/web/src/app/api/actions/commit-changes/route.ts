@@ -96,8 +96,8 @@ export async function POST(request: NextRequest) {
   }).catch((err) => {
     const { error, status } = unwrapActionError(err, 'commit-changes error')
     return NextResponse.json(
-      error && typeof error === 'object' ? error : buildActionErrorEnvelope({ code: 'COMMIT_CHANGES_ERROR', message: String(error) }),
-      { status }
+      error && typeof error === 'object' ? error : buildActionErrorEnvelope({ code: 'COMMIT_CHANGES_ERROR', message: String(error), status: 'error' }),
+      { status, headers: { 'Cache-Control': 'no-store' } }
     )
   })
 }

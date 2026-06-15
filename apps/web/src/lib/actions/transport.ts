@@ -196,7 +196,7 @@ function normalizeTransportFailure(err: unknown, endpoint: string, options: { ti
   if (isTimeoutError(err)) {
     return new ActionTransportError(
       `Timed out waiting for ${endpoint}`,
-      504,
+      200,
       buildActionErrorEnvelope({
         code: 'LOCAL_STACK_TIMEOUT',
         message: 'BuildFlow local stack timed out.',
@@ -211,7 +211,7 @@ function normalizeTransportFailure(err: unknown, endpoint: string, options: { ti
   if (isConnectionError(err)) {
     return new ActionTransportError(
       `Local stack unavailable for ${endpoint}`,
-      503,
+      200,
       buildActionErrorEnvelope({
         code: 'LOCAL_STACK_UNAVAILABLE',
         message: 'BuildFlow local stack is unavailable.',
@@ -225,7 +225,7 @@ function normalizeTransportFailure(err: unknown, endpoint: string, options: { ti
 
   return new ActionTransportError(
     'Backend request failed',
-    503,
+    200,
     buildActionErrorEnvelope({
       code: 'ACTION_TRANSPORT_ERROR',
       message: 'Backend request failed.',

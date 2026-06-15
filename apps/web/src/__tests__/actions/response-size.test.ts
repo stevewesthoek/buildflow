@@ -50,7 +50,7 @@ async function testTimeoutAbortsPendingFetch() {
       () => executeAction('/api/test-timeout', { sourceId: 'source' }, undefined, { timeoutMs: 20 }),
       (error: unknown) => {
         assert.ok(error instanceof ActionTransportError)
-        assert.equal(error.statusCode, 504)
+        assert.equal(error.statusCode, 200, 'public HTTP status for controlled timeout must be 200, not 504')
         assert.equal((error.payload as { status?: string } | undefined)?.status, 'timeout')
         return true
       }

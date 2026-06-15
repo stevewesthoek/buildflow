@@ -44,15 +44,16 @@ export async function POST(request: NextRequest) {
       const payload = data as { error: unknown }
       const status = getSafeActionHttpStatus(payload.error)
       if (isDryRun) {
-        return NextResponse.json(stripBloat(data))
+        return NextResponse.json(stripBloat(data), { status: 200 })
       }
       if (payload.error && typeof payload.error === 'object') {
-        return NextResponse.json(payload.error, { status })
+        return NextResponse.json(payload.error, { status, headers: { 'Cache-Control': 'no-store' } })
       }
       return NextResponse.json(buildActionErrorEnvelope({
         code: 'BUILDFLOW_STATUS_ERROR',
-        message: String(payload.error)
-      }), { status })
+        message: String(payload.error),
+        status: 'error'
+      }), { status, headers: { 'Cache-Control': 'no-store' } })
     }
 
     if (!isDryRun && (data as { verified?: unknown }).verified !== true) {
@@ -64,12 +65,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(stripBloat(data))
   }).catch((err) => {
     const { error, status } = unwrapActionError(err, 'apply-file-change error')
+    const finalStatus = getSafeActionHttpStatus(error)
     if (error && typeof error === 'object') {
-      return NextResponse.json(error, { status })
+      return NextResponse.json(error, { status: finalStatus, headers: { 'Cache-Control': 'no-store' } })
     }
     return NextResponse.json(buildActionErrorEnvelope({
       code: 'BUILDFLOW_STATUS_ERROR',
-      message: String(error)
-    }), { status })
+      message: String(error),
+      status: 'error'
+    }), { status: finalStatus, headers: { 'Cache-Control': 'no-store' } })
   })
 }

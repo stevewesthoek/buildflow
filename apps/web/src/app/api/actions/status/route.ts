@@ -188,7 +188,7 @@ export async function GET(request: NextRequest) {
       const { error, status } = unwrapActionError(err, 'status error')
       const safe = ensureSerializable(error)
       return NextResponse.json(
-        safe && typeof safe === 'object' ? safe : { error: 'Unknown status error' },
+        safe && typeof safe === 'object' ? safe : { error: 'Unknown status error', requestId: 'unknown' },
         { status, headers: { 'Cache-Control': 'no-store', 'Content-Type': 'application/json' } }
       )
     })
@@ -214,8 +214,8 @@ export async function POST(request: NextRequest) {
     const { error, status } = unwrapActionError(err, 'set-context error')
     const safe = ensureSerializable(error)
     return NextResponse.json(
-      safe && typeof safe === 'object' ? safe : { error: 'Unknown error' },
-      { status, headers: { 'Content-Type': 'application/json' } }
+      safe && typeof safe === 'object' ? safe : { error: 'Unknown error', status: 'error' },
+      { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }
     )
   }
 }

@@ -534,7 +534,7 @@ async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?
     const isAbort = err instanceof Error && err.name === 'AbortError'
     throw new ActionTransportError(
       isAbort ? `Timed out waiting for ${endpoint}` : `Action failed: ${endpoint}`,
-      isAbort ? 504 : 503,
+      200,
       buildActionErrorEnvelope({
         code: isAbort ? 'LOCAL_STACK_TIMEOUT' : 'ACTION_TRANSPORT_ERROR',
         message: isAbort ? 'BuildFlow local stack timed out.' : 'Backend request failed.',
@@ -624,8 +624,8 @@ export function unwrapActionError(err: unknown, fallback: string) {
       error: err.payload || buildActionErrorEnvelope({
         code: 'ACTION_TRANSPORT_ERROR',
         message: err.message,
-        details: `Status ${err.statusCode}`,
-        status: err.statusCode === 504 ? 'unavailable' : 'error'
+        details: `Elapsed ${Date.now()}ms`,
+        status: 'error'
       }),
       status: err.statusCode
     }

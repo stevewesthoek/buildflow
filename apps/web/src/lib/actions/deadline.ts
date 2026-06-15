@@ -142,11 +142,13 @@ export async function withGptActionDeadline(
       context.setPhase(`${String(mutableDiagnostics.phase || 'running')}:deadline_exceeded`)
       controller.abort()
       logActionEvent('deadline_exceeded', context.diagnostics({ phase: String(mutableDiagnostics.phase || 'deadline_exceeded') }))
-      resolve(NextResponse.json(buildDeadlinePayload(context, params), {
+      const payload = buildDeadlinePayload(context, params)
+      resolve(NextResponse.json(payload, {
         status: 200,
         headers: {
           'Cache-Control': 'no-store',
-          'X-Workbench-Request-Id': requestId
+          'X-Workbench-Request-Id': requestId,
+          'X-Workbench-Deadline-Phase': String(mutableDiagnostics.phase || 'deadline_exceeded')
         }
       }))
     }, params.deadlineMs)
@@ -174,9 +176,20 @@ export async function withGptActionDeadline(
     const transportPayload = err && typeof err === 'object' && 'payload' in err
       ? (err as { payload?: unknown }).payload
       : undefined
-    const statusCode = err && typeof err === 'object' && 'statusCode' in err && typeof (err as { statusCode?: unknown }).statusCode === 'number'
+    let statusCode = err && typeof err === 'object' && 'statusCode' in err && typeof (err as { statusCode?: unknown }).statusCode === 'number'
       ? (err as { statusCode: number }).statusCode
       : 500
+
+    if (transportPayload && typeof transportPayload === 'object' && 'error' in transportPayload) {
+      const errorCode = (transportPayload as { error?: { code?: unknown } }).error?.code
+      if (typeof errorCode === 'string' && errorCode) {
+        const gatewayStatuses = [502, 503, 504, 507]
+        if (gatewayStatuses.includes(statusCode)) {
+          statusCode = 200
+        }
+      }
+    }
+
     const payload = transportPayload && typeof transportPayload === 'object' && !Array.isArray(transportPayload)
       ? {
           ...(transportPayload as Record<string, unknown>),

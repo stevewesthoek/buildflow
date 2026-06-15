@@ -112,7 +112,8 @@ export async function POST(request: NextRequest) {
     const { error, status } = unwrapActionError(err, 'run-command error')
     return NextResponse.json(error && typeof error === 'object' ? error : buildActionErrorEnvelope({
       code: 'BUILDFLOW_COMMAND_ERROR',
-      message: String(error)
-    }), { status })
+      message: String(error),
+      status: 'error'
+    }), { status, headers: { 'Cache-Control': 'no-store' } })
   })
 }
