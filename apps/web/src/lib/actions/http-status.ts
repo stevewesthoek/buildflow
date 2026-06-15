@@ -1,4 +1,5 @@
 import { type ActionErrorEnvelope } from './action-response'
+import { normalizeWorkbenchErrorCode } from './error-code-compat'
 
 type ControlledFailureClassification = {
   httpStatus: number
@@ -31,8 +32,11 @@ export function getSafeActionHttpStatus(error: unknown): number {
   const envelope = error as ActionErrorEnvelope
   const errorCode = envelope.error?.code
 
-  if (errorCode && errorCode in CONTROLLED_FAILURES) {
-    return CONTROLLED_FAILURES[errorCode].httpStatus
+  if (errorCode) {
+    const canonicalCode = normalizeWorkbenchErrorCode(errorCode)
+    if (canonicalCode in CONTROLLED_FAILURES) {
+      return CONTROLLED_FAILURES[canonicalCode].httpStatus
+    }
   }
 
   if (envelope.error?.code === 'MISSING_PARAM' || envelope.error?.code === 'INVALID_REQUEST') {
@@ -43,11 +47,13 @@ export function getSafeActionHttpStatus(error: unknown): number {
 }
 
 export function getControlledFailureClassification(errorCode: string): ControlledFailureClassification | undefined {
-  return CONTROLLED_FAILURES[errorCode]
+  const canonicalCode = normalizeWorkbenchErrorCode(errorCode)
+  return CONTROLLED_FAILURES[canonicalCode]
 }
 
 export function isControlledFailure(errorCode: string): boolean {
-  return errorCode in CONTROLLED_FAILURES
+  const canonicalCode = normalizeWorkbenchErrorCode(errorCode)
+  return canonicalCode in CONTROLLED_FAILURES
 }
 
 export function validateNoGatewayStatusCodes(): void {
