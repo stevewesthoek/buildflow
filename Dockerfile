@@ -22,7 +22,7 @@ FROM node:20-alpine AS web-builder
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache python3 make g++ openssl
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps/web ./apps/web
@@ -56,7 +56,7 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache python3 make g++ openssl
 
 # Create non-root user
 RUN addgroup -S buildflow && adduser -S buildflow -G buildflow -s /sbin/nologin
