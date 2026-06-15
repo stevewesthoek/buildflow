@@ -1,15 +1,16 @@
 {
   "name": "workbench",
   "version": "1.2.13-beta",
-  "description": "Local CLI agent for BuildFlow",
+  "description": "Local CLI agent for ProChat Workbench",
   "bin": {
-    "workbench": "dist/index.js",
-    "buildflow": "dist/index.js"
+    "workbench": "dist/bin/workbench.js",
+    "buildflow": "dist/bin/buildflow.js"
   },
   "scripts": {
     "build": "tsc",
     "type-check": "tsc --noEmit",
-    "dev": "tsx src/index.ts serve"
+    "dev": "tsx src/index.ts serve",
+    "test:cli-compatibility": "node tests/cli-compatibility.test.js"
   },
   "dependencies": {
     "@workbench/shared": "workspace:*",
