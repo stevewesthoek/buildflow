@@ -1,16 +1,18 @@
-# BuildFlow Custom GPT Action Imports
+# ProChat Workbench Custom GPT Action Imports
 
-For the free GitHub Local path, import the schema from your own BuildFlow endpoint.
+For the self-hosted GitHub path, import the schema from your own ProChat Workbench endpoint. The Workbench product is powered by the BuildFlow engine, so technical action operation names and contracts remain unchanged.
 
-Use one of these for schema import/generation:
+Use one of these for schema import or generation:
 
-- local reference file: `docs/openapi.chatgpt.json`
-- local running endpoint for local schema generation: `http://127.0.0.1:3054/api/openapi`
-- public Custom GPT endpoint you control: `https://<your-domain-or-tunnel>/api/openapi`
+- canonical schema file: `docs/openapi.chatgpt.json`
+- local running endpoint for schema generation: `http://127.0.0.1:3054/api/openapi`
+- canonical hosted endpoint: `https://workbench.prochat.tools/api/openapi`
+- legacy compatibility endpoint: `https://buildflow.prochat.tools/api/openapi`
+- another HTTPS endpoint you control: `https://<your-domain-or-tunnel>/api/openapi`
 
-For actual ChatGPT Actions, the server URL inside the imported schema must be reachable by ChatGPT over HTTPS. A `localhost` server URL is not a valid runtime endpoint for ChatGPT-hosted action calls.
+For actual ChatGPT Actions, the server URL inside the imported schema must be reachable by ChatGPT over HTTPS. A `localhost` server URL is not a valid runtime endpoint for ChatGPT-hosted action calls. New imports should use `https://workbench.prochat.tools`; the legacy hostname remains available for compatibility with existing schemas.
 
-BuildFlow v1.2.13-beta actions return compact structured results for a Fast Repo Assistant Custom GPT. The GPT must narrate progress before each action and summarize compact action results after each action; the schema alone does not make the assistant explain what it is doing. Custom GPT Actions are synchronous external API calls, so BuildFlow keeps progress visible by using small, bounded calls rather than hidden loops or streaming claims.
+ProChat Workbench uses BuildFlow v1.2.13-beta actions to return compact structured results. The GPT must narrate progress before each action and summarize compact action results after each action; the schema alone does not make the assistant explain what it is doing. Custom GPT Actions are synchronous external API calls, so the BuildFlow engine keeps progress visible through small, bounded calls rather than hidden loops or streaming claims.
 
 BuildFlow now enforces GPT-facing deadlines below the platform timeout: status 4s, read-context 8s, apply-file-change 8s, commit-changes 10s, and run-command 12s. If an action cannot finish safely, it returns structured JSON with `status: "timeout"` or `status: "needs_narrower_scope"` and compact diagnostics. This reduces Cloudflare/ChatGPT timeout risk but does not claim to make network or platform outages impossible.
 
