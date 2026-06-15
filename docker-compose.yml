@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: buildflow-relay
+    container_name: workbench-relay
     ports:
       - "3053:3053"
     env_file:

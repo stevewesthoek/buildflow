@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server'
 
-const LOCAL_AGENT_URL = process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:3052'
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
+const LOCAL_AGENT_URL =
+  process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:3052'
 
 interface RelayHealthStatus {
   status: 'ok' | 'error'
@@ -16,13 +20,17 @@ export async function GET() {
   let localAgentReachable = false
 
   try {
-    const response = await fetch(`${LOCAL_AGENT_URL}/health`)
+    const response = await fetch(`${LOCAL_AGENT_URL}/health`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(3000)
+    })
+
     if (response.ok) {
       localAgentHealth = await response.json()
       localAgentReachable = true
     }
-  } catch (err) {
-    // Local agent not reachable
+  } catch {
+    // The local agent may be unavailable during startup or maintenance.
   }
 
   const status: RelayHealthStatus = {
