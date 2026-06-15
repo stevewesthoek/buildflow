@@ -3,6 +3,7 @@
   "version": "1.2.13-beta",
   "description": "Local CLI agent for BuildFlow",
   "bin": {
+    "workbench": "dist/index.js",
     "buildflow": "dist/index.js"
   },
   "scripts": {

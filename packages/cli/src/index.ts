@@ -15,11 +15,21 @@ import { diagnosticRedactionCommand } from './commands/diagnose-redaction'
 
 const program = new Command()
 
-program.name('buildflow').description('BuildFlow turns ideas into execution packets').version('0.1.0')
+// Detect which binary was invoked (workbench vs buildflow)
+const invocationName = process.argv[1]?.split('/').pop() || 'workbench'
+const isDeprecatedAlias = invocationName === 'buildflow'
+
+// Emit deprecation warning to stderr for buildflow alias (unless JSON/machine-readable output)
+if (isDeprecatedAlias && !process.env.WORKBENCH_JSON && !process.argv.includes('--json')) {
+  const deprecationWarning = `⚠ WARNING: 'buildflow' command is deprecated. Use 'workbench' instead.\n`
+  process.stderr.write(deprecationWarning)
+}
+
+program.name('workbench').description('Workbench: execute ideas into action').version('0.1.0')
 
 program
   .command('init')
-  .description('Initialize BuildFlow')
+  .description('Initialize Workbench')
   .action(() => initCommand())
 
 program
@@ -44,7 +54,7 @@ program
 
 program
   .command('status')
-  .description('Show BuildFlow status')
+  .description('Show Workbench status')
   .action(() => statusCommand())
 
 program
