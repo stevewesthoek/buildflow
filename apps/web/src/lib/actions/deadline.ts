@@ -15,7 +15,7 @@ function generateRequestId(): string {
   return `wr_${timestamp}_${random}`
 }
 
-type DeadlineContext = {
+export type DeadlineContext = {
   operationId: string
   route: string
   requestId: string
