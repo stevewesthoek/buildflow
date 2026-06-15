@@ -1,11 +1,13 @@
-# BuildFlow Fast Repo Assistant
+# ProChat Workbench Product Direction
 
 **Status:** Active product direction.  
-**Architecture:** ChatGPT does the reasoning and coding. BuildFlow provides fast, deterministic local repo tools.
+**Public product:** ProChat Workbench  
+**Technical engine and internal identifier:** BuildFlow  
+**Architecture:** ChatGPT does the reasoning and coding. The BuildFlow engine provides fast, deterministic local project tools.
 
-## What BuildFlow Is
+## What ProChat Workbench Is
 
-BuildFlow is a fast repo assistant for Custom GPTs. It lets ChatGPT work with local files safely and quickly:
+ProChat Workbench is a local project workbench for Custom GPTs. It lets ChatGPT work with repositories, documentation, notes, and knowledge folders safely and quickly:
 
 1. lock an explicit source
 2. prepare or read exact context
@@ -14,7 +16,9 @@ BuildFlow is a fast repo assistant for Custom GPTs. It lets ChatGPT work with lo
 5. commit explicit changed paths when appropriate
 6. stop with a concise result or resume point
 
-This is not an autonomous agent product. The Custom GPT remains the reasoning layer and the coding layer; BuildFlow is the local execution, safety, context, validation, and Git layer.
+This is not an autonomous agent product. The Custom GPT remains the reasoning and coding layer. ProChat Workbench provides the local context, execution, safety, validation, and Git experience through the BuildFlow engine.
+
+During the public naming migration, preserve BuildFlow repository names, package scopes, scripts, source IDs, action operation names, environment variables, and API contracts.
 
 ## Why This Is The Only GPT Workflow
 

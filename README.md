@@ -1,10 +1,17 @@
-# BuildFlow
+# ProChat Workbench
 
-**BuildFlow turns ChatGPT into a local, repo-aware AI workbench.**
+**ProChat Workbench lets ChatGPT work safely with your real local projects.**
 
-Connect a Custom GPT to your own computer, give it safe access to your repos, notes, docs, plans, and knowledge folders, then let it inspect exact files, search local context, apply verified changes, run targeted validation commands, and commit explicit paths without pretending to be an autonomous agent.
+Connect a Custom GPT to your own computer and give it bounded access to repositories, notes, documentation, plans, and knowledge folders. It can inspect exact files, search local context, apply guarded changes, run targeted validation, and commit explicit paths without pretending to be an autonomous agent.
 
-BuildFlow is free, self-hosted, and local-first. It is for builders who want ChatGPT to work with their actual project context instead of guessing from pasted snippets.
+ProChat Workbench is free, self-hosted, and local-first. It is for builders who want ChatGPT to use real project context instead of guessing from pasted snippets.
+
+```text
+Public product: ProChat Workbench
+Technical engine and internal identifier: BuildFlow
+```
+
+BuildFlow repository names, package scopes, scripts, source IDs, action names, and API contracts remain unchanged during this public naming migration.
 
 If this project helps you, please **star it, fork it, try it on a real repo, open issues, request features, and share what you build with it.**
 
