@@ -22,7 +22,6 @@ Route deadlines: status 4s, read-context 8s, apply-file-change 8s, commit-change
 Available actions:
 `getWorkbenchStatus`, `readWorkbenchContext`, `applyWorkbenchFileChange`, `commitWorkbenchChanges`, `runWorkbenchCommand`.
 
-These Workbench operation IDs map to the existing BuildFlow engine routes and contracts.
 
 ## Source Lock
 

@@ -16,11 +16,11 @@ const TARGET_ACTION_RESPONSE_BYTES = 8_000
 const HARD_ACTION_RESPONSE_BYTES = 32_000
 
 const EXPECTED_OPERATION_IDS = [
-  'getBuildFlowStatus',
-  'readBuildFlowContext',
-  'applyBuildFlowFileChange',
-  'commitBuildFlowChanges',
-  'runBuildFlowCommand'
+  'getWorkbenchStatus',
+  'readWorkbenchContext',
+  'applyWorkbenchFileChange',
+  'commitWorkbenchChanges',
+  'runWorkbenchCommand'
 ]
 
 const REQUIRED_ACTION_PATHS = [
@@ -56,11 +56,11 @@ function collectOperations(schema) {
 }
 
 function verifyStatusOperationContract(ops) {
-  const statusOp = ops.find(op => op.operationId === 'getBuildFlowStatus')
-  assert(statusOp, 'getBuildFlowStatus operation must exist')
-  assert(statusOp.routePath === '/api/actions/status', 'getBuildFlowStatus path must be /api/actions/status')
-  assert(statusOp.method === 'get', 'getBuildFlowStatus method must be GET')
-  assert(statusOp.operationId === 'getBuildFlowStatus', 'getBuildFlowStatus operationId must be stable')
+  const statusOp = ops.find(op => op.operationId === 'getWorkbenchStatus')
+  assert(statusOp, 'getWorkbenchStatus operation must exist')
+  assert(statusOp.routePath === '/api/actions/status', 'getWorkbenchStatus path must be /api/actions/status')
+  assert(statusOp.method === 'get', 'getWorkbenchStatus method must be GET')
+  assert(statusOp.operationId === 'getWorkbenchStatus', 'getWorkbenchStatus operationId must be stable')
 
   const params = statusOp.parameters || []
   const includeParam = params.find(p => p.name === 'include')
@@ -105,23 +105,23 @@ function ensureSchemaRules(schema) {
   }
   assert(!schemaText.includes('/api/actions/agent/'), 'Schema must not expose agent-mode action routes')
 
-  const readContext = ops.find(op => op.operationId === 'readBuildFlowContext')
+  const readContext = ops.find(op => op.operationId === 'readWorkbenchContext')
   const readSchema = readContext?.requestBody?.content?.['application/json']?.schema
   const readProps = readSchema?.properties || {}
   const modes = readProps.mode?.enum || []
   for (const mode of ['grep_context', 'read_range', 'read_symbol']) {
-    assert(modes.includes(mode), `readBuildFlowContext schema missing focused mode: ${mode}`)
+    assert(modes.includes(mode), `readWorkbenchContext schema missing focused mode: ${mode}`)
   }
-  assert(readProps.paths?.maxItems <= 5, 'readBuildFlowContext paths must be capped at 5 for GPT use')
-  assert(readProps.limit?.maximum <= 5, 'readBuildFlowContext limit must be capped at 5 for GPT use')
-  assert(readProps.maxBytesPerFile?.maximum <= 4000, 'readBuildFlowContext maxBytesPerFile must be capped at 4000 for GPT use')
+  assert(readProps.paths?.maxItems <= 5, 'readWorkbenchContext paths must be capped at 5 for GPT use')
+  assert(readProps.limit?.maximum <= 5, 'readWorkbenchContext limit must be capped at 5 for GPT use')
+  assert(readProps.maxBytesPerFile?.maximum <= 4000, 'readWorkbenchContext maxBytesPerFile must be capped at 4000 for GPT use')
   assert(readProps.before?.maximum <= 40, 'grep_context before must be capped at 40')
   assert(readProps.after?.maximum <= 60, 'grep_context after must be capped at 60')
   assert(readProps.maxMatches?.maximum <= 10, 'grep_context maxMatches must be capped at 10')
 
-  const runCommand = ops.find(op => op.operationId === 'runBuildFlowCommand')
+  const runCommand = ops.find(op => op.operationId === 'runWorkbenchCommand')
   const commandProps = runCommand?.requestBody?.content?.['application/json']?.schema?.properties || {}
-  assert(commandProps.timeoutMs?.maximum <= 12000, 'runBuildFlowCommand timeoutMs must be capped at 12000')
+  assert(commandProps.timeoutMs?.maximum <= 12000, 'runWorkbenchCommand timeoutMs must be capped at 12000')
 }
 
 function ensureInstructions() {
