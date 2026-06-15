@@ -1,5 +1,5 @@
 {
-  "name": "buildflow-web",
+  "name": "workbench-web",
   "version": "1.2.13-beta",
   "scripts": {
     "dev": "prisma generate && next dev -H 127.0.0.1 -p ${PORT:-3054}",
@@ -9,7 +9,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@buildflow/shared": "workspace:*",
+    "@workbench/shared": "workspace:*",
     "@prisma/client": "^5.0.0",
     "lucide-react": "^0.485.0",
     "next": "^14.0.0",

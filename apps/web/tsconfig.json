@@ -8,7 +8,7 @@
       "@/*": [
         "./src/*"
       ],
-      "@buildflow/shared": [
+      "@workbench/shared": [
         "../../packages/shared/src"
       ]
     },

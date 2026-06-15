@@ -7,4 +7,4 @@ export {
   measureJsonPayload,
   payloadBudgetReport,
   type PayloadBudgetReport
-} from '@buildflow/shared'
+} from '@workbench/shared'

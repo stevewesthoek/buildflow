@@ -1,5 +1,5 @@
 import type { FormEvent, RefObject } from 'react'
-import type { KnowledgeSource, DiscoveredRepository } from '@buildflow/shared'
+import type { KnowledgeSource, DiscoveredRepository } from '@workbench/shared'
 import { Folder, MoreHorizontal } from 'lucide-react'
 
 import { DashboardButton } from './ui/DashboardButton'

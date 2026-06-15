@@ -1,5 +1,5 @@
 {
-  "name": "buildflow",
+  "name": "workbench",
   "version": "1.2.13-beta",
   "private": true,
   "description": "BuildFlow turns ideas into execution packets tailored to your actual local toolchain",

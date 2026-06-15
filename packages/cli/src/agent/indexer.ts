@@ -5,7 +5,7 @@ import matter from 'gray-matter'
 import fg from 'fast-glob'
 import { getEnabledSources } from './config'
 import { getConfigDir, getIndexPath, getIndexDir, getSourceIndexPath } from '../utils/paths'
-import { IndexedDoc } from '@buildflow/shared'
+import { IndexedDoc } from '@workbench/shared'
 
 const DEFAULT_IGNORE_PATTERNS = [
   '**/.git/**',

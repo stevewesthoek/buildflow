@@ -1,4 +1,4 @@
-import type { KnowledgeSource } from '@buildflow/shared'
+import type { KnowledgeSource } from '@workbench/shared'
 import { Activity, Database, GitBranch, LayoutDashboard, ListChecks, Settings } from 'lucide-react'
 import { getSourceIndexStatusLabel } from '../helpers'
 import { DashboardListRow } from './ui/DashboardListRow'

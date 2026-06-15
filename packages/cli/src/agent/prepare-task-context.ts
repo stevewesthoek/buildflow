@@ -1,4 +1,4 @@
-import { SearchResult } from '@buildflow/shared'
+import { SearchResult } from '@workbench/shared'
 import { VaultSearcher } from './search'
 import { readFile } from './vault'
 import { redactSecrets, truncateContent } from './safe-access'

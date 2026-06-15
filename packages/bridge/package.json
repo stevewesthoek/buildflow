@@ -1,5 +1,5 @@
 {
-  "name": "@buildflow/bridge",
+  "name": "@workbench/bridge",
   "version": "0.1.0",
   "description": "BuildFlow relay server",
   "main": "dist/server.js",

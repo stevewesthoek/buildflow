@@ -1,4 +1,4 @@
-import type { KnowledgeSource, ActiveSourcesMode, WriteMode } from '@buildflow/shared'
+import type { KnowledgeSource, ActiveSourcesMode, WriteMode } from '@workbench/shared'
 
 import type { DashboardActivityEvent, DashboardLocalPlan } from './types'
 

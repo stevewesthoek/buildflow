@@ -1,4 +1,4 @@
-import type { KnowledgeSource, WriteMode } from '@buildflow/shared'
+import type { KnowledgeSource, WriteMode } from '@workbench/shared'
 import { CheckCircle2 } from 'lucide-react'
 
 import {

@@ -1,4 +1,4 @@
-import type { KnowledgeSource, ActiveSourcesMode, WriteMode } from '@buildflow/shared'
+import type { KnowledgeSource, ActiveSourcesMode, WriteMode } from '@workbench/shared'
 
 export type DashboardSection = 'overview' | 'sources' | 'activity' | 'plan' | 'handoff' | 'settings'
 

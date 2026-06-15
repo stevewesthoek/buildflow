@@ -1,4 +1,4 @@
-import type { ActiveSourcesMode, WriteMode } from '@buildflow/shared'
+import type { ActiveSourcesMode, WriteMode } from '@workbench/shared'
 
 import { DashboardButton } from './ui/DashboardButton'
 import { DashboardMetaRow } from './ui/DashboardMetaRow'

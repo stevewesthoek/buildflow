@@ -1,4 +1,4 @@
-import { IGNORE_PATTERNS } from '@buildflow/shared'
+import { IGNORE_PATTERNS } from '@workbench/shared'
 
 const ALLOWED_DOTFILE_READS = new Set([
   '.env.example',

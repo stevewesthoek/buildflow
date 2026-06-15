@@ -1,4 +1,4 @@
-import type { ActiveSourcesMode, KnowledgeSource, WriteMode } from '@buildflow/shared'
+import type { ActiveSourcesMode, KnowledgeSource, WriteMode } from '@workbench/shared'
 
 import type { DashboardLocalPlan } from '../types'
 import { DashboardButton } from './ui/DashboardButton'

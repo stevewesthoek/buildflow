@@ -12,7 +12,7 @@ import { loadConfig, getWorkspaces, getSources, getSourcesSafe, addSource, remov
 import { reconcileIndexStateFromDocs, flushIndexStateOnShutdown } from './index-state'
 import { listWorkspaceTree, grepWorkspace, getWorkspaceInfo, resolveWorkspacePath, validateWorkspacePath } from './workspace'
 import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot, isBlockedWritePath, redactSecrets, resolveTargetSourceId, resolveWithinSource, shouldIncludeEntry, truncateContent, getDefaultWritePolicy, validateWriteTarget, normalizeRepoRelativePath } from './safe-access'
-import type { Workspace } from '@buildflow/shared'
+import type { Workspace } from '@workbench/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
 import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
 import { compactAgentJob, controlAgentJob, getAgentJob, listAgentJobs, startAgentJob, updateAgentJob, type AgentJobControlAction } from './agent-jobs'

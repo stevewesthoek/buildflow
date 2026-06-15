@@ -1,6 +1,6 @@
 import fs from 'fs'
 import path from 'path'
-import type { IndexedDoc } from '@buildflow/shared'
+import type { IndexedDoc } from '@workbench/shared'
 import { getConfigDir } from '../utils/paths'
 
 export type SourceIndexStatus = 'ready' | 'pending' | 'indexing' | 'failed' | 'disabled' | 'unknown'

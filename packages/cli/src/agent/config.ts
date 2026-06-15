@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { getConfigPath, expandTilde } from '../utils/paths'
-import type { Workspace, KnowledgeSource, ActiveSourcesMode, WriteMode, DiscoveredRepository, SourceDiscoverySettings } from '@buildflow/shared'
+import type { Workspace, KnowledgeSource, ActiveSourcesMode, WriteMode, DiscoveredRepository, SourceDiscoverySettings } from '@workbench/shared'
 import { getIndexRecord, upsertIndexState, type SourceIndexStatus } from './index-state'
 
 export const DEFAULT_AUTO_INDEX_ENABLED = false

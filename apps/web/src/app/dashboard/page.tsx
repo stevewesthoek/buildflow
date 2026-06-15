@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import type { FormEvent } from 'react'
-import type { ActiveSourcesMode, DiscoveredRepository, KnowledgeSource } from '@buildflow/shared'
+import type { ActiveSourcesMode, DiscoveredRepository, KnowledgeSource } from '@workbench/shared'
 
 const CACHE_KEY = 'buildflow-dashboard-source-snapshot'
 const DEFAULT_REPO_ROOT = '~/Repos'

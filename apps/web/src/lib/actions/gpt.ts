@@ -2,7 +2,7 @@ import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
 import { GPT_ACTION_RESPONSE_BYTE_LIMIT, GPT_ACTION_RESPONSE_CHAR_LIMIT } from './payload-budget'
-import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_DEFAULT_INSPECT_LIMIT } from '@buildflow/shared'
+import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_DEFAULT_INSPECT_LIMIT } from '@workbench/shared'
 
 type NormalizedSource = {
   id: string

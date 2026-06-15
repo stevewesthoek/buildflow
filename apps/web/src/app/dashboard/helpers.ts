@@ -1,4 +1,4 @@
-import type { KnowledgeSource, ActiveSourcesMode, WriteMode } from '@buildflow/shared'
+import type { KnowledgeSource, ActiveSourcesMode, WriteMode } from '@workbench/shared'
 
 export function getAgentHealthLabel(agentConnected: boolean): string {
   return agentConnected ? 'Agent connected' : 'Agent disconnected'

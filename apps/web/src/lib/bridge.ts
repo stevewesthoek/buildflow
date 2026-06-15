@@ -1,4 +1,4 @@
-import { TOOL_CALL_TIMEOUT } from '@buildflow/shared'
+import { TOOL_CALL_TIMEOUT } from '@workbench/shared'
 
 // Bridge manager for Next.js API routes
 // Actual WebSocket bridge runs in separate packages/bridge/ server

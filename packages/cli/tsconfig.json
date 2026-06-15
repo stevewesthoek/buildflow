@@ -18,8 +18,8 @@
     "sourceMap": false,
     "baseUrl": ".",
     "paths": {
-      "@buildflow/shared": ["../../packages/shared"],
-      "@buildflow/shared/*": ["../../packages/shared/*"]
+      "@workbench/shared": ["../../packages/shared"],
+      "@workbench/shared/*": ["../../packages/shared/*"]
     }
   },
   "include": ["src"]

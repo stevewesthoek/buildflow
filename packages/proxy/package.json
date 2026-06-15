@@ -1,5 +1,5 @@
 {
-  "name": "@buildflow/proxy",
+  "name": "@workbench/proxy",
   "version": "0.1.0",
   "description": "BuildFlow production proxy - routes to relay and web",
   "main": "dist/index.js",
