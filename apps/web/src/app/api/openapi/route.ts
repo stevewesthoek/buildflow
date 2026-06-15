@@ -5,14 +5,14 @@ const bearer = { bearerAuth: [] }
 const openapi = {
   openapi: '3.1.0',
   info: {
-    title: 'BuildFlow API',
+    title: 'ProChat Workbench API',
     version: '4.0.0',
-    description: 'Fast Repo Assistant actions. Each action is bounded by a short BuildFlow deadline and returns structured JSON before platform timeouts.'
+    description: 'ProChat Workbench actions powered by the BuildFlow engine. Each action is bounded by a short BuildFlow deadline and returns structured JSON before platform timeouts.'
   },
   servers: [
     {
       url: process.env.PUBLIC_BASE_URL || process.env.LOCAL_DASHBOARD_BASE_URL || 'https://workbench.prochat.tools',
-      description: 'BuildFlow'
+      description: 'ProChat Workbench'
     }
   ],
   components: {

@@ -149,7 +149,7 @@ export function composeArtifactRelativePath(params: {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '') || 'artifact'
-  const safeFolder = folder || '.workbench'
+  const safeFolder = folder || '.buildflow'
   return `${safeFolder.replace(/\/$/, '')}/${filename}.md`
 }
 
@@ -380,7 +380,7 @@ function classifyBlockedWrite(path: string, policy?: WritePolicy, content?: stri
       return {
         code: 'SECRET_PATTERN_BLOCKED',
         message: 'This content is blocked because it looks like it may contain a secret.',
-        userMessage: 'BuildFlow will not write content that looks like a token, credential, or private key.',
+        userMessage: 'Workbench will not write content that looks like a token, credential, or private key.',
         reason: 'blocked_content_pattern',
         hint: 'Use redacted placeholders such as [REDACTED], <token>, or your-key-here instead.'
       }
@@ -537,7 +537,7 @@ async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?
       200,
       buildActionErrorEnvelope({
         code: isAbort ? 'LOCAL_STACK_TIMEOUT' : 'ACTION_TRANSPORT_ERROR',
-        message: isAbort ? 'BuildFlow local stack timed out.' : 'Backend request failed.',
+        message: isAbort ? 'Workbench local stack timed out.' : 'Backend request failed.',
         details: isAbort ? `The request to ${endpoint} exceeded ${timeoutMs}ms.` : err instanceof Error ? err.message : String(err),
         status: isAbort ? 'timeout' : 'error',
         diagnostics: {
@@ -557,7 +557,7 @@ async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?
         413,
         buildActionErrorEnvelope({
           code: 'RESPONSE_SIZE_EXCEEDED',
-          message: 'BuildFlow error response exceeded size limit.',
+          message: 'Workbench error response exceeded size limit.',
           details: `Error response from ${endpoint} exceeded ${maxResponseBytes} bytes.`,
           status: 'needs_narrower_scope',
           diagnostics: {
@@ -602,7 +602,7 @@ async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?
       413,
       buildActionErrorEnvelope({
         code: 'RESPONSE_SIZE_EXCEEDED',
-        message: 'BuildFlow response exceeded size limit.',
+        message: 'Workbench response exceeded size limit.',
         details: `Response from ${endpoint} exceeded ${maxResponseBytes} bytes.`,
         status: 'needs_narrower_scope',
         diagnostics: {
@@ -1223,7 +1223,7 @@ export async function dispatchWorkbenchArtifact(body: Record<string, unknown>, u
       phase: isBlocked ? 'blocked' : isNeedsConfirmation ? 'waiting_for_confirmation' : 'preflight',
       actionLabel: isBlocked ? 'Blocked unsafe artifact write' : isNeedsConfirmation ? 'Needs confirmation' : 'Preflighted repo artifact',
       userMessage: isBlocked
-        ? String((result.error as Record<string, unknown>)?.userMessage || 'BuildFlow blocked this artifact write.')
+        ? String((result.error as Record<string, unknown>)?.userMessage || 'Workbench blocked this artifact write.')
         : isNeedsConfirmation
           ? 'Workbench needs confirmation before creating this artifact.'
           : `Workbench verified that ${artifactPath} is allowed.`,
@@ -1317,7 +1317,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
-      userMessage: `BuildFlow appended to ${path || 'the file'} and verified it on disk.`,
+      userMessage: `Workbench appended to ${path || 'the file'} and verified it on disk.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       targetPaths: path ? [path] : [],
       changedPaths: path ? [path] : [],
@@ -1339,7 +1339,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
-      userMessage: `BuildFlow created ${path || 'the file'} and verified it on disk.`,
+      userMessage: `Workbench created ${path || 'the file'} and verified it on disk.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       targetPaths: path ? [path] : [],
       changedPaths: path ? [path] : [],
@@ -1361,7 +1361,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
-      userMessage: `BuildFlow overwrote ${path || 'the file'} and verified it on disk.`,
+      userMessage: `Workbench overwrote ${path || 'the file'} and verified it on disk.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       targetPaths: path ? [path] : [],
       changedPaths: path ? [path] : [],
@@ -1384,7 +1384,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
-      userMessage: `BuildFlow patched ${path || 'the file'} and verified it on disk.`,
+      userMessage: `Workbench patched ${path || 'the file'} and verified it on disk.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       targetPaths: path ? [path] : [],
       changedPaths: path ? [path] : [],
@@ -1411,10 +1411,10 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
           ? 'Deleted directory'
           : 'Deleted file',
       userMessage: changeType === 'rmdir'
-        ? `BuildFlow deleted the empty directory ${deletedPath || 'target'} and verified it on disk.`
+        ? `Workbench deleted the empty directory ${deletedPath || 'target'} and verified it on disk.`
         : changeType === 'delete_directory'
-          ? `BuildFlow deleted ${deletedPath || 'the directory'} and verified it on disk.`
-          : `BuildFlow deleted ${deletedPath || 'the file'} and verified it on disk.`,
+          ? `Workbench deleted ${deletedPath || 'the directory'} and verified it on disk.`
+          : `Workbench deleted ${deletedPath || 'the file'} and verified it on disk.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       targetPaths: deletedPath ? [deletedPath] : [],
       changedPaths: deletedPath ? [deletedPath] : [],
@@ -1438,7 +1438,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: changeType === 'rename' ? 'Renamed repo file' : 'Moved repo file',
-      userMessage: `${changeType === 'rename' ? 'BuildFlow renamed' : 'BuildFlow moved'} ${from || 'the file'}${to ? ` to ${to}` : ''} and verified it on disk.`,
+      userMessage: `${changeType === 'rename' ? 'Workbench renamed' : 'Workbench moved'} ${from || 'the file'}${to ? ` to ${to}` : ''} and verified it on disk.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       targetPaths: [from, to].filter((path): path is string => typeof path === 'string' && path.length > 0),
       changedPaths: [from, to].filter((path): path is string => typeof path === 'string' && path.length > 0),
@@ -1458,7 +1458,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Created directory',
-      userMessage: `BuildFlow created ${path || 'the directory'} and verified it on disk.`,
+      userMessage: `Workbench created ${path || 'the directory'} and verified it on disk.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       targetPaths: path ? [path] : [],
       changedPaths: path ? [path] : [],

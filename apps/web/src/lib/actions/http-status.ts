@@ -18,11 +18,8 @@ const CONTROLLED_FAILURES: Record<string, ControlledFailureClassification> = {
   WORKBENCH_NEEDS_NARROWER_SCOPE: { httpStatus: 200, internalStatusCode: 400, failureStage: 'route' },
   WORKBENCH_RESPONSE_SIZE_EXCEEDED: { httpStatus: 200, internalStatusCode: 413, failureStage: 'route' },
   WORKBENCH_COMMAND_TIMEOUT: { httpStatus: 200, internalStatusCode: 504, failureStage: 'command' },
+  WORKBENCH_STATUS_ERROR: { httpStatus: 200, internalStatusCode: 503, failureStage: 'status' },
   STATUS_PAYLOAD_EXCEEDS_BUDGET: { httpStatus: 200, internalStatusCode: 413, failureStage: 'route' },
-  BUILDFLOW_ACTION_DEADLINE_EXCEEDED: { httpStatus: 200, internalStatusCode: 504, failureStage: 'deadline' },
-  BUILDFLOW_NEEDS_NARROWER_SCOPE: { httpStatus: 200, internalStatusCode: 400, failureStage: 'route' },
-  BUILDFLOW_RESPONSE_SIZE_EXCEEDED: { httpStatus: 200, internalStatusCode: 413, failureStage: 'route' },
-  BUILDFLOW_COMMAND_TIMEOUT: { httpStatus: 200, internalStatusCode: 504, failureStage: 'command' },
   REQUIRES_EXPLICIT_CONFIRMATION: { httpStatus: 200, internalStatusCode: 200, failureStage: 'policy' }
 }
 

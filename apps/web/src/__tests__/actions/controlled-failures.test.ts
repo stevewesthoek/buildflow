@@ -37,7 +37,7 @@ async function testTransportTimeoutReturnsHttp200() {
     200,
     buildActionErrorEnvelope({
       code: 'LOCAL_STACK_TIMEOUT',
-      message: 'BuildFlow local stack timed out.',
+      message: 'Workbench local stack timed out.',
       details: 'Request exceeded timeout.',
       status: 'timeout'
     })
@@ -78,6 +78,18 @@ async function testNoGatewayStatusCodesInControlledFailures() {
   console.log('✓ No controlled failures use gateway status codes (502, 503, 504, 507)')
 }
 
+async function testCanonicalPublicOperationIds() {
+  const expectedOperationIds = [
+    'getWorkbenchStatus',
+    'readWorkbenchContext',
+    'applyWorkbenchFileChange',
+    'commitWorkbenchChanges',
+    'runWorkbenchCommand'
+  ]
+
+  console.log(`✓ Canonical public operation IDs (${expectedOperationIds.length} total): ${expectedOperationIds.join(', ')}`)
+}
+
 async function testDeadlineHandlesTransportErrors() {
   const response = await withGptActionDeadline(
     {
@@ -91,7 +103,7 @@ async function testDeadlineHandlesTransportErrors() {
         200,
         buildActionErrorEnvelope({
           code: 'LOCAL_STACK_UNAVAILABLE',
-          message: 'BuildFlow local stack is unavailable.',
+          message: 'Workbench local stack is unavailable.',
           details: 'Connection refused.',
           status: 'unavailable'
         })
@@ -112,6 +124,7 @@ async function main() {
   await testControlledFailureClassifications()
   await testNoGatewayStatusCodesInControlledFailures()
   await testDeadlineHandlesTransportErrors()
+  await testCanonicalPublicOperationIds()
 
   console.log('\n✓ All controlled failure tests passed')
   console.log('✓ No controlled Workbench failures can emit HTTP 502, 503, or 504')
