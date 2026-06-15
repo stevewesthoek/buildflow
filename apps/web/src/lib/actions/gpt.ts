@@ -120,13 +120,13 @@ export async function requireExplicitSourceId(body: Record<string, unknown>, _us
   if (typeof body.sourceId === 'string' && body.sourceId.length > 0) {
     return null
   }
-  return { error: 'Target sourceId is required. BuildFlow does not fall back to global active context for repo-specific actions because other conversations may change it.', status: 400 }
+  return { error: 'Target sourceId is required. Workbench does not fall back to global active context for repo-specific actions because other conversations may change it.', status: 400 }
 }
 
 function requireExplicitReadScope(body: Record<string, unknown>) {
   if (typeof body.sourceId === 'string' && body.sourceId.length > 0) return null
   if (Array.isArray(body.sourceIds) && body.sourceIds.length > 0 && body.sourceIds.every(id => typeof id === 'string' && id.length > 0)) return null
-  return { error: 'sourceId or sourceIds is required. BuildFlow does not use global active context for inspect/read because other conversations may change it.', status: 400 }
+  return { error: 'sourceId or sourceIds is required. Workbench does not use global active context for inspect/read because other conversations may change it.', status: 400 }
 }
 
 function normalizePath(input: string): string {
@@ -149,7 +149,7 @@ export function composeArtifactRelativePath(params: {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '') || 'artifact'
-  const safeFolder = folder || '.buildflow'
+  const safeFolder = folder || '.workbench'
   return `${safeFolder.replace(/\/$/, '')}/${filename}.md`
 }
 
@@ -207,7 +207,7 @@ export function withActivity<T extends Record<string, unknown>>(result: T, activ
 }
 
 export function withActionRouteDiagnostics<T extends Record<string, unknown>>(result: T, params: { route: string; startedAt: number; requestBytes?: number }): T & { diagnostics?: Record<string, unknown> } {
-  if (process.env.BUILDFLOW_ACTION_DIAGNOSTICS !== '1') {
+  if (process.env.WORKBENCH_ACTION_DIAGNOSTICS !== '1' && process.env.BUILDFLOW_ACTION_DIAGNOSTICS !== '1') {
     return result
   }
   const existingDiagnostics = result.diagnostics && typeof result.diagnostics === 'object' && !Array.isArray(result.diagnostics)
@@ -360,19 +360,19 @@ function isDependencyChange(content?: string): boolean {
 function classifyBlockedWrite(path: string, policy?: WritePolicy, content?: string, changeType?: string) {
   const normalized = normalizePath(path)
   if (!normalized) {
-    return { code: 'WRITE_PATH_BLOCKED', message: 'This path is blocked by the source write policy.', userMessage: 'BuildFlow can read this file, but it needs a valid repo-relative path to write it.', reason: 'empty_path', hint: 'Provide a repo-relative path like docs/README.md.' }
+    return { code: 'WRITE_PATH_BLOCKED', message: 'This path is blocked by the source write policy.', userMessage: 'Workbench can read this file, but it needs a valid repo-relative path to write it.', reason: 'empty_path', hint: 'Provide a repo-relative path like docs/README.md.' }
   }
   if (normalized.startsWith('..') || normalized.includes('/../') || normalized === '..') {
-    return { code: 'PATH_TRAVERSAL_BLOCKED', message: 'Path traversal outside the repo is blocked.', userMessage: 'BuildFlow can only write inside the connected source root.', reason: 'path_traversal', hint: 'Use a repo-relative path inside the source root.' }
+    return { code: 'PATH_TRAVERSAL_BLOCKED', message: 'Path traversal outside the repo is blocked.', userMessage: 'Workbench can only write inside the connected source root.', reason: 'path_traversal', hint: 'Use a repo-relative path inside the source root.' }
   }
   if (path.startsWith('/')) {
-    return { code: 'ABSOLUTE_PATH_BLOCKED', message: 'Absolute paths outside the repo are blocked.', userMessage: 'BuildFlow can only write inside the connected source root.', reason: 'absolute_path', hint: 'Use a repo-relative path inside the source root.' }
+    return { code: 'ABSOLUTE_PATH_BLOCKED', message: 'Absolute paths outside the repo are blocked.', userMessage: 'Workbench can only write inside the connected source root.', reason: 'absolute_path', hint: 'Use a repo-relative path inside the source root.' }
   }
   if (ENV_TEMPLATE_FILES.has(normalized.split('/').pop() || '')) {
     return null
   }
   if (normalized.split('/').some(part => part === '.git' || part === 'node_modules' || part === '.next' || part === 'dist' || part === 'build' || part === 'coverage')) {
-    return { code: 'PROTECTED_PATH', message: 'This file or directory is protected by policy.', userMessage: 'BuildFlow is not allowed to write to protected runtime or dependency directories.', reason: 'protected_directory', hint: 'Choose a docs path or update the source policy if intentional.' }
+    return { code: 'PROTECTED_PATH', message: 'This file or directory is protected by policy.', userMessage: 'Workbench is not allowed to write to protected runtime or dependency directories.', reason: 'protected_directory', hint: 'Choose a docs path or update the source policy if intentional.' }
   }
   if (typeof content === 'string' && Array.isArray(policy?.blockedContentPatterns)) {
     const matchedPattern = policy.blockedContentPatterns.find(pattern => typeof pattern === 'string' && pattern.length > 0 && content.includes(pattern))
@@ -387,29 +387,29 @@ function classifyBlockedWrite(path: string, policy?: WritePolicy, content?: stri
     }
   }
   if (matchesAny(policy?.confirmationRequiredGlobs, normalized)) {
-    return { code: 'REQUIRES_EXPLICIT_CONFIRMATION', message: 'This change requires explicit confirmation.', userMessage: 'BuildFlow needs explicit confirmation before making this change.', reason: 'confirmation_required_path', hint: 'Explicitly confirm before editing lockfiles, GitHub workflows, LICENSE, or Prisma migrations.' }
+    return { code: 'REQUIRES_EXPLICIT_CONFIRMATION', message: 'This change requires explicit confirmation.', userMessage: 'Workbench needs explicit confirmation before making this change.', reason: 'confirmation_required_path', hint: 'Explicitly confirm before editing lockfiles, GitHub workflows, LICENSE, or Prisma migrations.' }
   }
   if (matchesAny(policy?.protectedWriteGlobs, normalized)) {
-    return { code: 'REQUIRES_EXPLICIT_CONFIRMATION', message: 'This change requires explicit confirmation.', userMessage: 'BuildFlow needs explicit confirmation before making this change.', reason: 'protected_write_path', hint: 'Explicitly confirm before editing this protected maintenance path.' }
+    return { code: 'REQUIRES_EXPLICIT_CONFIRMATION', message: 'This change requires explicit confirmation.', userMessage: 'Workbench needs explicit confirmation before making this change.', reason: 'protected_write_path', hint: 'Explicitly confirm before editing this protected maintenance path.' }
   }
   if (matchesAny(policy?.blockedGlobs, normalized)) {
-    return { code: 'SECRET_PATH_BLOCKED', message: 'This path is blocked because it may contain secrets.', userMessage: 'BuildFlow will not write to secret-like files such as .env or private key paths.', reason: 'blocked_glob', hint: 'Use a docs or project note path instead.' }
+    return { code: 'SECRET_PATH_BLOCKED', message: 'This path is blocked because it may contain secrets.', userMessage: 'Workbench will not write to secret-like files such as .env or private key paths.', reason: 'blocked_glob', hint: 'Use a docs or project note path instead.' }
   }
   if (matchesAny(policy?.blockedWriteGlobs, normalized)) {
     if ((changeType === 'delete_file' || changeType === 'delete_directory' || changeType === 'rmdir') && matchesAny(policy?.generatedDeleteAllowedGlobs, normalized)) {
       return null
     }
-    return { code: 'GENERATED_WRITE_BLOCKED', message: 'This path is blocked because it is generated output.', userMessage: 'BuildFlow will not write generated or build output files.', reason: 'generated_write_blocked', hint: 'Write to the source file or a repo note instead.' }
+    return { code: 'GENERATED_WRITE_BLOCKED', message: 'This path is blocked because it is generated output.', userMessage: 'Workbench will not write generated or build output files.', reason: 'generated_write_blocked', hint: 'Write to the source file or a repo note instead.' }
   }
   if (matchesAny(policy?.protectedGlobs, normalized)) {
-    return { code: 'PROTECTED_PATH', message: 'This file is protected by policy.', userMessage: 'BuildFlow is not allowed to write to this protected file.', reason: 'protected_glob', hint: 'Choose a docs path or update the source policy if intentional.' }
+    return { code: 'PROTECTED_PATH', message: 'This file is protected by policy.', userMessage: 'Workbench is not allowed to write to this protected file.', reason: 'protected_glob', hint: 'Choose a docs path or update the source policy if intentional.' }
   }
   const allowedRoots = Array.isArray(policy?.allowedRoots) ? policy!.allowedRoots! : []
   const allowRoot = allowedRoots.some(root => typeof root === 'string' && root.length > 0 && (
     root === '*.md' ? normalized.endsWith('.md') : root.endsWith('/**') ? normalized === root.slice(0, -3) || normalized.startsWith(root.slice(0, -3) + '/') : normalized === root || normalized.startsWith(`${root}/`)
   ))
   if (!allowRoot) {
-    return { code: 'WRITE_PATH_BLOCKED', message: 'This path is blocked by the source write policy.', userMessage: 'BuildFlow can read this file, but the current write policy blocks changes to this path.', reason: 'path_not_allowed', hint: 'Choose an allowed docs path or update the source write policy.' }
+    return { code: 'WRITE_PATH_BLOCKED', message: 'This path is blocked by the source write policy.', userMessage: 'Workbench can read this file, but the current write policy blocks changes to this path.', reason: 'path_not_allowed', hint: 'Choose an allowed docs path or update the source write policy.' }
   }
   return null
 }
@@ -632,7 +632,7 @@ export function unwrapActionError(err: unknown, fallback: string) {
   }
   return {
     error: buildActionErrorEnvelope({
-      code: 'BUILDFLOW_STATUS_ERROR',
+      code: 'WORKBENCH_STATUS_ERROR',
       message: fallback,
       details: err instanceof Error ? err.message : String(err)
     }),
@@ -741,7 +741,7 @@ async function preflightWrite(body: Record<string, unknown>, userToken?: string,
 }
 
 // List all connected sources with their indexed/writable status and write policy; returns activity narration.
-export async function listBuildFlowSources(userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function listWorkbenchSources(userToken?: string, transportOptions?: ActionTransportOptions) {
   const mode = getBackendMode()
   const headers: Record<string, string> = { method: 'GET' }
   if (mode === 'relay-agent' && userToken) {
@@ -766,7 +766,7 @@ export async function listBuildFlowSources(userToken?: string, transportOptions?
     status: 'ok' as const,
     sources
   }, makeActivity({
-    operationId: 'listBuildFlowSources',
+    operationId: 'listWorkbenchSources',
     phase: 'completed',
     actionLabel: 'Listed connected sources',
     userMessage: `Found ${countLabel(sources.length, 'source')}. ${countLabel(sources.filter(source => source.enabled).length, 'source')} enabled; ${countLabel(sources.filter(source => source.searchable).length, 'source')} searchable; ${countLabel(sources.filter(source => source.writable).length, 'source')} writable.`,
@@ -778,11 +778,11 @@ export async function listBuildFlowSources(userToken?: string, transportOptions?
 }
 
 // Get the currently active source context (single or multi-mode); returns activity narration.
-export async function getBuildFlowActiveContext(userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function getWorkbenchActiveContext(userToken?: string, transportOptions?: ActionTransportOptions) {
   const activePayload = await executeAction('/api/get-active-sources?lite=1', {}, userToken, transportOptions)
   const context = normalizeActiveContext(activePayload)
   return withActivity(context, makeActivity({
-    operationId: 'getBuildFlowActiveContext',
+    operationId: 'getWorkbenchActiveContext',
     phase: 'completed',
     actionLabel: 'Checked active source context',
     userMessage: context.activeSourceIds.length > 0
@@ -798,7 +798,7 @@ export async function getBuildFlowActiveContext(userToken?: string, transportOpt
 }
 
 // Change the active source context to single or multi-mode; validates selection and returns updated context with activity narration.
-export async function setBuildFlowActiveContext(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function setWorkbenchActiveContext(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   validateContextSelection(body)
   await ensureContextSourcesAllowed(body.sourceIds as string[], userToken, transportOptions)
   const result = await executeAction('/api/set-active-sources', {
@@ -807,7 +807,7 @@ export async function setBuildFlowActiveContext(body: Record<string, unknown>, u
   }, userToken, transportOptions)
   const context = normalizeContextResult(result, result)
   return withActivity(context, makeActivity({
-    operationId: 'setBuildFlowActiveContext',
+    operationId: 'setWorkbenchActiveContext',
     phase: 'completed',
     actionLabel: 'Updated active source context',
     userMessage: `Active context is now ${context.contextMode}-source with ${countLabel(context.activeSourceIds.length, 'source')}.`,
@@ -821,22 +821,22 @@ export async function setBuildFlowActiveContext(body: Record<string, unknown>, u
 }
 
 // Route context operations (list, get, set) to specialized handlers; dispatches based on action field.
-export async function dispatchBuildFlowContext(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function dispatchWorkbenchContext(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const action = body.action
   if (action === 'list_sources') {
-    return listBuildFlowSources(userToken, transportOptions)
+    return listWorkbenchSources(userToken, transportOptions)
   }
   if (action === 'get_active') {
-    return getBuildFlowActiveContext(userToken, transportOptions)
+    return getWorkbenchActiveContext(userToken, transportOptions)
   }
   if (action === 'set_active') {
-    return setBuildFlowActiveContext(body, userToken, transportOptions)
+    return setWorkbenchActiveContext(body, userToken, transportOptions)
   }
   throw new Error('Invalid action')
 }
 
 // Inspect vault structure or search; supports list_files and search modes; returns results with activity narration.
-export async function dispatchBuildFlowInspect(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function dispatchWorkbenchInspect(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const scopeError = requireExplicitReadScope(body)
   if (scopeError) return scopeError
   const mode = body.mode
@@ -854,7 +854,7 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
       .map(entry => typeof entry === 'object' && entry !== null && typeof (entry as Record<string, unknown>).path === 'string' ? (entry as Record<string, unknown>).path as string : '')
       .filter(Boolean)
     return withActivity(result as Record<string, unknown>, makeActivity({
-      operationId: 'inspectBuildFlowContext',
+      operationId: 'inspectWorkbenchContext',
       phase: 'completed',
       actionLabel: 'Inspected repository structure',
       userMessage: `Found ${countLabel(entries.length, 'path')} under ${payload.path || 'the selected root'}.`,
@@ -881,7 +881,7 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
       .map(entry => typeof entry === 'object' && entry !== null && typeof (entry as Record<string, unknown>).path === 'string' ? (entry as Record<string, unknown>).path as string : '')
       .filter(Boolean)
     return withActivity(result as Record<string, unknown>, makeActivity({
-      operationId: 'inspectBuildFlowContext',
+      operationId: 'inspectWorkbenchContext',
       phase: 'completed',
       actionLabel: 'Searched connected source',
       userMessage: search.fallbackUsed
@@ -900,7 +900,7 @@ export async function dispatchBuildFlowInspect(body: Record<string, unknown>, us
 }
 
 // Read files from vault; supports read_paths and search_and_read modes; handles source routing and truncation; returns activity narration.
-export async function dispatchBuildFlowRead(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function dispatchWorkbenchRead(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const scopeError = requireExplicitReadScope(body)
   if (scopeError) return scopeError
   const mode = body.mode
@@ -932,7 +932,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
       ...(typeof returnedBytes === 'number' ? { returnedBytes } : {}),
       ...(timings ? { timings } : {})
     }, makeActivity({
-      operationId: 'readBuildFlowContext',
+      operationId: 'readWorkbenchContext',
       phase: 'completed',
       actionLabel: 'Read repo files',
       userMessage: budgeted
@@ -971,7 +971,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
         query: body.query,
         ...(search.fallbackAttempted ? { fallbackAttempted: 'content' } : {})
       }, makeActivity({
-        operationId: 'readBuildFlowContext',
+        operationId: 'readWorkbenchContext',
         phase: 'completed',
         actionLabel: 'Searched repo files',
         userMessage: search.fallbackAttempted
@@ -1048,7 +1048,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
         }
       })
     }, makeActivity({
-      operationId: 'readBuildFlowContext',
+      operationId: 'readWorkbenchContext',
       phase: 'completed',
       actionLabel: 'Read repo files',
       userMessage: skipped.length > 0
@@ -1083,7 +1083,7 @@ export async function dispatchBuildFlowRead(body: Record<string, unknown>, userT
       ? (result as { topFiles: Array<Record<string, unknown>> }).topFiles
       : []
     return withActivity(result as Record<string, unknown>, makeActivity({
-      operationId: 'readBuildFlowContext',
+      operationId: 'readWorkbenchContext',
       phase: 'completed',
       actionLabel: 'Prepared focused task context',
       userMessage: `Prepared context with ${countLabel(topFiles.length, 'ranked file')} and ${countLabel(exactReadPlan.length, 'planned read')}.`,
@@ -1127,7 +1127,7 @@ const SAFE_COMMAND_KINDS = new Set([
 ])
 
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
-export async function dispatchBuildFlowCommand(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function dispatchWorkbenchCommand(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
   const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''
   if (!sourceId) throw new Error('sourceId is required')
@@ -1152,10 +1152,10 @@ export async function dispatchBuildFlowCommand(body: Record<string, unknown>, us
   const exitCode = typeof (result as Record<string, unknown>).exitCode === 'number' ? (result as Record<string, unknown>).exitCode : null
   const outputTruncated = (result as Record<string, unknown>).outputTruncated === true
   return withActivity(result as Record<string, unknown>, makeActivity({
-    operationId: 'runBuildFlowCommand',
+    operationId: 'runWorkbenchCommand',
     phase: status === 'completed' ? 'completed' : 'failed',
     actionLabel: 'Ran safe validation command',
-    userMessage: `BuildFlow ran ${commandKind} in ${sourceId} and finished with ${status}${exitCode !== null ? ` (exit ${exitCode})` : ''}.`,
+    userMessage: `Workbench ran ${commandKind} in ${sourceId} and finished with ${status}${exitCode !== null ? ` (exit ${exitCode})` : ''}.`,
     sourceId,
     riskLevel: 'medium',
     requiresConfirmation: false,
@@ -1171,7 +1171,7 @@ export async function dispatchBuildFlowCommand(body: Record<string, unknown>, us
 }
 
 // Create an artifact (personal note) in vault; supports preflight and dry-run; enforces write policy; returns activity narration.
-export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function dispatchWorkbenchArtifact(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const artifactPath = composeArtifactRelativePath({
     title: typeof body.title === 'string' ? body.title : 'artifact',
     folder: typeof body.folder === 'string' ? body.folder : undefined,
@@ -1192,7 +1192,7 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
         artifactPath,
         blocked: contentRisk
       }), makeActivity({
-        operationId: 'writeBuildFlowArtifact',
+        operationId: 'writeWorkbenchArtifact',
         phase: 'blocked',
         actionLabel: 'Blocked unsafe artifact write',
         userMessage: contentRisk.userMessage,
@@ -1225,8 +1225,8 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
       userMessage: isBlocked
         ? String((result.error as Record<string, unknown>)?.userMessage || 'BuildFlow blocked this artifact write.')
         : isNeedsConfirmation
-          ? 'BuildFlow needs confirmation before creating this artifact.'
-          : `BuildFlow verified that ${artifactPath} is allowed.`,
+          ? 'Workbench needs confirmation before creating this artifact.'
+          : `Workbench verified that ${artifactPath} is allowed.`,
       sourceId: typeof result.sourceId === 'string' ? result.sourceId : undefined,
       targetPaths: artifactPath ? [artifactPath] : [],
       changedPaths: [],
@@ -1240,14 +1240,14 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
   const sourceError = await requireExplicitSourceId(body, userToken)
   if (sourceError) return sourceError
   const result = await executeAction('/api/create-artifact', { ...body, path: artifactPath }, userToken, transportOptions)
-  const verified = assertVerifiedWriteResult(result, 'writeBuildFlowArtifact')
+  const verified = assertVerifiedWriteResult(result, 'writeWorkbenchArtifact')
   const sourceId = typeof (result as Record<string, unknown>).sourceId === 'string' ? (result as Record<string, unknown>).sourceId as string : typeof body.sourceId === 'string' ? body.sourceId : undefined
   const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : artifactPath
   return withActivity({ ...result as Record<string, unknown>, ...verified }, makeActivity({
-    operationId: 'writeBuildFlowArtifact',
+    operationId: 'writeWorkbenchArtifact',
     phase: 'completed',
     actionLabel: 'Verified repo artifact',
-    userMessage: `BuildFlow created ${path || 'the artifact'} and verified it on disk.`,
+    userMessage: `Workbench created ${path || 'the artifact'} and verified it on disk.`,
     sourceId,
     targetPaths: path ? [path] : [],
     changedPaths: path ? [path] : [],
@@ -1259,7 +1259,7 @@ export async function dispatchBuildFlowArtifact(body: Record<string, unknown>, u
 }
 
 // Apply file operations (create, append, overwrite, patch, delete, move, mkdir); supports preflight, dry-run, and confirmation tokens; enforces write policy; returns activity narration.
-export async function dispatchBuildFlowFileChange(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
+export async function dispatchWorkbenchFileChange(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   if (body.dryRun === true || body.preflight === true) {
     const result = await preflightWrite(body, userToken, transportOptions) as {
       status: 'allowed' | 'needs_confirmation' | 'error'
@@ -1274,7 +1274,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const isBlocked = result.status === 'error'
     const isNeedsConfirmation = result.status === 'needs_confirmation'
     return withActivity(result, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: isBlocked ? 'blocked' : isNeedsConfirmation ? 'waiting_for_confirmation' : 'preflight',
       actionLabel: isBlocked
         ? 'Blocked unsafe write'
@@ -1282,10 +1282,10 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
           ? 'Needs confirmation'
           : 'Preflighted repo file change',
       userMessage: isBlocked
-        ? String((result.error as Record<string, unknown>)?.userMessage || 'BuildFlow blocked this file change.')
+        ? String((result.error as Record<string, unknown>)?.userMessage || 'Workbench blocked this file change.')
         : isNeedsConfirmation
-          ? 'BuildFlow needs confirmation before making this change.'
-          : `BuildFlow verified that ${typeof result.requestedPath === 'string' ? result.requestedPath : 'this change'} is allowed.`,
+          ? 'Workbench needs confirmation before making this change.'
+          : `Workbench verified that ${typeof result.requestedPath === 'string' ? result.requestedPath : 'this change'} is allowed.`,
       sourceId: typeof result.sourceId === 'string' ? result.sourceId : undefined,
       targetPaths: typeof result.normalizedPath === 'string' && result.normalizedPath ? [result.normalizedPath] : [],
       changedPaths: [],
@@ -1314,7 +1314,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange append')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
       userMessage: `BuildFlow appended to ${path || 'the file'} and verified it on disk.`,
@@ -1336,7 +1336,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange create')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
       userMessage: `BuildFlow created ${path || 'the file'} and verified it on disk.`,
@@ -1358,7 +1358,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange overwrite')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
       userMessage: `BuildFlow overwrote ${path || 'the file'} and verified it on disk.`,
@@ -1381,7 +1381,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const verified = assertVerifiedWriteResult(result, 'applyBuildFlowFileChange patch')
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity({ ...(result as Record<string, unknown>), ...verified }, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Verified repo file change',
       userMessage: `BuildFlow patched ${path || 'the file'} and verified it on disk.`,
@@ -1403,7 +1403,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const result = await executeAction('/api/delete-file', payload, userToken, transportOptions)
     const deletedPath = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity(result as Record<string, unknown>, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: changeType === 'rmdir'
         ? 'Deleted empty directory'
@@ -1435,7 +1435,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const from = typeof (result as Record<string, unknown>).from === 'string' ? (result as Record<string, unknown>).from as string : typeof body.path === 'string' ? body.path : typeof body.from === 'string' ? body.from : undefined
     const to = typeof (result as Record<string, unknown>).to === 'string' ? (result as Record<string, unknown>).to as string : typeof body.to === 'string' ? body.to : undefined
     return withActivity(result as Record<string, unknown>, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: changeType === 'rename' ? 'Renamed repo file' : 'Moved repo file',
       userMessage: `${changeType === 'rename' ? 'BuildFlow renamed' : 'BuildFlow moved'} ${from || 'the file'}${to ? ` to ${to}` : ''} and verified it on disk.`,
@@ -1455,7 +1455,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
     const result = await executeAction('/api/mkdir', payload, userToken, transportOptions)
     const path = typeof (result as Record<string, unknown>).path === 'string' ? (result as Record<string, unknown>).path as string : typeof body.path === 'string' ? body.path : undefined
     return withActivity(result as Record<string, unknown>, makeActivity({
-      operationId: 'applyBuildFlowFileChange',
+      operationId: 'applyWorkbenchFileChange',
       phase: 'completed',
       actionLabel: 'Created directory',
       userMessage: `BuildFlow created ${path || 'the directory'} and verified it on disk.`,
@@ -1473,7 +1473,7 @@ export async function dispatchBuildFlowFileChange(body: Record<string, unknown>,
 }
 
 
-export async function startBuildFlowAgentJob(body: Record<string, unknown>, userToken?: string) {
+export async function startWorkbenchAgentJob(body: Record<string, unknown>, userToken?: string) {
   const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
   const goal = typeof body.goal === 'string' ? body.goal : ''
   if (!sourceId) throw new ActionTransportError('sourceId is required', 400)
@@ -1491,7 +1491,7 @@ export async function startBuildFlowAgentJob(body: Record<string, unknown>, user
   }, userToken)
   const job = (result as { job?: { id?: string; sourceId?: string; requiresConfirmation?: boolean } }).job
   return withActivity(result as Record<string, unknown>, makeActivity({
-    operationId: 'startBuildFlowAgentJob',
+    operationId: 'startWorkbenchAgentJob',
     phase: job?.requiresConfirmation ? 'waiting_for_confirmation' : 'planning',
     actionLabel: 'Started sequential job',
     userMessage: job?.id ? `Sequential job started for ${job.sourceId || sourceId}.` : 'Sequential job start returned no job id.',
@@ -1503,7 +1503,7 @@ export async function startBuildFlowAgentJob(body: Record<string, unknown>, user
   }))
 }
 
-export async function getBuildFlowAgentJob(body: Record<string, unknown>, userToken?: string) {
+export async function getWorkbenchAgentJob(body: Record<string, unknown>, userToken?: string) {
   const payload: Record<string, unknown> = {}
   if (typeof body.jobId === 'string') payload.jobId = body.jobId
   if (typeof body.status === 'string') payload.status = body.status
@@ -1522,7 +1522,7 @@ export async function getBuildFlowAgentJob(body: Record<string, unknown>, userTo
   const result = await executeAction('/api/agent-jobs/status', payload, userToken)
   const job = (result as { job?: { id?: string; sourceId?: string; status?: string; requiresConfirmation?: boolean } }).job
   return withActivity(result as Record<string, unknown>, makeActivity({
-    operationId: 'getBuildFlowAgentJob',
+    operationId: 'getWorkbenchAgentJob',
     phase: job?.status === 'completed' ? 'completed' : job?.requiresConfirmation ? 'waiting_for_confirmation' : 'checking',
     actionLabel: 'Checked sequential job',
     userMessage: job?.id ? `Sequential job ${job.id} is ${job.status || 'active'}.` : 'Returned sequential jobs.',
@@ -1535,6 +1535,6 @@ export async function getBuildFlowAgentJob(body: Record<string, unknown>, userTo
 }
 
 
-export async function controlBuildFlowAgentRun(body: Record<string, unknown>, userToken?: string) {
+export async function controlWorkbenchAgentRun(body: Record<string, unknown>, userToken?: string) {
   return executeAction('/api/agent-jobs/control', body, userToken)
 }

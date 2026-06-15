@@ -60,8 +60,8 @@ function logActionEvent(event: string, diagnostics: ActionDiagnostics) {
 
 function buildDeadlinePayload(context: DeadlineContext, params: DeadlineParams) {
   return buildActionErrorEnvelope({
-    code: 'BUILDFLOW_ACTION_DEADLINE_EXCEEDED',
-    message: 'BuildFlow stopped this action before the hosting gateway timed out.',
+    code: 'WORKBENCH_ACTION_DEADLINE_EXCEEDED',
+    message: 'Workbench stopped this action before the hosting gateway timed out.',
     details: `${params.operationId} exceeded its ${params.deadlineMs}ms GPT-facing deadline.`,
     recovery: DEFAULT_RECOVERY,
     status: 'timeout',

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { startBuildFlowAgentJob, getBuildFlowAgentJob, controlBuildFlowAgentRun, unwrapActionError } from '@/lib/actions/gpt'
+import { startWorkbenchAgentJob, getWorkbenchAgentJob, controlWorkbenchAgentRun, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 
 export const dynamic = 'force-dynamic'
@@ -30,16 +30,16 @@ export async function POST(request: NextRequest) {
     const action = typeof body.action === 'string' ? body.action : ''
 
     if (action === 'start') {
-      const data = await startBuildFlowAgentJob(body, auth.bearerToken)
+      const data = await startWorkbenchAgentJob(body, auth.bearerToken)
       return NextResponse.json(data)
     }
 
     if (action === 'update') {
       if (body.jobId) {
-        const data = await getBuildFlowAgentJob(body, auth.bearerToken)
+        const data = await getWorkbenchAgentJob(body, auth.bearerToken)
         return NextResponse.json(data)
       }
-      const data = await getBuildFlowAgentJob(body, auth.bearerToken) as Record<string, unknown>
+      const data = await getWorkbenchAgentJob(body, auth.bearerToken) as Record<string, unknown>
       const jobs = Array.isArray(data.jobs) ? data.jobs as Record<string, unknown>[] : []
       const activeJobs = jobs.filter(j => activeStatuses.has(j.status as string))
       return NextResponse.json({
@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
 
     if (action === 'pause' || action === 'resume' || action === 'cancel' || action === 'events') {
       const controlBody = { ...body, action }
-      const data = await controlBuildFlowAgentRun(controlBody, auth.bearerToken)
+      const data = await controlWorkbenchAgentRun(controlBody, auth.bearerToken)
       return NextResponse.json(data)
     }
 

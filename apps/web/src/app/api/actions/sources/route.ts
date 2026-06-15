@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { listBuildFlowSources, unwrapActionError, withActionRouteDiagnostics } from '@/lib/actions/gpt'
+import { listWorkbenchSources, unwrapActionError, withActionRouteDiagnostics } from '@/lib/actions/gpt'
 
 export async function GET(request: NextRequest) {
   const startedAt = Date.now()
   const auth = checkActionAuth(request)
   if (!auth.valid) return auth.error
   try {
-    const data = await listBuildFlowSources(auth.bearerToken)
+    const data = await listWorkbenchSources(auth.bearerToken)
     return NextResponse.json(withActionRouteDiagnostics(data as Record<string, unknown>, { route: '/api/actions/sources', startedAt }), {
       headers: { 'Cache-Control': 'public, max-age=30' }
     })

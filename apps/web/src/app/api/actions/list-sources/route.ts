@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     const sources = Array.isArray((result.data as Record<string, unknown>).sources) ? (result.data as Record<string, unknown>).sources : []
     const sourceCount = (sources as unknown[]).length
     return NextResponse.json(withActivity(result.data as Record<string, unknown>, makeActivity({
-      operationId: 'listBuildFlowSources',
+      operationId: 'listWorkbenchSources',
       phase: 'completed',
       actionLabel: 'Listed sources',
       userMessage: `Found ${sourceCount} ${sourceCount === 1 ? 'source' : 'sources'}.`,

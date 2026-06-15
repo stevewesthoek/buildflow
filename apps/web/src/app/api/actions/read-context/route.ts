@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowRead, dispatchBuildFlowInspect, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchRead, dispatchWorkbenchInspect, unwrapActionError } from '@/lib/actions/gpt'
 import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
 import { executeAction } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
@@ -31,12 +31,12 @@ function withReadActivity(data: unknown, params: { mode: string; sourceId?: stri
     ...obj,
     activity: {
       version: '1.2.13-beta',
-      operationId: 'readBuildFlowContext',
+      operationId: 'readWorkbenchContext',
       phase: 'completed',
       actionLabel: 'Read focused repo context',
       userMessage: target
-        ? `BuildFlow completed ${params.mode} for ${target}.`
-        : `BuildFlow completed ${params.mode}.`,
+        ? `Workbench completed ${params.mode} for ${target}.`
+        : `Workbench completed ${params.mode}.`,
       sourceId: params.sourceId,
       readPaths: params.paths || (params.path ? [params.path] : undefined),
       riskLevel: 'low',
@@ -71,8 +71,8 @@ function isBroadUnscopedQuery(query: unknown): boolean {
 
 function needsNarrowerScope(params: { sourceId?: string; mode: string; query?: unknown; paths?: unknown; path?: unknown }) {
   return buildActionErrorEnvelope({
-    code: 'BUILDFLOW_NEEDS_NARROWER_SCOPE',
-    message: 'BuildFlow needs a narrower read request before it can respond quickly.',
+    code: 'WORKBENCH_NEEDS_NARROWER_SCOPE',
+    message: 'Workbench needs a narrower read request before it can respond quickly.',
     details: 'Broad unscoped searches and large reads are refused at the GPT boundary to prevent action timeouts.',
     recovery: [
       'Use grep_context with a specific path and pattern.',
@@ -82,7 +82,7 @@ function needsNarrowerScope(params: { sourceId?: string; mode: string; query?: u
     status: 'needs_narrower_scope',
     connected: true,
     diagnostics: {
-      operationId: 'readBuildFlowContext',
+      operationId: 'readWorkbenchContext',
       route: '/api/actions/read-context',
       phase: 'scope_guard',
       sourceId: params.sourceId,
@@ -97,7 +97,7 @@ function needsNarrowerScope(params: { sourceId?: string; mode: string; query?: u
 
 export async function POST(request: NextRequest) {
   return withGptActionDeadline({
-    operationId: 'readBuildFlowContext',
+    operationId: 'readWorkbenchContext',
     route: '/api/actions/read-context',
     deadlineMs: GPT_ACTION_DEADLINES_MS.readContext,
     suggestedNarrowerMode: 'grep_context',
@@ -147,12 +147,12 @@ export async function POST(request: NextRequest) {
 
     if (mode === 'list_files' || mode === 'search') {
       deadline.setPhase(mode)
-      const data = await dispatchBuildFlowInspect({ ...baseBody, mode }, auth.bearerToken, transport(mode))
+      const data = await dispatchWorkbenchInspect({ ...baseBody, mode }, auth.bearerToken, transport(mode))
       const response = stripBloat(withReadActivity(trimEntries(data), { mode, sourceId: body.sourceId, path: body.path }))
       const sizeCheck = validateResponseSize(response)
       if (!sizeCheck.ok) {
         return NextResponse.json(buildActionErrorEnvelope({
-          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          code: 'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
           message: 'BuildFlow response exceeded action size budget.',
           details: `Response was ${sizeCheck.bytes} bytes, limit is ${READ_CONTEXT_RESPONSE_BUDGET_BYTES} bytes.`,
           recovery: ['Use grep_context with a more specific pattern', 'Use read_range on a specific file', 'Reduce the limit parameter'],
@@ -174,7 +174,7 @@ export async function POST(request: NextRequest) {
       const sizeCheck = validateResponseSize(response)
       if (!sizeCheck.ok) {
         return NextResponse.json(buildActionErrorEnvelope({
-          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          code: 'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
           message: 'BuildFlow graph response exceeded action size budget.',
           details: `Response was ${sizeCheck.bytes} bytes.`,
           recovery: ['Use a narrower query', 'Reduce the limit', 'Use grep_context instead'],
@@ -196,7 +196,7 @@ export async function POST(request: NextRequest) {
       const sizeCheck = validateResponseSize(response)
       if (!sizeCheck.ok) {
         return NextResponse.json(buildActionErrorEnvelope({
-          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          code: 'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
           message: 'BuildFlow focused read response exceeded action size budget.',
           details: `Response was ${sizeCheck.bytes} bytes.`,
           recovery: [`Reduce the line context (before/after)`, `Reduce maxMatches`, 'Use read_range with a smaller line range'],
@@ -221,7 +221,7 @@ export async function POST(request: NextRequest) {
       const sizeCheck = validateResponseSize(response)
       if (!sizeCheck.ok) {
         return NextResponse.json(buildActionErrorEnvelope({
-          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          code: 'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
           message: 'BuildFlow search_and_read response exceeded action size budget.',
           details: `Response was ${sizeCheck.bytes} bytes.`,
           recovery: ['Use grep_context with a more specific pattern', 'Check if the file is too large for exact reading'],
@@ -232,12 +232,12 @@ export async function POST(request: NextRequest) {
     }
 
     deadline.setPhase(mode || 'read_context')
-    const data = await dispatchBuildFlowRead(baseBody, auth.bearerToken, transport(mode || 'read_context'))
+    const data = await dispatchWorkbenchRead(baseBody, auth.bearerToken, transport(mode || 'read_context'))
     const response = stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId, paths: body.paths }))
     const sizeCheck = validateResponseSize(response)
     if (!sizeCheck.ok) {
       return NextResponse.json(buildActionErrorEnvelope({
-        code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+        code: 'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
         message: 'BuildFlow read response exceeded action size budget.',
         details: `Response was ${sizeCheck.bytes} bytes, limit is ${READ_CONTEXT_RESPONSE_BUDGET_BYTES} bytes.`,
         recovery: ['Use a narrower read mode', 'Reduce the number of paths', 'Use grep_context instead'],

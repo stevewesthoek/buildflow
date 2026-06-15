@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowContext, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchContext, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 
 export async function GET(request: NextRequest) {
@@ -8,7 +8,7 @@ export async function GET(request: NextRequest) {
   if (!auth.valid) return auth.error
 
   try {
-    const data = await dispatchBuildFlowContext({ action: 'get_active' }, auth.bearerToken)
+    const data = await dispatchWorkbenchContext({ action: 'get_active' }, auth.bearerToken)
     return NextResponse.json(data)
   } catch (err) {
     const { error, status } = unwrapActionError(err, 'context error')
@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
         message: 'Missing action parameter'
       }), { status: 400 })
     }
-    const data = await dispatchBuildFlowContext(body, auth.bearerToken)
+    const data = await dispatchWorkbenchContext(body, auth.bearerToken)
     return NextResponse.json(data)
   } catch (err) {
     const { error, status } = unwrapActionError(err, 'context error')

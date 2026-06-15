@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowArtifact, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchArtifact, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 import { getSafeActionHttpStatus } from '@/lib/actions/http-status'
 
@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     if (body.dryRun !== true && body.preflight !== true) {
-      const preflight = await dispatchBuildFlowArtifact({ ...body, dryRun: true }, auth.bearerToken)
+      const preflight = await dispatchWorkbenchArtifact({ ...body, dryRun: true }, auth.bearerToken)
       if ('error' in (preflight as Record<string, unknown>)) {
         const payload = preflight as { error: unknown }
         const status = getSafeActionHttpStatus(payload.error)
@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(preflight)
       }
     }
-    const data = await dispatchBuildFlowArtifact(body, auth.bearerToken)
+    const data = await dispatchWorkbenchArtifact(body, auth.bearerToken)
     if (body.dryRun === true || body.preflight === true) {
       return NextResponse.json(data)
     }

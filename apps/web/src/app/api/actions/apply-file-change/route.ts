@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowFileChange, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchFileChange, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { getSafeActionHttpStatus } from '@/lib/actions/http-status'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
     })
     const isDryRun = body.dryRun === true || body.preflight === true
     deadline.setPhase(isDryRun ? 'preflight_write' : 'apply_file_change')
-    const data = await dispatchBuildFlowFileChange(body, auth.bearerToken, {
+    const data = await dispatchWorkbenchFileChange(body, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(7500),
       diagnostics: deadline.diagnostics({

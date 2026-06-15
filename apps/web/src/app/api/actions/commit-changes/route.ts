@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowCommand, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchCommand, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 
@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
 
     // Step 1: diff to get proof of what changed
     deadline.setPhase('git_diff_stat')
-    const diff = await dispatchBuildFlowCommand({ sourceId, commandKind: 'git_diff_stat', timeoutMs: 2000 }, auth.bearerToken, {
+    const diff = await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_diff_stat', timeoutMs: 2000 }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(2500),
       diagnostics: deadline.diagnostics({ phase: 'git_diff_stat', sourceId, paths })
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
 
     // Step 2: stage specific paths
     deadline.setPhase('git_add_paths')
-    const add = await dispatchBuildFlowCommand({ sourceId, commandKind: 'git_add_paths', paths, confirmedByUser, confirmationToken, timeoutMs: 2500 }, auth.bearerToken, {
+    const add = await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_add_paths', paths, confirmedByUser, confirmationToken, timeoutMs: 2500 }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(3000),
       diagnostics: deadline.diagnostics({ phase: 'git_add_paths', sourceId, paths })
@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
 
     // Step 3: commit with provided message
     deadline.setPhase('git_commit')
-    const commit = await dispatchBuildFlowCommand({ sourceId, commandKind: 'git_commit', message, confirmedByUser, confirmationToken, timeoutMs: 4500 }, auth.bearerToken, {
+    const commit = await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_commit', message, confirmedByUser, confirmationToken, timeoutMs: 4500 }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(5000),
       diagnostics: deadline.diagnostics({ phase: 'git_commit', sourceId, paths })

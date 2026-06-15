@@ -4,7 +4,7 @@ import path from 'path'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeActionGET } from '@/lib/actions/transport'
 import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
-import { listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, unwrapActionError } from '@/lib/actions/gpt'
+import { listWorkbenchSources, getWorkbenchActiveContext, setWorkbenchActiveContext, unwrapActionError } from '@/lib/actions/gpt'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 
 export const dynamic = 'force-dynamic'
@@ -77,7 +77,7 @@ export async function GET(request: NextRequest) {
       if (validInclude && (include === 'sources' || include === 'all')) {
         try {
           deadline.setPhase('list_sources')
-          const sourcesData = await listBuildFlowSources(auth.bearerToken, {
+          const sourcesData = await listWorkbenchSources(auth.bearerToken, {
             signal: deadline.signal,
             timeoutMs: deadline.transportTimeoutMs(2500),
             diagnostics: deadline.diagnostics({ phase: 'list_sources' })
@@ -107,7 +107,7 @@ export async function GET(request: NextRequest) {
       if (validInclude && (include === 'active' || include === 'all')) {
         try {
           deadline.setPhase('get_active_context')
-          const activeData = await getBuildFlowActiveContext(auth.bearerToken, {
+          const activeData = await getWorkbenchActiveContext(auth.bearerToken, {
             signal: deadline.signal,
             timeoutMs: deadline.transportTimeoutMs(1500),
             diagnostics: deadline.diagnostics({ phase: 'get_active_context' })
@@ -203,7 +203,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json().catch(() => ({}))
-    const data = await setBuildFlowActiveContext(body, auth.bearerToken) as Record<string, unknown>
+    const data = await setWorkbenchActiveContext(body, auth.bearerToken) as Record<string, unknown>
     const safeData = ensureSerializable(data) as Record<string, unknown>
     return NextResponse.json({
       ok: true,

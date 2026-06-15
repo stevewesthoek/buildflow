@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowArtifact, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchArtifact, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 import { getSafeActionHttpStatus } from '@/lib/actions/http-status'
 
@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    const data = await dispatchBuildFlowArtifact(body, auth.bearerToken)
+    const data = await dispatchWorkbenchArtifact(body, auth.bearerToken)
     if ('error' in (data as Record<string, unknown>)) {
       const payload = data as { error: unknown }
       const status = getSafeActionHttpStatus(payload.error)

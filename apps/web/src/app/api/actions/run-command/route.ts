@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowCommand, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchCommand, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 
@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
       paths: Array.isArray(body.paths) ? body.paths.filter((item: unknown): item is string => typeof item === 'string').slice(0, 10) : undefined
     })
     deadline.setPhase('run_command')
-    const data = await dispatchBuildFlowCommand({ ...body, timeoutMs }, auth.bearerToken, {
+    const data = await dispatchWorkbenchCommand({ ...body, timeoutMs }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(11_750),
       diagnostics: deadline.diagnostics({
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
         connected: true,
         status: 'timeout',
         error: {
-          code: 'BUILDFLOW_COMMAND_TIMEOUT',
+          code: 'WORKBENCH_COMMAND_TIMEOUT',
           message: 'BuildFlow stopped this command before the GPT action deadline.',
           details: `${commandKind} exceeded ${timeoutMs}ms.`,
           recovery: [

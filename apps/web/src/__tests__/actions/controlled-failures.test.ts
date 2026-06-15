@@ -26,7 +26,7 @@ async function testDeadlineReturnsHttp200OnTimeout() {
   const json = await response.json()
   assert.equal(json.ok, false)
   assert.equal(json.status, 'timeout')
-  assert.equal(json.error?.code, 'BUILDFLOW_ACTION_DEADLINE_EXCEEDED')
+  assert.equal(json.error?.code, 'WORKBENCH_ACTION_DEADLINE_EXCEEDED')
   assert.equal(abortObserved, true)
   console.log('✓ Deadline timeout returns HTTP 200 with structured timeout payload')
 }
@@ -55,11 +55,11 @@ async function testControlledFailureClassifications() {
     'EMPTY_RELAY_RESPONSE',
     'INVALID_RELAY_RESPONSE',
     'ACTION_TRANSPORT_ERROR',
-    'BUILDFLOW_ACTION_DEADLINE_EXCEEDED',
-    'BUILDFLOW_NEEDS_NARROWER_SCOPE',
+    'WORKBENCH_ACTION_DEADLINE_EXCEEDED',
+    'WORKBENCH_NEEDS_NARROWER_SCOPE',
     'STATUS_PAYLOAD_EXCEEDS_BUDGET',
-    'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
-    'BUILDFLOW_COMMAND_TIMEOUT',
+    'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
+    'WORKBENCH_COMMAND_TIMEOUT',
     'REQUIRES_EXPLICIT_CONFIRMATION'
   ]
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchBuildFlowInspect, unwrapActionError, withActionRouteDiagnostics } from '@/lib/actions/gpt'
+import { dispatchWorkbenchInspect, unwrapActionError, withActionRouteDiagnostics } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 
 export async function POST(request: NextRequest) {
@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const requestBytes = Buffer.byteLength(JSON.stringify(body ?? {}), 'utf8')
-    const data = await dispatchBuildFlowInspect(body, auth.bearerToken)
+    const data = await dispatchWorkbenchInspect(body, auth.bearerToken)
     return NextResponse.json(withActionRouteDiagnostics(data as Record<string, unknown>, { route: '/api/actions/inspect', startedAt, requestBytes }))
   } catch (err) {
     const { error, status } = unwrapActionError(err, 'inspect error')

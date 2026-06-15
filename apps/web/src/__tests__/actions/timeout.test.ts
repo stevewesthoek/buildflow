@@ -25,7 +25,7 @@ async function main() {
   const json = await response.json()
   assert.equal(json.ok, false)
   assert.equal(json.status, 'timeout')
-  assert.equal(json.error?.code, 'BUILDFLOW_ACTION_DEADLINE_EXCEEDED')
+  assert.equal(json.error?.code, 'WORKBENCH_ACTION_DEADLINE_EXCEEDED')
   assert.match(String(json.requestId || ''), /^wr_[a-z0-9]+_[a-z0-9]+$/)
   assert.equal(response.headers.get('X-Workbench-Request-Id')?.startsWith('wr_'), true)
   assert.equal(response.headers.get('X-Workbench-Deadline-Phase')?.length ?? 0, 'response_ready'.length)

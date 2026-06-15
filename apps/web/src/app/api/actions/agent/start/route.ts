@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { startBuildFlowAgentJob, unwrapActionError } from '@/lib/actions/gpt'
+import { startWorkbenchAgentJob, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 
 export async function POST(request: NextRequest) {
@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    const data = await startBuildFlowAgentJob(body, auth.bearerToken)
+    const data = await startWorkbenchAgentJob(body, auth.bearerToken)
     return NextResponse.json(data)
   } catch (err) {
     const { error, status } = unwrapActionError(err, 'agent-start error')
