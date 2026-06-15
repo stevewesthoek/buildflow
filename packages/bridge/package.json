@@ -8,6 +8,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@workbench/shared": "workspace:*",
     "ws": "^8.14.0"
   },
   "devDependencies": {

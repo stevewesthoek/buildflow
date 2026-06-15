@@ -18,9 +18,9 @@ services:
       RELAY_DATA_DIR: /var/lib/buildflow
       NODE_ENV: production
       COMPOSE_PROJECT_NAME: workbench
-      WORKBENCH_BUILD_SHA: ${WORKBENCH_BUILD_SHA:-unknown}
-      WORKBENCH_BUILD_TIMESTAMP: ${WORKBENCH_BUILD_TIMESTAMP:-unknown}
-      # Phase 5C: Relay proxy token for authenticated relay-agent requests
+      WORKBENCH_BUILD_SHA: ${WORKBENCH_BUILD_SHA:-${BUILDFLOW_BUILD_SHA:-unknown}}
+      WORKBENCH_BUILD_TIMESTAMP: ${WORKBENCH_BUILD_TIMESTAMP:-${BUILDFLOW_BUILD_TIMESTAMP:-unknown}}
+      # Relay proxy token for authenticated relay-agent requests
       # Generate with: openssl rand -hex 32
       # For dev/testing, set a test value; for production, use a strong secret
       RELAY_PROXY_TOKEN: ${RELAY_PROXY_TOKEN:-change-me-in-production}

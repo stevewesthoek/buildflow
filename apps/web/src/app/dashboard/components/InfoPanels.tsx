@@ -13,7 +13,7 @@ export function InfoPanels() {
           <DashboardMetaRow label="Relay" value="Via relay (3053)" className="text-[12px]" />
         </div>
         <p className="mt-3 text-[12px] text-bf-muted">
-          Set via <DashboardCodeText>BUILDFLOW_BACKEND_MODE</DashboardCodeText>
+          Set via <DashboardCodeText>WORKBENCH_BACKEND_MODE</DashboardCodeText>
         </p>
       </DashboardPanel>
 

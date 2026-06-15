@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 
 async function main() {
-  process.env.BUILDFLOW_ACTION_TOKEN = process.env.BUILDFLOW_ACTION_TOKEN || 'test-token'
-  process.env.BUILDFLOW_BACKEND_MODE = 'direct-agent'
+  process.env.WORKBENCH_ACTION_TOKEN = process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || 'test-token'
+  process.env.WORKBENCH_BACKEND_MODE = 'direct-agent'
   process.env.LOCAL_AGENT_URL = 'http://127.0.0.1:65535'
 
   const { GET } = await import('../apps/web/src/app/api/actions/status/route')
@@ -26,7 +26,7 @@ async function main() {
   }
 
   const authHeaders = {
-    authorization: `Bearer ${process.env.BUILDFLOW_ACTION_TOKEN}`
+    authorization: `Bearer ${process.env.WORKBENCH_ACTION_TOKEN}`
   }
 
   await withFetch((async () => new Response(JSON.stringify({
@@ -65,7 +65,7 @@ async function main() {
     headers: { 'content-type': 'application/json' }
   })) as unknown as typeof fetch, async () => {
     try {
-      await executeActionGET('/api/status', process.env.BUILDFLOW_ACTION_TOKEN)
+      await executeActionGET('/api/status', process.env.WORKBENCH_ACTION_TOKEN)
       assert.fail('expected executeActionGET to throw on empty response')
     } catch (err) {
       assert(err instanceof ActionTransportError)

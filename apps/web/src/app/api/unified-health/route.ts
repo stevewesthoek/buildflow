@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
+import { getBuildSha, getBuildTimestamp } from '@/lib/env-compat'
 
 const LOCAL_AGENT_URL = process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:3052'
 const LOCAL_RELAY_URL = process.env.LOCAL_RELAY_URL || 'http://127.0.0.1:3053'
@@ -52,8 +53,8 @@ export async function GET() {
       service: {
         role: 'web',
         packageVersion: process.env.npm_package_version || '1.2.13-beta',
-        gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
-        buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+        gitCommit: getBuildSha(),
+        buildTimestamp: getBuildTimestamp(),
         processStartedAt: WEB_PROCESS_STARTED_AT,
         pid: process.pid,
         webBuildId: process.env.WORKBENCH_WEB_BUILD_ID || readWebBuildId() || 'unknown'

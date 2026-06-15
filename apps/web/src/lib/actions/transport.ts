@@ -1,5 +1,6 @@
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope, type ActionDiagnostics } from './action-response'
+import { getActionDiagnostics } from '../env-compat'
 
 export class ActionTransportError extends Error {
   constructor(message: string, public statusCode: number, public payload?: unknown) {
@@ -259,7 +260,7 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
 }
 
 function shouldAttachDiagnostics() {
-  return process.env.BUILDFLOW_ACTION_DIAGNOSTICS === '1'
+  return getActionDiagnostics()
 }
 
 function attachTransportDiagnostics(data: unknown, diagnostics: TransportDiagnostics): unknown {

@@ -4,6 +4,7 @@ import { saveConfig } from '../agent/config'
 import { getConfigDir } from '../utils/paths'
 import { log } from '../utils/logger'
 import os from 'os'
+import { getApiBaseUrl } from '@workbench/shared'
 
 export async function initCommand(): Promise<void> {
   const configDir = getConfigDir()
@@ -18,7 +19,7 @@ export async function initCommand(): Promise<void> {
     userId: '',
     deviceId: '',
     deviceToken: '',
-    apiBaseUrl: process.env.BUILDFLOW_API || 'http://localhost:3000',
+    apiBaseUrl: getApiBaseUrl(),
     sources: [],
     vaultPath: '',
     localPort: 3052,

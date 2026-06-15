@@ -6,6 +6,7 @@ import { executeActionGET } from '@/lib/actions/transport'
 import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
 import { listWorkbenchSources, getWorkbenchActiveContext, setWorkbenchActiveContext, unwrapActionError } from '@/lib/actions/gpt'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
+import { getBuildSha, getBuildTimestamp } from '@/lib/env-compat'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -134,8 +135,8 @@ export async function GET(request: NextRequest) {
         service: {
           role: 'web',
           packageVersion: WEB_PACKAGE_VERSION,
-          gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
-          buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+          gitCommit: getBuildSha(),
+          buildTimestamp: getBuildTimestamp(),
           processStartedAt: WEB_PROCESS_STARTED_AT,
           pid: process.pid,
           webBuildId: process.env.WORKBENCH_WEB_BUILD_ID || readWebBuildId() || 'unknown'

@@ -5,8 +5,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_PORT="${AGENT_PORT:-3052}"
 RELAY_PORT="${RELAY_PORT:-3053}"
 WEB_PORT="${WEB_PORT:-3054}"
-WEB_SERVER_MODE="${BUILDFLOW_WEB_SERVER_MODE:-production}"
-AGENT_SERVER_MODE="${BUILDFLOW_AGENT_SERVER_MODE:-dev}"
+WEB_SERVER_MODE="${WORKBENCH_WEB_SERVER_MODE:-${BUILDFLOW_WEB_SERVER_MODE:-production}}"
+AGENT_SERVER_MODE="${WORKBENCH_AGENT_SERVER_MODE:-${BUILDFLOW_AGENT_SERVER_MODE:-dev}}"
 AGENT_HEALTH_URL="http://127.0.0.1:${AGENT_PORT}/health"
 RELAY_HEALTH_URL="http://127.0.0.1:${RELAY_PORT}/health"
 WEB_HEALTH_URL="http://127.0.0.1:${WEB_PORT}/api/openapi"
@@ -442,7 +442,7 @@ restart_fresh() {
   export WORKBENCH_WEB_BUILD_ID="$(cat "$REPO_ROOT/apps/web/.next/BUILD_ID")"
 
   start_relay
-  BUILDFLOW_AGENT_SERVER_MODE=production AGENT_SERVER_MODE=production start_agent_if_needed
+  WORKBENCH_AGENT_SERVER_MODE=production AGENT_SERVER_MODE=production start_agent_if_needed
   start_web_if_needed
   sleep 8
   verify_all

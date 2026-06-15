@@ -22,6 +22,7 @@ import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from 
 import { prepareTaskContext } from './prepare-task-context'
 import { handleFocusedRead } from './focused-read'
 import { handleGraphContext } from './graph-context'
+import { getBuildSha, getBuildTimestamp } from '@workbench/shared'
 
 let cliVersion = '1.2.13-beta'
 try {
@@ -292,8 +293,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         service: {
           role: 'agent',
           packageVersion: cliVersion,
-          gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
-          buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+          gitCommit: getBuildSha(),
+          buildTimestamp: getBuildTimestamp(),
           processStartedAt: agentProcessStartedAt,
           pid: process.pid
         }

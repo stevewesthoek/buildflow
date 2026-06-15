@@ -3,6 +3,7 @@ import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
 import { GPT_ACTION_RESPONSE_BYTE_LIMIT, GPT_ACTION_RESPONSE_CHAR_LIMIT } from './payload-budget'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_DEFAULT_INSPECT_LIMIT } from '@workbench/shared'
+import { getActionDiagnostics } from '../env-compat'
 
 type NormalizedSource = {
   id: string
@@ -207,7 +208,7 @@ export function withActivity<T extends Record<string, unknown>>(result: T, activ
 }
 
 export function withActionRouteDiagnostics<T extends Record<string, unknown>>(result: T, params: { route: string; startedAt: number; requestBytes?: number }): T & { diagnostics?: Record<string, unknown> } {
-  if (process.env.WORKBENCH_ACTION_DIAGNOSTICS !== '1' && process.env.BUILDFLOW_ACTION_DIAGNOSTICS !== '1') {
+  if (!getActionDiagnostics()) {
     return result
   }
   const existingDiagnostics = result.diagnostics && typeof result.diagnostics === 'object' && !Array.isArray(result.diagnostics)

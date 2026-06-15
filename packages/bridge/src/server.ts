@@ -12,6 +12,7 @@ import { handleAdminDevices, handleAdminRequests, setDeviceMap } from './admin/e
 import { handleCreateSession, handleGetSession, handleListSessions, handleCloseSession } from './admin/session-endpoints'
 import type { PersistedDevice } from './storage/types'
 import { startup, type StartupResult } from './startup'
+import { getBuildSha, getBuildTimestamp } from '@workbench/shared'
 
 let runtimeConfig: StartupResult | null = null
 const HEARTBEAT_INTERVAL = 30000
@@ -309,8 +310,8 @@ const server = http.createServer(async (req, res) => {
       service: {
         role: 'relay',
         packageVersion: relayVersion,
-        gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
-        buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+        gitCommit: getBuildSha(),
+        buildTimestamp: getBuildTimestamp(),
         processStartedAt: relayProcessStartedAt,
         pid: process.pid,
         composeProject: process.env.COMPOSE_PROJECT_NAME || 'workbench',
@@ -343,8 +344,8 @@ const server = http.createServer(async (req, res) => {
         service: {
           role: 'relay',
           packageVersion: relayVersion,
-          gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
-          buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+          gitCommit: getBuildSha(),
+          buildTimestamp: getBuildTimestamp(),
           processStartedAt: relayProcessStartedAt,
           pid: process.pid,
           composeProject: process.env.COMPOSE_PROJECT_NAME || 'workbench',

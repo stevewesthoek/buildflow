@@ -1,16 +1,13 @@
+import { getBackendMode as getBackendModeCompat, getActionToken as getActionTokenCompat } from '../env-compat'
+
 export type BackendMode = 'direct-agent' | 'relay-agent'
 
 export function getBackendMode(): BackendMode {
-  const mode = process.env.BUILDFLOW_BACKEND_MODE as BackendMode | undefined
-  if (mode && !['direct-agent', 'relay-agent'].includes(mode)) {
-    console.warn(`Unknown BUILDFLOW_BACKEND_MODE: ${mode}. Defaulting to direct-agent.`)
-    return 'direct-agent'
-  }
-  return mode || 'direct-agent'
+  return getBackendModeCompat()
 }
 
 export function getActionToken(): string | null {
-  return process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || null
+  return getActionTokenCompat()
 }
 
 export function getRelayProxyToken(): string | null {
