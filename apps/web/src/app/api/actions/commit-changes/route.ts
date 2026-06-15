@@ -10,15 +10,17 @@ export const revalidate = 0
 // Compound action: git_diff_stat → git_add_paths → git_commit in one call.
 // Cuts 3 Custom GPT round-trips to 1 per task, reducing ChatGPT reasoning overhead.
 export async function POST(request: NextRequest) {
-  const auth = checkActionAuth(request)
-  if (!auth.valid) return auth.error
-
   return withGptActionDeadline({
     operationId: 'commitBuildFlowChanges',
     route: '/api/actions/commit-changes',
     deadlineMs: GPT_ACTION_DEADLINES_MS.commitChanges,
     suggestedNextAction: 'Commit fewer explicit paths or retry after checking git status.'
   }, async (deadline) => {
+    deadline.setPhase('authenticate')
+    const auth = checkActionAuth(request)
+    deadline.markStage('authentication_complete', { authValid: auth.valid })
+    if (!auth.valid) return auth.error!
+
     deadline.setPhase('parse_body')
     const body = await request.json()
     const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''

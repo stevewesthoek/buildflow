@@ -95,9 +95,6 @@ function needsNarrowerScope(params: { sourceId?: string; mode: string; query?: u
 }
 
 export async function POST(request: NextRequest) {
-  const auth = checkActionAuth(request)
-  if (!auth.valid) return auth.error
-
   return withGptActionDeadline({
     operationId: 'readBuildFlowContext',
     route: '/api/actions/read-context',
@@ -105,6 +102,11 @@ export async function POST(request: NextRequest) {
     suggestedNarrowerMode: 'grep_context',
     suggestedNextAction: 'Split the read into grep_context, read_range, or read_symbol.'
   }, async (deadline) => {
+    deadline.setPhase('authenticate')
+    const auth = checkActionAuth(request)
+    deadline.markStage('authentication_complete', { authValid: auth.valid })
+    if (!auth.valid) return auth.error!
+
     deadline.setPhase('parse_body')
     const body = await request.json()
     const mode = typeof body.mode === 'string' ? body.mode : ''

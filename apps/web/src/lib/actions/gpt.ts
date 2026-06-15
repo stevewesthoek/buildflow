@@ -520,6 +520,7 @@ function assertVerifiedWriteResult(result: unknown, fallback: string): VerifiedW
 async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?: ActionTransportOptions): Promise<unknown> {
   const startedAt = Date.now()
   const timeoutMs = transportOptions?.timeoutMs ?? 10000
+  const maxResponseBytes = transportOptions?.maxResponseBytes ?? 512 * 1024
   let response: Response
   try {
     response = await fetchWithTimeout(
@@ -548,7 +549,33 @@ async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?
     )
   }
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}))
+    const errorText = await response.text().catch(() => '')
+    if (Buffer.byteLength(errorText, 'utf8') > maxResponseBytes) {
+      throw new ActionTransportError(
+        `Action failed: ${response.status}`,
+        413,
+        buildActionErrorEnvelope({
+          code: 'RESPONSE_SIZE_EXCEEDED',
+          message: 'BuildFlow error response exceeded size limit.',
+          details: `Error response from ${endpoint} exceeded ${maxResponseBytes} bytes.`,
+          status: 'needs_narrower_scope',
+          diagnostics: {
+            ...(transportOptions?.diagnostics || {}),
+            endpoint,
+            elapsedMs: Date.now() - startedAt,
+            deadlineMs: timeoutMs
+          }
+        })
+      )
+    }
+    let errorData: unknown = {}
+    if (errorText.trim()) {
+      try {
+        errorData = JSON.parse(errorText)
+      } catch {
+        errorData = { error: errorText.slice(0, 1000) }
+      }
+    }
     throw new ActionTransportError(
       (errorData as Record<string, unknown>).error as string || `Action failed: ${response.status}`,
       response.status,
@@ -567,7 +594,26 @@ async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?
         : errorData
     )
   }
-  return response.json()
+  const text = await response.text()
+  if (Buffer.byteLength(text, 'utf8') > maxResponseBytes) {
+    throw new ActionTransportError(
+      `Response too large from ${endpoint}`,
+      413,
+      buildActionErrorEnvelope({
+        code: 'RESPONSE_SIZE_EXCEEDED',
+        message: 'BuildFlow response exceeded size limit.',
+        details: `Response from ${endpoint} exceeded ${maxResponseBytes} bytes.`,
+        status: 'needs_narrower_scope',
+        diagnostics: {
+          ...(transportOptions?.diagnostics || {}),
+          endpoint,
+          elapsedMs: Date.now() - startedAt,
+          deadlineMs: timeoutMs
+        }
+      })
+    )
+  }
+  return JSON.parse(text)
 }
 
 // Normalize action errors into consistent error envelope format with proper HTTP status code extraction.

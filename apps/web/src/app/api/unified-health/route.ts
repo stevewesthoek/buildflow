@@ -1,9 +1,20 @@
 import { NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
 
 const LOCAL_AGENT_URL = process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:3052'
 const LOCAL_RELAY_URL = process.env.LOCAL_RELAY_URL || 'http://127.0.0.1:3053'
 
 const HEALTH_TIMEOUT_MS = 3000
+const WEB_PROCESS_STARTED_AT = new Date().toISOString()
+
+function readWebBuildId(): string | undefined {
+  try {
+    return fs.readFileSync(path.join(process.cwd(), '.next/BUILD_ID'), 'utf8').trim() || undefined
+  } catch {
+    return undefined
+  }
+}
 
 async function checkService(url: string): Promise<boolean> {
   try {
@@ -37,6 +48,15 @@ export async function GET() {
         agent: { url: `${LOCAL_AGENT_URL}/health`, healthy: agentOk },
         relay: { url: `${LOCAL_RELAY_URL}/health`, healthy: relayOk },
         web: { url: 'http://localhost:3054/api/openapi', healthy: webOk }
+      },
+      service: {
+        role: 'web',
+        packageVersion: process.env.npm_package_version || '1.2.13-beta',
+        gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
+        buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+        processStartedAt: WEB_PROCESS_STARTED_AT,
+        pid: process.pid,
+        webBuildId: process.env.WORKBENCH_WEB_BUILD_ID || readWebBuildId() || 'unknown'
       }
     },
     { status: allHealthy ? 200 : 503 }

@@ -52,7 +52,7 @@ function isConnectionError(err: unknown) {
 
 async function readJsonResponse(response: Response, endpoint: string, maxResponseBytes = DEFAULT_RESPONSE_SIZE_LIMIT_BYTES): Promise<FetchResult> {
   const readStartedAt = Date.now()
-  const text = await response.text()
+  const text = await readResponseText(response, endpoint, maxResponseBytes)
   const readMs = Date.now() - readStartedAt
   const responseBytes = Buffer.byteLength(text, 'utf8')
 
@@ -101,6 +101,45 @@ async function readJsonResponse(response: Response, endpoint: string, maxRespons
   }
 
   return { response, text, data, readMs, parseMs: Date.now() - parseStartedAt, responseBytes }
+}
+
+async function readResponseText(response: Response, endpoint: string, maxResponseBytes = DEFAULT_RESPONSE_SIZE_LIMIT_BYTES): Promise<string> {
+  if (!response.body) {
+    return response.text()
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const chunks: string[] = []
+  let responseBytes = 0
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      responseBytes += value.byteLength
+      if (responseBytes > maxResponseBytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new ActionTransportError(
+          `Response too large from ${endpoint}`,
+          413,
+          buildActionErrorEnvelope({
+            code: 'RESPONSE_SIZE_EXCEEDED',
+            message: 'BuildFlow response exceeded size limit.',
+            details: `Response exceeded ${maxResponseBytes} bytes while reading.`,
+            recovery: ['Use a narrower read mode', 'Reduce file count or size', 'Use grep_context instead of broad reads'],
+            status: 'needs_narrower_scope'
+          })
+        )
+      }
+      chunks.push(decoder.decode(value, { stream: true }))
+    }
+    chunks.push(decoder.decode())
+    return chunks.join('')
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 function compactDiagnostics(input: ActionDiagnostics): ActionDiagnostics {
@@ -248,7 +287,7 @@ export async function executeAction(
     const fetchMs = Date.now() - fetchStartedAt
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => '')
+      const errorText = await readResponseText(response, endpoint, options.maxResponseBytes ?? DEFAULT_RESPONSE_SIZE_LIMIT_BYTES).catch(() => '')
       let errorData: unknown = {}
       if (errorText.trim()) {
         try {

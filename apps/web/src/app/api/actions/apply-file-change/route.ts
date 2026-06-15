@@ -9,15 +9,17 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 export async function POST(request: NextRequest) {
-  const auth = checkActionAuth(request)
-  if (!auth.valid) return auth.error
-
   return withGptActionDeadline({
     operationId: 'applyBuildFlowFileChange',
     route: '/api/actions/apply-file-change',
     deadlineMs: GPT_ACTION_DEADLINES_MS.applyFileChange,
     suggestedNextAction: 'Split the write into a smaller patch or dry-run first.'
   }, async (deadline) => {
+    deadline.setPhase('authenticate')
+    const auth = checkActionAuth(request)
+    deadline.markStage('authentication_complete', { authValid: auth.valid })
+    if (!auth.valid) return auth.error!
+
     deadline.setPhase('parse_body')
     const body = await request.json()
     deadline.addDiagnostics({

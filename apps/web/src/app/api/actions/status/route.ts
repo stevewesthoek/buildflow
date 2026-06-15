@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeActionGET } from '@/lib/actions/transport'
 import { listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, unwrapActionError } from '@/lib/actions/gpt'
@@ -9,6 +11,16 @@ export const revalidate = 0
 
 let activeRequests = 0
 const STATUS_RESPONSE_BUDGET_BYTES = 8_000
+const WEB_PROCESS_STARTED_AT = new Date().toISOString()
+const WEB_PACKAGE_VERSION = process.env.npm_package_version || '1.2.13-beta'
+
+function readWebBuildId(): string | undefined {
+  try {
+    return fs.readFileSync(path.join(process.cwd(), '.next/BUILD_ID'), 'utf8').trim() || undefined
+  } catch {
+    return undefined
+  }
+}
 
 function ensureSerializable(value: unknown): unknown {
   if (value === null || value === undefined) return value
@@ -31,9 +43,6 @@ function ensureSerializable(value: unknown): unknown {
 export async function GET(request: NextRequest) {
   activeRequests++
   try {
-    const auth = checkActionAuth(request)
-    if (!auth.valid) return auth.error
-
     const include = request.nextUrl.searchParams.get('include')
     const validInclude = include === 'sources' || include === 'active' || include === 'all'
 
@@ -43,6 +52,11 @@ export async function GET(request: NextRequest) {
       deadlineMs: GPT_ACTION_DEADLINES_MS.status,
       suggestedNextAction: 'Retry status after checking the local BuildFlow stack.'
     }, async (deadline) => {
+      deadline.setPhase('authenticate')
+      const auth = checkActionAuth(request)
+      deadline.markStage('authentication_complete', { authValid: auth.valid })
+      if (!auth.valid) return auth.error!
+
       deadline.setPhase('check_status')
       deadline.addDiagnostics({ mode: validInclude ? include : 'status' })
 
@@ -115,7 +129,16 @@ export async function GET(request: NextRequest) {
       payload.runtime = {
         activeRequests,
         heapUsedMb: Math.round(mem.heapUsed / 1_048_576),
-        rssMb: Math.round(mem.rss / 1_048_576)
+        rssMb: Math.round(mem.rss / 1_048_576),
+        service: {
+          role: 'web',
+          packageVersion: WEB_PACKAGE_VERSION,
+          gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
+          buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+          processStartedAt: WEB_PROCESS_STARTED_AT,
+          pid: process.pid,
+          webBuildId: process.env.WORKBENCH_WEB_BUILD_ID || readWebBuildId() || 'unknown'
+        }
       }
 
       payload.activity = {

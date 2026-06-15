@@ -23,6 +23,7 @@ export type DeadlineContext = {
   deadlineMs: number
   signal: AbortSignal
   setPhase: (phase: string) => void
+  markStage: (stage: string, extra?: ActionDiagnostics) => void
   addDiagnostics: (diagnostics: ActionDiagnostics) => void
   diagnostics: (extra?: ActionDiagnostics) => ActionDiagnostics
   elapsedMs: () => number
@@ -46,6 +47,15 @@ const DEFAULT_RECOVERY = [
 
 function compactDiagnostics(input: ActionDiagnostics): ActionDiagnostics {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined && value !== null)) as ActionDiagnostics
+}
+
+function logActionEvent(event: string, diagnostics: ActionDiagnostics) {
+  const payload = compactDiagnostics({
+    tool: 'workbench_action_origin',
+    event,
+    ...diagnostics
+  })
+  console.info(JSON.stringify(payload))
 }
 
 function buildDeadlinePayload(context: DeadlineContext, params: DeadlineParams) {
@@ -75,12 +85,27 @@ export async function withGptActionDeadline(
   const startedAt = Date.now()
   const requestId = generateRequestId()
   const controller = new AbortController()
+  const stages: Array<ActionDiagnostics> = []
   const mutableDiagnostics: ActionDiagnostics = {
     requestId,
     operationId: params.operationId,
     route: params.route,
     actionDeadlineMs: params.deadlineMs,
     phase: 'starting'
+  }
+
+  const recordStage = (stage: string, extra?: ActionDiagnostics) => {
+    const entry = compactDiagnostics({
+      stage,
+      phase: stage,
+      elapsedMs: Date.now() - startedAt,
+      remainingMs: Math.max(0, params.deadlineMs - (Date.now() - startedAt)),
+      ...(extra || {})
+    })
+    stages.push(entry)
+    if (stages.length > 24) stages.shift()
+    mutableDiagnostics.phase = stage
+    mutableDiagnostics.stages = stages
   }
 
   const context: DeadlineContext = {
@@ -91,7 +116,10 @@ export async function withGptActionDeadline(
     deadlineMs: params.deadlineMs,
     signal: controller.signal,
     setPhase: (phase: string) => {
-      mutableDiagnostics.phase = phase
+      recordStage(phase)
+    },
+    markStage: (stage: string, extra?: ActionDiagnostics) => {
+      recordStage(stage, extra)
     },
     addDiagnostics: (diagnostics: ActionDiagnostics) => {
       Object.assign(mutableDiagnostics, compactDiagnostics(diagnostics))
@@ -107,10 +135,13 @@ export async function withGptActionDeadline(
   }
 
   let timer: ReturnType<typeof setTimeout> | undefined
+  recordStage('route_start')
+  logActionEvent('start', context.diagnostics({ phase: 'route_start' }))
   const timeoutResponse = new Promise<NextResponse>((resolve) => {
     timer = setTimeout(() => {
       context.setPhase(`${String(mutableDiagnostics.phase || 'running')}:deadline_exceeded`)
       controller.abort()
+      logActionEvent('deadline_exceeded', context.diagnostics({ phase: String(mutableDiagnostics.phase || 'deadline_exceeded') }))
       resolve(NextResponse.json(buildDeadlinePayload(context, params), {
         status: 200,
         headers: {
@@ -124,7 +155,55 @@ export async function withGptActionDeadline(
   try {
     const actionResponse = handler(context)
     const response = await Promise.race([actionResponse, timeoutResponse])
+    context.markStage('response_ready', { statusCode: response.status })
     response.headers.set('X-Workbench-Request-Id', requestId)
+    response.headers.set('X-Workbench-Deadline-Phase', String(mutableDiagnostics.phase || 'response_ready'))
+    logActionEvent('finish', context.diagnostics({
+      phase: String(mutableDiagnostics.phase || 'response_ready'),
+      statusCode: response.status,
+      elapsedMs: context.elapsedMs(),
+      remainingMs: context.remainingMs()
+    }))
+    return response
+  } catch (err) {
+    context.markStage('unhandled_error', {
+      errorName: err instanceof Error ? err.name : undefined,
+      errorMessage: err instanceof Error ? err.message : String(err)
+    })
+    logActionEvent('error', context.diagnostics({ phase: 'unhandled_error' }))
+    const transportPayload = err && typeof err === 'object' && 'payload' in err
+      ? (err as { payload?: unknown }).payload
+      : undefined
+    const statusCode = err && typeof err === 'object' && 'statusCode' in err && typeof (err as { statusCode?: unknown }).statusCode === 'number'
+      ? (err as { statusCode: number }).statusCode
+      : 500
+    const payload = transportPayload && typeof transportPayload === 'object' && !Array.isArray(transportPayload)
+      ? {
+          ...(transportPayload as Record<string, unknown>),
+          requestId,
+          diagnostics: compactDiagnostics({
+            ...(((transportPayload as Record<string, unknown>).diagnostics && typeof (transportPayload as Record<string, unknown>).diagnostics === 'object')
+              ? (transportPayload as Record<string, unknown>).diagnostics as Record<string, unknown>
+              : {}),
+            ...context.diagnostics({ phase: 'unhandled_error' })
+          })
+        }
+      : buildActionErrorEnvelope({
+          code: 'WORKBENCH_ACTION_ERROR',
+          message: 'Workbench action failed before response completion.',
+          details: err instanceof Error ? err.message : String(err),
+          status: controller.signal.aborted ? 'timeout' : 'error',
+          requestId,
+          diagnostics: context.diagnostics({ phase: 'unhandled_error' })
+        })
+    const response = NextResponse.json(payload, {
+      status: statusCode,
+      headers: {
+        'Cache-Control': 'no-store',
+        'X-Workbench-Request-Id': requestId
+      }
+    })
+    response.headers.set('X-Workbench-Deadline-Phase', String(mutableDiagnostics.phase || 'unhandled_error'))
     return response
   } finally {
     if (timer) clearTimeout(timer)

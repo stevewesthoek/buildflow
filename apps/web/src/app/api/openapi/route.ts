@@ -26,7 +26,7 @@ const openapi = {
       get: {
         operationId: 'getBuildFlowStatus',
         summary: 'Fast status check with a 4s BuildFlow deadline',
-        description: 'Compact health check: ok/connected flags, optional sources and context, runtime stats. Response is always under 8 KB with diagnostics stripped. Completes in <500ms normally. Use this first to lock sourceId, then use readBuildFlowContext for repo details. If not connected, returns unavailable status with guidance.',
+        description: 'Compact health check: ok/connected flags, optional sources and context, runtime stats. Response is always under 8 KB with diagnostics stripped. Completes in <500ms normally. Use this first to lock sourceId, then call the read-context action for repo details. If not connected, returns unavailable status with guidance.',
         'x-openai-isConsequential': false,
         security: [bearer],
         parameters: [
@@ -44,7 +44,7 @@ const openapi = {
       post: {
         operationId: 'readBuildFlowContext',
         summary: 'Bounded repo context read with an 8s BuildFlow deadline',
-        description: 'Fast exact reads for known paths or focused searches. Response is capped at 256 KB; if broader scope needed, BuildFlow returns `needs_narrower_scope` with a focused fallback suggestion. Exact reads (grep_context, read_range, read_symbol, read_paths) complete in <2s. Searches and graph_context complete in <3s if cached.',
+        description: 'Fast exact reads and cached Graphify navigation. Unknown areas should call graph_context first, then exact read. Known paths/symbols should skip graph. Broad scope returns needs_narrower_scope.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -55,7 +55,7 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol', 'graph_context'], description: 'Mode determines the operation. exact_reads (grep_context/read_range/read_symbol/read_paths) are fastest. search_and_read and prepare_task_context are bounded; if too broad, returns needs_narrower_scope. Use graph_context for cached navigation hints before exact reads.' },
+                  mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol', 'graph_context'], description: 'Mode determines operation. Use graph_context first for unknown areas, then verify with exact reads. Known paths use read_paths/grep_context/read_range directly. Known symbols use read_symbol.' },
                   sourceId: { type: 'string' },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 5, description: 'At most 5 exact repo-relative paths for GPT use. For read_paths, enforced; for search_and_read, used as filter.' },
                   query: { type: 'string', maxLength: 200, description: 'Concrete task goal or search query. Broad unscoped queries ("all", "repo", "code") fail fast with narrower-mode guidance. For graph_context, ranks cached Graphify navigation hints. For search modes, must be specific (e.g., "function name", "error message pattern").' },
@@ -195,7 +195,7 @@ const openapi = {
                   packageDir: { type: 'string', description: 'Required for run_package_script, run_package_test, and run_package_test_marker. Use "." for the selected source root.' },
                   confirmedByUser: { type: 'boolean', description: 'Only use when the user explicitly confirmed a confirmation-gated safe command.' },
                   confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated safe commands.' },
-                  timeoutMs: { type: 'integer', minimum: 1000, maximum: 12000, description: 'GPT-facing command timeout. Defaults to 5-8s and is capped below the 45s platform timeout.' }
+                  timeoutMs: { type: 'integer', minimum: 1000, maximum: 12000, description: 'GPT-facing command timeout. Defaults to 5-8s and is capped well below the external action timeout.' }
                 },
                 required: ['sourceId', 'commandKind']
               }

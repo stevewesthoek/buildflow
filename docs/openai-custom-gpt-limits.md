@@ -1,8 +1,8 @@
 # OpenAI Custom GPT Action Limits
 
 **Document type:** Authoritative constraints reference — read before changing schema, routes, or instructions  
-**Last verified:** 2026-06-04
-**Research method:** OpenAI official docs for action timeout, payload, schema, and GPT action setup constraints
+**Last verified:** 2026-06-15
+**Research method:** Current official OpenAI docs for action timeout, payload, schema, authentication, Preview testing, and GPT action setup constraints
 
 > **CRITICAL FOR ALL FUTURE DEVELOPERS:** Every architecture decision in BuildFlow's Custom GPT layer is constrained by these limits. Do NOT implement features that contradict them. This document was written after discovering that server-side agent polling — which BuildFlow previously used — is fundamentally incompatible with Custom GPTs. Read the "What Does NOT Work" section carefully.
 
@@ -27,6 +27,14 @@
 | Pro mode | Actions are not available for Pro mode | [help.openai.com/en/articles/9442513-configuring-actions-in-gpts](https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts) |
 
 ---
+
+## Official Sources Checked On 2026-06-15
+
+- **Production notes on GPT Actions** — OpenAI Developers, update date not shown on page. Confirms 45-second round-trip timeout, 100,000-character request/response payload limits, TLS 1.2+ on port 443, OpenAPI description/summary/parameter description limits, text-only payloads, no custom headers, and consequential flag behavior.
+- **Configuring actions in GPTs** — OpenAI Help Center, updated 24 days ago. Confirms actions require authentication configuration plus OpenAPI schema, operation IDs identify actions, schema can be pasted/imported/started from examples, and actions should be tested in Preview.
+- **Creating and editing GPTs** — OpenAI Help Center, updated 3 days ago. Confirms GPT instructions, actions, recommended models, Preview testing, save/update/versioning, and the web-only GPT editing flow.
+- **Troubleshooting GPTs** — OpenAI Help Center, updated 11 days ago. Confirms Preview testing as the first troubleshooting path and confirms apps/actions availability and workspace-domain checks.
+- **GPTs in ChatGPT** — OpenAI Help Center, updated 12 days ago. Confirms GPTs can include instructions, knowledge, capabilities, apps, and actions, and that a GPT can use either apps or actions but not both.
 
 ## The Single Most Important Architectural Constraint
 

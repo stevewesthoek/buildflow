@@ -17,6 +17,9 @@ services:
       BRIDGE_PORT: 3053
       RELAY_DATA_DIR: /var/lib/buildflow
       NODE_ENV: production
+      COMPOSE_PROJECT_NAME: workbench
+      WORKBENCH_BUILD_SHA: ${WORKBENCH_BUILD_SHA:-unknown}
+      WORKBENCH_BUILD_TIMESTAMP: ${WORKBENCH_BUILD_TIMESTAMP:-unknown}
       # Phase 5C: Relay proxy token for authenticated relay-agent requests
       # Generate with: openssl rand -hex 32
       # For dev/testing, set a test value; for production, use a strong secret

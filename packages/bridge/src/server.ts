@@ -15,6 +15,14 @@ import { startup, type StartupResult } from './startup'
 
 let runtimeConfig: StartupResult | null = null
 const HEARTBEAT_INTERVAL = 30000
+const relayProcessStartedAt = new Date().toISOString()
+let relayVersion = '0.1.0'
+try {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8')) as { version?: string }
+  if (pkg.version) relayVersion = pkg.version
+} catch {
+  // Keep fallback version when running from a bundled image layout.
+}
 
 // Body size limits
 const MAX_REGISTER_BODY = 4096
@@ -297,7 +305,17 @@ const server = http.createServer(async (req, res) => {
       status: 'ok',
       bridgeRunning: true,
       port: runtimeConfig?.config.bridgePort,
-      connectedDevices: connectedDevices.length
+      connectedDevices: connectedDevices.length,
+      service: {
+        role: 'relay',
+        packageVersion: relayVersion,
+        gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
+        buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+        processStartedAt: relayProcessStartedAt,
+        pid: process.pid,
+        composeProject: process.env.COMPOSE_PROJECT_NAME || 'workbench',
+        containerName: process.env.HOSTNAME || 'unknown'
+      }
     }
 
     res.writeHead(200)
@@ -319,7 +337,20 @@ const server = http.createServer(async (req, res) => {
       fs.writeFileSync(testFile, 'ready-check', { mode: 0o600 })
       fs.unlinkSync(testFile)
       res.writeHead(200)
-      res.end(JSON.stringify({ ready: true, dataDir: runtimeConfig.config.dataDir }))
+      res.end(JSON.stringify({
+        ready: true,
+        dataDir: runtimeConfig.config.dataDir,
+        service: {
+          role: 'relay',
+          packageVersion: relayVersion,
+          gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
+          buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+          processStartedAt: relayProcessStartedAt,
+          pid: process.pid,
+          composeProject: process.env.COMPOSE_PROJECT_NAME || 'workbench',
+          containerName: process.env.HOSTNAME || 'unknown'
+        }
+      }))
     } catch (err) {
       res.writeHead(503)
       res.end(JSON.stringify({ ready: false, reason: 'data_dir_not_writable' }))

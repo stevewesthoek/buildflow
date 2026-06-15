@@ -33,15 +33,17 @@ function suggestedNextAction(commandKind: string): string {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = checkActionAuth(request)
-  if (!auth.valid) return auth.error
-
   return withGptActionDeadline({
     operationId: 'runBuildFlowCommand',
     route: '/api/actions/run-command',
     deadlineMs: GPT_ACTION_DEADLINES_MS.runCommand,
     suggestedNextAction: 'Run slow validation in a separate prompt.'
   }, async (deadline) => {
+    deadline.setPhase('authenticate')
+    const auth = checkActionAuth(request)
+    deadline.markStage('authentication_complete', { authValid: auth.valid })
+    if (!auth.valid) return auth.error!
+
     deadline.setPhase('parse_body')
     const body = await request.json()
     const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''

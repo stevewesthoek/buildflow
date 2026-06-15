@@ -6,6 +6,7 @@ AGENT_PORT="${AGENT_PORT:-3052}"
 RELAY_PORT="${RELAY_PORT:-3053}"
 WEB_PORT="${WEB_PORT:-3054}"
 WEB_SERVER_MODE="${BUILDFLOW_WEB_SERVER_MODE:-production}"
+AGENT_SERVER_MODE="${BUILDFLOW_AGENT_SERVER_MODE:-dev}"
 AGENT_HEALTH_URL="http://127.0.0.1:${AGENT_PORT}/health"
 RELAY_HEALTH_URL="http://127.0.0.1:${RELAY_PORT}/health"
 WEB_HEALTH_URL="http://127.0.0.1:${WEB_PORT}/api/openapi"
@@ -40,6 +41,25 @@ kill_port() {
     log "Stopping listeners on port $port: $pids"
     kill $pids || true
   fi
+}
+
+wait_port_free() {
+  local port="$1"
+  local label="$2"
+  for _ in $(seq 1 20); do
+    if ! lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN || true
+  die "$label port $port was not released"
+}
+
+verify_ports_free() {
+  wait_port_free "$AGENT_PORT" agent
+  wait_port_free "$RELAY_PORT" relay
+  wait_port_free "$WEB_PORT" web
 }
 
 web_pid_running() {
@@ -202,20 +222,21 @@ start_agent_if_needed() {
   : >"$AGENT_ERR_LOG"
   local pid
   pid="$(
-    python3 - "$REPO_ROOT/packages/cli" "$AGENT_PORT" "$AGENT_LOG" "$AGENT_ERR_LOG" <<'PY'
+    python3 - "$REPO_ROOT/packages/cli" "$AGENT_PORT" "$AGENT_LOG" "$AGENT_ERR_LOG" "$AGENT_SERVER_MODE" <<'PY'
 import os
 import subprocess
 import sys
 
-cli_dir, port, log_path, err_path = sys.argv[1:5]
+cli_dir, port, log_path, err_path, mode = sys.argv[1:6]
 env = os.environ.copy()
 env["AGENT_PORT"] = port
 env.setdefault("BRIDGE_URL", "http://127.0.0.1:3053")
 env.setdefault("DEVICE_TOKEN", "local-device")
+command = ["node", "dist/index.js", "serve"] if mode in ("production", "start") else ["pnpm", "--dir", cli_dir, "dev"]
 
 with open(log_path, "ab", buffering=0) as log_file, open(err_path, "ab", buffering=0) as err_file:
     proc = subprocess.Popen(
-        ["pnpm", "--dir", cli_dir, "dev"],
+        command,
         cwd=cli_dir,
         env=env,
         stdin=subprocess.DEVNULL,
@@ -227,12 +248,19 @@ with open(log_path, "ab", buffering=0) as log_file, open(err_path, "ab", bufferi
 PY
   )"
   echo "$pid" >"$AGENT_PID_FILE"
+  log "Agent started with ${AGENT_SERVER_MODE} mode on ${AGENT_PORT}."
 }
 
 start_relay() {
   wait_for_docker
   log "Starting relay via docker compose."
   (cd "$REPO_ROOT" && docker compose up -d)
+}
+
+rebuild_relay_image() {
+  wait_for_docker
+  log "Rebuilding relay image from current source."
+  (cd "$REPO_ROOT" && docker compose build relay)
 }
 
 start_web_if_needed() {
@@ -303,6 +331,7 @@ stop_relay() {
 
 rebuild_web() {
   stop_web
+  wait_port_free "$WEB_PORT" web
   rm -rf "$REPO_ROOT/apps/web/.next"
   (cd "$REPO_ROOT/apps/web" && pnpm type-check)
   (cd "$REPO_ROOT/apps/web" && pnpm build)
@@ -357,6 +386,7 @@ status_all() {
 
 restart_all() {
   stop_web
+  wait_port_free "$WEB_PORT" web
   rm -rf "$REPO_ROOT/apps/web/.next"
   (cd "$REPO_ROOT/apps/web" && pnpm type-check)
   (cd "$REPO_ROOT/apps/web" && pnpm build)
@@ -366,6 +396,68 @@ restart_all() {
   start_web_if_needed
   sleep 8
   verify_all
+}
+
+restart_fresh() {
+  local previous_agent_pid previous_web_pid previous_container_id previous_image_id previous_build_id
+  previous_agent_pid="$(lsof -tiTCP:"$AGENT_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  previous_web_pid="$(lsof -tiTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  previous_container_id="$(docker inspect workbench-relay --format '{{.Id}}' 2>/dev/null || true)"
+  previous_image_id="$(docker inspect workbench-relay --format '{{.Image}}' 2>/dev/null || true)"
+  previous_build_id="$(cat "$REPO_ROOT/apps/web/.next/BUILD_ID" 2>/dev/null || true)"
+
+  export WORKBENCH_BUILD_SHA="${WORKBENCH_BUILD_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
+  export WORKBENCH_BUILD_TIMESTAMP="${WORKBENCH_BUILD_TIMESTAMP:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
+
+  log "Fresh restart target commit: ${WORKBENCH_BUILD_SHA}"
+  log "Previous agent PID: ${previous_agent_pid:-none}"
+  log "Previous web PID: ${previous_web_pid:-none}"
+  log "Previous relay container: ${previous_container_id:-none}"
+  log "Previous relay image: ${previous_image_id:-none}"
+  log "Previous web build ID: ${previous_build_id:-none}"
+
+  stop_web
+  stop_agent
+  stop_relay
+  verify_ports_free
+
+  log "Rebuilding shared package."
+  (cd "$REPO_ROOT/packages/shared" && pnpm build)
+  log "Rebuilding agent package."
+  (cd "$REPO_ROOT/packages/cli" && pnpm build)
+  rebuild_relay_image
+
+  log "Rebuilding web application from current source."
+  rm -rf "$REPO_ROOT/apps/web/.next"
+  (cd "$REPO_ROOT/apps/web" && pnpm type-check)
+  (cd "$REPO_ROOT/apps/web" && pnpm build)
+  export WORKBENCH_WEB_BUILD_ID="$(cat "$REPO_ROOT/apps/web/.next/BUILD_ID")"
+
+  start_relay
+  BUILDFLOW_AGENT_SERVER_MODE=production AGENT_SERVER_MODE=production start_agent_if_needed
+  start_web_if_needed
+  sleep 8
+  verify_all
+
+  node "$REPO_ROOT/scripts/diagnose-workbench-path.mjs" --fresh-check --expected-commit "$WORKBENCH_BUILD_SHA" || die "Freshness verification failed"
+
+  local new_agent_pid new_web_pid new_container_id new_image_id new_build_id
+  new_agent_pid="$(lsof -tiTCP:"$AGENT_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  new_web_pid="$(lsof -tiTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  new_container_id="$(docker inspect workbench-relay --format '{{.Id}}' 2>/dev/null || true)"
+  new_image_id="$(docker inspect workbench-relay --format '{{.Image}}' 2>/dev/null || true)"
+  new_build_id="$(cat "$REPO_ROOT/apps/web/.next/BUILD_ID" 2>/dev/null || true)"
+
+  log "Fresh agent PID: ${new_agent_pid:-missing}"
+  log "Fresh web PID: ${new_web_pid:-missing}"
+  log "Fresh relay container: ${new_container_id:-missing}"
+  log "Fresh relay image: ${new_image_id:-missing}"
+  log "Fresh web build ID: ${new_build_id:-missing}"
+
+  [ -z "$previous_agent_pid" ] || [ "$previous_agent_pid" != "$new_agent_pid" ] || die "Agent PID did not change"
+  [ -z "$previous_web_pid" ] || [ "$previous_web_pid" != "$new_web_pid" ] || die "Web PID did not change"
+  [ -z "$previous_container_id" ] || [ "$previous_container_id" != "$new_container_id" ] || die "Relay container ID did not change"
+  [ -z "$previous_build_id" ] || [ "$previous_build_id" != "$new_build_id" ] || die "Web build ID did not change"
 }
 
 cmd="${1:-}"
@@ -395,9 +487,12 @@ case "$cmd" in
   restart)
     restart_all
     ;;
+  restart-fresh)
+    restart_fresh
+    ;;
   *)
     cat <<EOF
-Usage: $0 {status|start|stop|rebuild-web|verify|restart}
+Usage: $0 {status|start|stop|rebuild-web|verify|restart|restart-fresh}
 
 Rules:
 - Never run pnpm --dir apps/web build while pnpm --dir apps/web dev is running.

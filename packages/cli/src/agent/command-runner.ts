@@ -281,6 +281,7 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
     const child = spawn(command[0], command.slice(1), {
       cwd: resolvedCwd,
       shell: false,
+      detached: process.platform !== 'win32',
       env: {
         PATH: process.env.PATH || '',
         HOME: process.env.HOME || '',
@@ -294,10 +295,32 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let killTimer: NodeJS.Timeout | undefined
+    const signalProcess = (signal: NodeJS.Signals) => {
+      if (child.pid && process.platform !== 'win32') {
+        try {
+          process.kill(-child.pid, signal)
+          return
+        } catch {
+          // Fall back to direct child signaling below.
+        }
+      }
+      child.kill(signal)
+    }
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGTERM')
+      signalProcess('SIGTERM')
+      killTimer = setTimeout(() => {
+        if (!child.killed || child.exitCode === null) {
+          signalProcess('SIGKILL')
+        }
+      }, 500)
     }, timeoutMs)
+
+    const clearTimers = () => {
+      clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+    }
 
     child.stdout.on('data', chunk => {
       stdout = appendLimited(stdout, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)), outputState)
@@ -306,11 +329,11 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
       stderr = appendLimited(stderr, Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)), outputState)
     })
     child.on('error', err => {
-      clearTimeout(timer)
+      clearTimers()
       reject(err)
     })
     child.on('close', (exitCode, signal) => {
-      clearTimeout(timer)
+      clearTimers()
       resolve({
         status: timedOut ? 'timed_out' : exitCode === 0 ? 'completed' : 'failed',
         commandKind: request.commandKind,

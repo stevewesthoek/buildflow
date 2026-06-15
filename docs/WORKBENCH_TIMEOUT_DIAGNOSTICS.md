@@ -14,6 +14,142 @@ If you encounter a timeout, this guide helps you diagnose whether it's:
 2. **Dependency-side (recoverable)** — requires restart/reconnect
 3. **Platform-side (external)** — network or Cloudflare issue
 
+## Current Investigation Summary (2026-06-15)
+
+What had already been implemented:
+- GPT-facing route deadlines for the five Custom GPT actions.
+- Request IDs on wrapped action responses.
+- Abort signals and bounded fetch timeouts for web-to-agent and web-to-relay calls.
+- Response-size caps for read-context and transport responses.
+- Compact OpenAPI and Custom GPT instructions for five Workbench actions.
+
+What was proven to work before this pass:
+- Local and public OpenAPI responses were fast when the web origin was healthy.
+- Direct local agent and relay health endpoints responded quickly.
+- Cached `graph_context` reads Graphify artifacts only; it does not regenerate Graphify during a GPT request.
+
+What still failed:
+- Cloudflare sometimes returned a 504 page with Browser and Cloudflare marked working, and `Host workbench.prochat.tools` marked error. That shape means the edge reached the tunnel path but the host/origin side did not return a valid response.
+
+Earlier assumptions that were incomplete:
+- The previous hardening focused on broad actions and route deadlines. The latest failure can also occur when the web origin is stale, missing, restarting, or not reachable by `cloudflared`.
+- `pnpm local:restart` did not prove a fully fresh agent, relay image/container, and web build. Use `pnpm local:restart:fresh` for activation after reliability changes.
+- Unauthorized action responses were fast but were outside the deadline wrapper, so they did not carry a Workbench request ID. Current code wraps auth for the five GPT actions.
+
+## Live Request Path
+
+```text
+Custom GPT
+  -> https://workbench.prochat.tools
+  -> Cloudflare edge
+  -> cloudflared tunnel process on the host
+  -> local web origin http://127.0.0.1:3054
+  -> Next.js action route
+  -> action authentication
+  -> withGptActionDeadline
+  -> direct local agent http://127.0.0.1:3052 or relay http://127.0.0.1:3053
+  -> repository operation
+  -> bounded response serialization
+  -> web origin
+  -> cloudflared
+  -> Cloudflare
+  -> Custom GPT
+```
+
+| Hop | Process/container | Port | Health | Timeout/budget | Source |
+|---|---|---:|---|---|---|
+| Web origin | `next start` | 3054 | `/api/openapi`, `/api/unified-health` | action deadlines 4s-12s | `apps/web/src/app/api/actions/*/route.ts` |
+| Deadline wrapper | Next.js route helper | n/a | request logs | one end-to-end deadline, 250ms transport reserve | `apps/web/src/lib/actions/deadline.ts` |
+| Auth | Next.js route helper | n/a | 401 JSON | before downstream contact | `apps/web/src/lib/actionAuth.ts` |
+| Agent proxy | web fetch | 3052 | `/health`, `/api/status` | remaining route budget | `apps/web/src/lib/actions/transport.ts` |
+| Local agent | Fastify | 3052 | `/health` | command timeout + SIGTERM/SIGKILL cleanup | `packages/cli/src/agent/server.ts`, `packages/cli/src/agent/command-runner.ts` |
+| Relay proxy | Docker container `workbench-relay` | 3053 | `/health`, `/ready` | web transport budget, relay pending timeout | `packages/bridge/src/server.ts` |
+| Cloudflare tunnel | external `cloudflared` process | n/a | public curl + process check | external | external config, not stored in repo |
+
+The active tunnel configuration is outside the repository. Do not edit or print external tunnel config from repo workflows. Validate it with `pnpm diagnose:workbench-path`; if it points anywhere other than `http://127.0.0.1:3054` or equivalent local web origin, fix the external tunnel configuration manually.
+
+## 504 Classification Workflow
+
+Use `pnpm diagnose:workbench-path` before changing code or tunnel settings. It safely checks:
+
+- `cloudflared` process presence, start command with token-like values redacted, and whether more than one tunnel process appears.
+- listeners on ports 3052, 3053, and 3054.
+- relay container image, name, Compose project, create time, and start time.
+- local web, agent, and relay health.
+- canonical public endpoint `https://workbench.prochat.tools`.
+- compatibility endpoint `https://buildflow.prochat.tools`.
+- `CF-Ray`, `X-Workbench-Request-Id`, content type, status, and response class.
+
+Classification rules:
+
+| Observation | Classification | Next step |
+|---|---|---|
+| Public request fails, local origin succeeds, and no matching origin request log exists | Cloudflare/tunnel ingress | inspect external tunnel process/config/logs without printing credentials |
+| Public request fails, local origin succeeds, and origin has start log but no finish log | origin handler or downstream dependency | use request ID and stage timings |
+| Local origin and public endpoint both fail | web/action/agent/relay | restart fresh and inspect service logs |
+| Public 504 appears before Workbench route deadline and no request ID exists | tunnel/origin connectivity or stale origin | verify port 3054 listener and cloudflared target |
+| Workbench returns JSON with `status:"timeout"` | bounded application timeout | diagnose `diagnostics.phase` and narrow/retry |
+
+Cloudflare HTML alone is not enough evidence. Correlate `CF-Ray`, `X-Workbench-Request-Id`, origin logs, and local health.
+
+## OpenAI Custom GPT Findings (Accessed 2026-06-15)
+
+Official sources checked:
+- **Production notes on GPT Actions** — OpenAI Developers, update date not shown. Documents 45-second round-trip action timeout, 100,000-character request/response payload limit, text-only payloads, no custom headers, TLS 1.2+ on port 443, and OpenAPI description length limits.
+- **Configuring actions in GPTs** — OpenAI Help Center, updated 24 days ago. Documents authentication, OpenAPI schema, operation IDs, schema import/paste flow, action-domain restrictions, and Preview testing after configuration.
+- **Creating and editing GPTs** — OpenAI Help Center, updated 3 days ago. Documents GPT instructions, capabilities, actions, recommended model behavior, Preview testing, and manual Update flow.
+- **Troubleshooting GPTs** — OpenAI Help Center, updated 11 days ago. Documents Preview testing, instruction tightening, apps/actions availability, and workspace-domain checks.
+- **GPTs in ChatGPT** — OpenAI Help Center, updated 12 days ago. Documents GPT components and that a GPT can use either apps or actions, not both.
+
+Implications:
+- Workbench must return well before the published 45-second GPT Actions timeout; current route deadlines stay at 4s-12s.
+- Action changes are represented by authentication configuration, OpenAPI schema, operation IDs, and GPT instructions. The GPT editor update is manual.
+- Test action changes in Preview after importing schema/instruction changes.
+- Actions are not available for Pro mode; the GPT editor model selector only shows non-Pro models that support actions.
+
+## Graphify Navigation Workflow
+
+Graphify is a navigation layer, not source truth.
+
+For an unknown repository area:
+
+1. Use `readBuildFlowContext` with `mode:"graph_context"` to inspect cached Graphify hints and freshness.
+2. Treat stale or missing graph data as navigation metadata only.
+3. Select likely paths or symbols from the hint.
+4. Perform a focused exact read with `read_range`, `read_symbol`, `read_paths`, or `grep_context`.
+5. Patch only after exact source verification.
+
+For a known path, skip Graphify and read the path directly. For a known symbol, use exact symbol reading. Never regenerate Graphify during a public GPT action request, never patch from graph evidence alone, and do not fail an exact read only because Graphify is unavailable.
+
+## Fresh Restart Procedure
+
+Use a fresh restart after reliability, timeout, tunnel-origin, or service lifecycle changes:
+
+```bash
+pnpm local:restart:fresh
+```
+
+That command:
+
+- stops web, agent, and relay;
+- verifies ports 3052, 3053, and 3054 are released;
+- rebuilds shared and agent packages;
+- rebuilds the relay image from current source without deleting volumes;
+- removes stale web build output and rebuilds the Next.js production app;
+- starts relay, agent, and web in deterministic order;
+- verifies local health, public OpenAPI, public status, process/container metadata, and reported commit;
+- fails with actionable output if any health check or freshness check fails.
+
+Do not use `docker compose down -v` for reliability work. Persistent relay volumes may contain local state.
+
+Service freshness metadata appears in local health/status payloads:
+
+- web: `/api/unified-health` and authenticated `/api/actions/status`;
+- agent: `http://127.0.0.1:3052/health`;
+- relay: `http://127.0.0.1:3053/health`.
+
+Safe freshness fields include service role, package version, Git commit, build timestamp, process start timestamp, process ID, web build ID, relay container name, and Compose project. They must not include local filesystem paths, bearer tokens, tunnel credentials, certificates, or private keys.
+
 ---
 
 ## Request ID Correlation
@@ -30,6 +166,13 @@ When a timeout occurs:
 3. **Cross-reference with timing** to identify the failing stage
 
 Example request ID: `wr_1v2c3m_aq5k7z`
+
+The web origin also logs compact JSON events with `tool:"workbench_action_origin"`, `requestId`, `operationId`, `route`, `phase`, elapsed time, remaining budget, and a bounded stage list. These logs do not include bearer tokens or request bodies.
+
+Use the request ID to determine whether a request reached the web origin:
+- Public failure has `CF-Ray` but no Workbench request ID and no origin log: Cloudflare/tunnel ingress did not reach the route.
+- Public failure has Workbench request ID and matching origin start but no finish: origin handler or downstream dependency hung or crashed.
+- Public failure has Workbench structured JSON: bounded Workbench failure; diagnose `diagnostics.phase`.
 
 ---
 
@@ -86,7 +229,7 @@ Example request ID: `wr_1v2c3m_aq5k7z`
 **Recovery:**
 1. Check if local agent is running: `curl http://127.0.0.1:3052/health` (should respond <1s)
 2. Check if Docker/OrbStack is running
-3. If agent is unavailable, run: `pnpm local:restart`
+3. If agent is unavailable, run: `pnpm local:restart:fresh`
 4. Retry the action
 
 **Diagnostics in response:**
@@ -184,8 +327,8 @@ Example request ID: `wr_1v2c3m_aq5k7z`
 
 **Recovery:**
 ```bash
-# Restart local stack
-pnpm local:restart
+# Rebuild and restart local stack from fresh code
+pnpm local:restart:fresh
 
 # Or manually start services
 docker-compose up -d   # if using Docker Compose
@@ -198,7 +341,7 @@ docker-compose up -d   # if using Docker Compose
 
 **Recovery:**
 1. Check if agent is running: `curl http://127.0.0.1:3052/health`
-2. If agent is slow or unresponsive, restart it
+2. If agent is slow or unresponsive, run `pnpm local:restart:fresh`
 3. Check relay-to-agent connectivity and Docker network
 
 ---
@@ -212,14 +355,16 @@ docker-compose up -d   # if using Docker Compose
 
 ### If you see plain 504 HTML:
 1. **Check Cloudflare status:** https://www.cloudflarestatus.com/
-2. **Check public endpoint:** `curl -I https://buildflow.prochat.tools/api/actions/status`
-3. **Check local health independently:**
+2. **Check public endpoint:** `curl -I https://workbench.prochat.tools/api/openapi`
+3. **Run path diagnostics:** `pnpm diagnose:workbench-path`
+4. **Check local health independently:**
    - If local tests pass: issue is public endpoint or Cloudflare
    - If local tests fail: local services are down
 
 ### Expected behavior:
-- BuildFlow actions ALWAYS return JSON with `requestId` before route deadline
-- If you see plain 504, it means the route deadline was NOT enforced (bug or external issue)
+- Workbench actions that reach the web route return JSON with `requestId` before route deadline.
+- If public 504 HTML has no Workbench request ID and no matching origin log, the request did not reach the action route.
+- If public 504 HTML has an origin start log but no finish log, the origin or downstream path still has a hang bug.
 
 ---
 
@@ -227,12 +372,19 @@ docker-compose up -d   # if using Docker Compose
 
 ### Quick health check:
 ```bash
-curl -s http://localhost:3054/api/actions/status | jq '.connected, .runtime'
+curl -s http://localhost:3054/api/unified-health | jq '.ok, .service'
 ```
 
 ### Full status with sources (slow if many sources):
 ```bash
 curl -s "http://localhost:3054/api/actions/status?include=all" | jq .
+```
+
+Use the status route only with the configured bearer token:
+
+```bash
+curl -s http://localhost:3054/api/actions/status \
+  -H "Authorization: Bearer $WORKBENCH_ACTION_TOKEN" | jq '.connected, .runtime.service'
 ```
 
 ### Check unified health:

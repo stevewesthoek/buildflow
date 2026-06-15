@@ -30,6 +30,7 @@ try {
 } catch {
   // fallback to hardcoded version if package.json not found
 }
+const agentProcessStartedAt = new Date().toISOString()
 
 export async function startLocalServer(port: number = 3052): Promise<void> {
   const fastify = Fastify({ logger: true })
@@ -287,7 +288,15 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         indexedFiles: indexer.getDocs().length,
         indexingActive: indexingSources.size > 0,
         indexingSourceIds: Array.from(indexingSources),
-        version: cliVersion
+        version: cliVersion,
+        service: {
+          role: 'agent',
+          packageVersion: cliVersion,
+          gitCommit: process.env.WORKBENCH_BUILD_SHA || process.env.BUILDFLOW_BUILD_SHA || 'unknown',
+          buildTimestamp: process.env.WORKBENCH_BUILD_TIMESTAMP || process.env.BUILDFLOW_BUILD_TIMESTAMP || 'unknown',
+          processStartedAt: agentProcessStartedAt,
+          pid: process.pid
+        }
       }
   })
 
