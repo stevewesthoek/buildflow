@@ -2,8 +2,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'BuildFlow',
-  description: 'Connect your local brain folder to ChatGPT'
+  title: 'ProChat Workbench',
+  description: 'Work safely with your local projects through ChatGPT'
 }
 
 export default function RootLayout({

@@ -398,7 +398,7 @@ export default function Dashboard() {
   }
 
   const removeSource = async (source: KnowledgeSource) => {
-    const confirmed = window.confirm(`Remove ${source.label} from BuildFlow?`)
+    const confirmed = window.confirm(`Remove ${source.label} from ProChat Workbench?`)
     if (!confirmed) return
     await mutate('Removed', source, '/api/agent/sources/remove', { sourceId: source.id }, `${source.label} removed.`)
   }
@@ -437,7 +437,7 @@ export default function Dashboard() {
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-900 dark:bg-white">
               <svg className="h-4 w-4 text-white dark:text-gray-900" viewBox="0 0 16 16" fill="currentColor"><path d="M3 1h10l2 4v9a1 1 0 01-1 1H2a1 1 0 01-1-1V5l2-4zm1.2 1L3 4.5h10L11.8 2H4.2zM2 6v8h12V6H2z"/></svg>
             </div>
-            <span className="text-sm font-semibold tracking-tight">BuildFlow</span>
+            <span className="text-sm font-semibold tracking-tight">ProChat Workbench</span>
             <span className={`ml-2 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${agentConnected ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400'}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${agentConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} />
               {agentConnected ? 'Connected' : 'Offline'}

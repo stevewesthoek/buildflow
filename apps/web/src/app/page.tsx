@@ -2,33 +2,33 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       <div className="container mx-auto px-4 py-16">
-        <div className="max-w-3xl mx-auto text-center">
-          <h1 className="text-5xl font-bold text-gray-900 mb-4">BuildFlow</h1>
-          <p className="text-xl text-gray-600 mb-8">
-            Connect your local brain folder to ChatGPT. Ideate with context. Export Claude-ready plans.
+        <div className="mx-auto max-w-3xl text-center">
+          <h1 className="mb-4 text-5xl font-bold text-gray-900">ProChat Workbench</h1>
+          <p className="mb-8 text-xl text-gray-600">
+            Work safely with your local repositories, documentation, notes, and knowledge folders through ChatGPT.
           </p>
 
           <div className="space-y-4">
             <a
               href="/dashboard"
-              className="inline-block bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg transition"
+              className="inline-block rounded-lg bg-indigo-600 px-8 py-3 font-bold text-white transition hover:bg-indigo-700"
             >
-              Get Started
+              Open Workbench
             </a>
           </div>
 
-          <div className="mt-16 grid grid-cols-1 md:grid-cols-3 gap-8">
-            <div className="bg-white p-6 rounded-lg shadow">
-              <h3 className="text-lg font-bold text-gray-900 mb-2">Search Locally</h3>
-              <p className="text-gray-600">ChatGPT searches your local brain folder in real-time.</p>
+          <div className="mt-16 grid grid-cols-1 gap-8 md:grid-cols-3">
+            <div className="rounded-lg bg-white p-6 shadow">
+              <h3 className="mb-2 text-lg font-bold text-gray-900">Use Exact Context</h3>
+              <p className="text-gray-600">Let ChatGPT inspect the files and sources it needs instead of guessing.</p>
             </div>
-            <div className="bg-white p-6 rounded-lg shadow">
-              <h3 className="text-lg font-bold text-gray-900 mb-2">Create & Append</h3>
-              <p className="text-gray-600">Ideate with ChatGPT and save plans directly to your vault.</p>
+            <div className="rounded-lg bg-white p-6 shadow">
+              <h3 className="mb-2 text-lg font-bold text-gray-900">Make Guarded Changes</h3>
+              <p className="text-gray-600">Apply verified edits and save useful work back to your local projects.</p>
             </div>
-            <div className="bg-white p-6 rounded-lg shadow">
-              <h3 className="text-lg font-bold text-gray-900 mb-2">Export Plans</h3>
-              <p className="text-gray-600">Generate Claude Code-ready implementation briefs.</p>
+            <div className="rounded-lg bg-white p-6 shadow">
+              <h3 className="mb-2 text-lg font-bold text-gray-900">Validate &amp; Commit</h3>
+              <p className="text-gray-600">Run targeted checks and commit only the paths you approve.</p>
             </div>
           </div>
         </div>
