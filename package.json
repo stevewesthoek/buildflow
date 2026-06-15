@@ -33,6 +33,7 @@
     "local:restart:fresh": "bash scripts/buildflow-local-stack.sh restart-fresh",
     "local:rebuild-web": "bash scripts/buildflow-local-stack.sh rebuild-web",
     "local:verify": "bash scripts/buildflow-local-stack.sh verify",
+    "test:freshness-metadata": "bash scripts/test-freshness-metadata.sh",
     "start:prod": "bash scripts/start-prod.sh"
   },
   "devDependencies": {

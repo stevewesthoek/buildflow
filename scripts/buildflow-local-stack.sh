@@ -406,10 +406,18 @@ restart_fresh() {
   previous_image_id="$(docker inspect workbench-relay --format '{{.Image}}' 2>/dev/null || true)"
   previous_build_id="$(cat "$REPO_ROOT/apps/web/.next/BUILD_ID" 2>/dev/null || true)"
 
-  export WORKBENCH_BUILD_SHA="${WORKBENCH_BUILD_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
-  export WORKBENCH_BUILD_TIMESTAMP="${WORKBENCH_BUILD_TIMESTAMP:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
+  # Always derive fresh commit from repository HEAD, ignoring any inherited values
+  export WORKBENCH_BUILD_SHA
+  WORKBENCH_BUILD_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  [ -n "$WORKBENCH_BUILD_SHA" ] || die "Failed to derive WORKBENCH_BUILD_SHA from repository HEAD"
+
+  # Always derive fresh UTC timestamp, ignoring any inherited values
+  export WORKBENCH_BUILD_TIMESTAMP
+  WORKBENCH_BUILD_TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  [ -n "$WORKBENCH_BUILD_TIMESTAMP" ] || die "Failed to derive WORKBENCH_BUILD_TIMESTAMP"
 
   log "Fresh restart target commit: ${WORKBENCH_BUILD_SHA}"
+  log "Fresh restart target timestamp: ${WORKBENCH_BUILD_TIMESTAMP}"
   log "Previous agent PID: ${previous_agent_pid:-none}"
   log "Previous web PID: ${previous_web_pid:-none}"
   log "Previous relay container: ${previous_container_id:-none}"
