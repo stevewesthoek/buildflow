@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
     const validInclude = include === 'sources' || include === 'active' || include === 'all'
 
     return withGptActionDeadline({
-      operationId: 'getBuildFlowStatus',
+      operationId: 'getWorkbenchStatus',
       route: '/api/actions/status',
       deadlineMs: GPT_ACTION_DEADLINES_MS.status,
       suggestedNextAction: 'Retry status after checking the local BuildFlow stack.'
@@ -144,7 +144,7 @@ export async function GET(request: NextRequest) {
 
       payload.activity = {
         version: '1.2.13-beta',
-        operationId: 'getBuildFlowStatus',
+        operationId: 'getWorkbenchStatus',
         phase: 'completed',
         actionLabel: 'Checked BuildFlow status',
         userMessage: validInclude ? `BuildFlow status OK (${include} included).` : 'BuildFlow is connected.',
@@ -168,7 +168,7 @@ export async function GET(request: NextRequest) {
           },
           activity: {
             version: '1.2.13-beta',
-            operationId: 'getBuildFlowStatus',
+            operationId: 'getWorkbenchStatus',
             phase: 'failed',
             actionLabel: 'BuildFlow status check failed',
             userMessage: 'Status response was too large; check local BuildFlow for issues.',
