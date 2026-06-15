@@ -42,6 +42,7 @@ function classifySample({ status, headers = {}, bodyPreview = '', json, error })
 }
 
 function main() {
+  console.log('Workbench reliability static invariant verifier')
   const routes = [
     'apps/web/src/app/api/actions/status/route.ts',
     'apps/web/src/app/api/actions/read-context/route.ts',

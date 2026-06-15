@@ -1,64 +1,72 @@
-import { describe, it, expect } from 'vitest'
-import { ActionTransportError } from '@/lib/actions/transport'
+import assert from 'node:assert/strict'
+import { executeAction, ActionTransportError } from '../../lib/actions/transport'
 
-describe('response size validation', () => {
-  it('should reject responses exceeding size limit', () => {
-    // Create a large object that exceeds DEFAULT_RESPONSE_SIZE_LIMIT_BYTES (512 KB)
-    const largeObject = {
-      data: 'x'.repeat(600 * 1024) // 600 KB
-    }
+async function testOversizedResponseIsRejected() {
+  const originalFetch = globalThis.fetch
+  const oversizedBody = JSON.stringify({ data: 'x'.repeat(90_000) })
 
-    const bytes = Buffer.byteLength(JSON.stringify(largeObject), 'utf8')
-    expect(bytes).toBeGreaterThan(512 * 1024)
-  })
-
-  it('should allow responses within size limit', () => {
-    const smallObject = {
-      data: 'hello',
-      count: 42
-    }
-
-    const bytes = Buffer.byteLength(JSON.stringify(smallObject), 'utf8')
-    expect(bytes).toBeLessThan(512 * 1024)
-  })
-
-  it('read-context route should enforce 256 KB limit', () => {
-    // read-context has tighter limit: 256 KB
-    const largeObject = {
-      entries: Array.from({ length: 1000 }, (_, i) => ({
-        path: `file-${i}.ts`,
-        content: 'x'.repeat(300) // 300 bytes per entry
-      }))
-    }
-
-    const bytes = Buffer.byteLength(JSON.stringify(largeObject), 'utf8')
-    // Should exceed 256 KB
-    expect(bytes).toBeGreaterThan(256 * 1024)
-  })
-
-  it('should track response bytes in diagnostics', () => {
-    const response = {
-      ok: true,
-      data: 'some data',
-      diagnostics: {
-        responseBytes: 42
+  try {
+    globalThis.fetch = (async () => new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(oversizedBody))
+          controller.close()
+        }
+      }),
+      {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
       }
-    }
+    )) as typeof fetch
 
-    expect(response.diagnostics.responseBytes).toBe(42)
-  })
+    await assert.rejects(
+      () => executeAction('/api/test-large', { sourceId: 'source' }, undefined, { timeoutMs: 1000, maxResponseBytes: 80_000 }),
+      (error: unknown) => {
+        assert.ok(error instanceof ActionTransportError)
+        assert.equal(error.statusCode, 413)
+        return true
+      }
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
 
-  it('should calculate response size accurately', () => {
-    const testCases = [
-      { obj: { ok: true }, expected: true },
-      { obj: { data: 'a'.repeat(1000) }, expected: true },
-      { obj: { entries: Array(100).fill({ path: 'file.ts', content: 'x'.repeat(100) }) }, expected: true }
-    ]
+async function testTimeoutAbortsPendingFetch() {
+  const originalFetch = globalThis.fetch
+  let abortObserved = false
 
-    testCases.forEach(({ obj }) => {
-      const bytes = Buffer.byteLength(JSON.stringify(obj), 'utf8')
-      expect(bytes).toBeGreaterThan(0)
-      expect(bytes).toBeLessThan(512 * 1024)
-    })
-  })
+  try {
+    globalThis.fetch = ((_, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        abortObserved = true
+        const error = new Error('The operation was aborted')
+        error.name = 'AbortError'
+        reject(error)
+      }, { once: true })
+    })) as typeof fetch
+
+    await assert.rejects(
+      () => executeAction('/api/test-timeout', { sourceId: 'source' }, undefined, { timeoutMs: 20 }),
+      (error: unknown) => {
+        assert.ok(error instanceof ActionTransportError)
+        assert.equal(error.statusCode, 504)
+        assert.equal((error.payload as { status?: string } | undefined)?.status, 'timeout')
+        return true
+      }
+    )
+    assert.equal(abortObserved, true)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+async function main() {
+  await testOversizedResponseIsRejected()
+  await testTimeoutAbortsPendingFetch()
+}
+
+main().catch((error) => {
+  console.error(error)
+  process.exit(1)
 })
