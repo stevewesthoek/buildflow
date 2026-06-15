@@ -175,14 +175,17 @@ From [platform.openai.com/docs/actions/production](https://platform.openai.com/d
 | Operation `description` | 300 chars | Hard limit; schema import fails if exceeded | Detailed explanation of what the operation does; keep concise and technical |
 | Parameter `description` | 700 chars | Hard limit; schema import fails if exceeded | Parameter guidance for the GPT; can be detailed |
 
-**Verification:** `pnpm run verify:gpt-actions` enforces these via `verify-custom-gpt-actions.mjs`. All OpenAPI operation metadata must pass character count checks before commit.
+**Verification:** `pnpm run verify:gpt-actions` and `pnpm verify:gpt-contract` enforce these via `verify-custom-gpt-actions.mjs`. All generated OpenAPI operation metadata must pass character count checks before commit or GPT editor import.
+
+**Regression note (2026-06-15):** the Custom GPT editor rejected `getWorkbenchStatus` because its operation `description` was 318 characters. The verifier must check operation `summary`, operation `description`, query parameter descriptions, and request-body schema property descriptions. Do not rely on manual review for these limits.
 
 **When adding or updating operations:**
 1. Write the `summary` (max 300 chars)
 2. Write the `description` (max 300 chars) — if exceeding, trim to essential info
 3. Write parameter `description` fields (max 700 chars each)
-4. Run `pnpm run verify:gpt-actions` to catch violations before commit
-5. Do not commit if verification fails
+4. Regenerate `docs/openapi.chatgpt.json`
+5. Run `pnpm verify:gpt-contract` to catch violations before import or commit
+6. Do not import or commit if verification fails
 
 ---
 

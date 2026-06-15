@@ -26,7 +26,7 @@ const openapi = {
       get: {
         operationId: 'getBuildFlowStatus',
         summary: 'Fast status check with a 4s BuildFlow deadline',
-        description: 'Compact health check: ok/connected flags, optional sources and context, runtime stats. Response is always under 8 KB with diagnostics stripped. Completes in <500ms normally. Use this first to lock sourceId, then call the read-context action for repo details. If not connected, returns unavailable status with guidance.',
+        description: 'Compact health check with connection state, optional sources/context, runtime stats, and freshness metadata. Use first to lock sourceId, then call read-context for repo details. Returns unavailable guidance if local services are disconnected.',
         'x-openai-isConsequential': false,
         security: [bearer],
         parameters: [

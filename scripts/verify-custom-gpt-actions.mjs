@@ -12,6 +12,9 @@ const DOCS_SCHEMA_DIR = path.join(ROOT, 'docs/openapi.chatgpt')
 
 const MAX_SCHEMA_BYTES = 100_000
 const MAX_INSTRUCTIONS_BYTES = 8_000
+const MAX_OPERATION_SUMMARY_CHARS = 300
+const MAX_OPERATION_DESCRIPTION_CHARS = 300
+const MAX_PARAMETER_DESCRIPTION_CHARS = 700
 const TARGET_ACTION_RESPONSE_BYTES = 8_000
 const HARD_ACTION_RESPONSE_BYTES = 32_000
 
@@ -55,6 +58,49 @@ function collectOperations(schema) {
   return ops
 }
 
+function collectSchemaDescriptions(schema, basePath = 'schema') {
+  if (!schema || typeof schema !== 'object') return []
+  const descriptions = []
+  if (typeof schema.description === 'string') {
+    descriptions.push({ path: `${basePath}.description`, description: schema.description })
+  }
+  if (schema.properties && typeof schema.properties === 'object') {
+    for (const [name, property] of Object.entries(schema.properties)) {
+      descriptions.push(...collectSchemaDescriptions(property, `${basePath}.properties.${name}`))
+    }
+  }
+  if (schema.items && typeof schema.items === 'object') {
+    descriptions.push(...collectSchemaDescriptions(schema.items, `${basePath}.items`))
+  }
+  for (const keyword of ['oneOf', 'anyOf', 'allOf']) {
+    if (Array.isArray(schema[keyword])) {
+      schema[keyword].forEach((item, index) => {
+        descriptions.push(...collectSchemaDescriptions(item, `${basePath}.${keyword}[${index}]`))
+      })
+    }
+  }
+  return descriptions
+}
+
+function ensureOpenAiMetadataLimits(ops) {
+  for (const op of ops) {
+    assert(typeof op.summary === 'string' && op.summary.length > 0, `${op.operationId} summary missing`)
+    assert(op.summary.length <= MAX_OPERATION_SUMMARY_CHARS, `${op.routePath} ${op.method} ${op.operationId} summary has length ${op.summary.length} exceeding limit of ${MAX_OPERATION_SUMMARY_CHARS}`)
+    assert(typeof op.description === 'string' && op.description.length > 0, `${op.operationId} description missing`)
+    assert(op.description.length <= MAX_OPERATION_DESCRIPTION_CHARS, `${op.routePath} ${op.method} ${op.operationId} description has length ${op.description.length} exceeding limit of ${MAX_OPERATION_DESCRIPTION_CHARS}`)
+
+    for (const param of op.parameters || []) {
+      if (typeof param.description !== 'string') continue
+      assert(param.description.length <= MAX_PARAMETER_DESCRIPTION_CHARS, `${op.routePath} ${op.method} ${op.operationId} parameter ${param.name} description has length ${param.description.length} exceeding limit of ${MAX_PARAMETER_DESCRIPTION_CHARS}`)
+    }
+
+    const requestSchema = op.requestBody?.content?.['application/json']?.schema
+    for (const item of collectSchemaDescriptions(requestSchema, `${op.operationId}.requestBody.schema`)) {
+      assert(item.description.length <= MAX_PARAMETER_DESCRIPTION_CHARS, `${item.path} has length ${item.description.length} exceeding parameter/schema description limit of ${MAX_PARAMETER_DESCRIPTION_CHARS}`)
+    }
+  }
+}
+
 function verifyStatusOperationContract(ops) {
   const statusOp = ops.find(op => op.operationId === 'getWorkbenchStatus')
   assert(statusOp, 'getWorkbenchStatus operation must exist')
@@ -87,12 +133,12 @@ function ensureSchemaRules(schema) {
   assert(new Set(ids).size === ids.length, 'OperationIds must be unique')
   assert(JSON.stringify([...ids].sort()) === JSON.stringify([...EXPECTED_OPERATION_IDS].sort()), `OperationIds mismatch: ${ids.join(', ')}`)
 
+  ensureOpenAiMetadataLimits(ops)
   verifyStatusOperationContract(ops)
 
   for (const op of ops) {
     assert(Array.isArray(op.security) && op.security.length > 0, `${op.operationId} missing security`)
     assert(op['x-openai-isConsequential'] === false, `${op.operationId} must be non-consequential for GPT action confirmation UX`)
-    assert(typeof op.summary === 'string' && op.summary.length > 0 && op.summary.length <= 300, `${op.operationId} summary invalid`)
   }
 
   for (const routePath of REQUIRED_ACTION_PATHS) {
@@ -299,6 +345,11 @@ async function main() {
       statusBudgetBytes: 8_000,
       targetBytes: TARGET_ACTION_RESPONSE_BYTES,
       hardBudgetBytes: HARD_ACTION_RESPONSE_BYTES
+    },
+    openAiMetadataLimits: {
+      operationSummaryChars: MAX_OPERATION_SUMMARY_CHARS,
+      operationDescriptionChars: MAX_OPERATION_DESCRIPTION_CHARS,
+      parameterDescriptionChars: MAX_PARAMETER_DESCRIPTION_CHARS
     },
     staleFragments,
     live

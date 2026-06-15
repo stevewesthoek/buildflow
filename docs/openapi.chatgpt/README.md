@@ -45,7 +45,9 @@ Large-file inspection and graph-assisted navigation use bounded modes through `r
 ## Verification
 
 - When OpenAPI descriptions, operation IDs, parameters, response schemas, authentication, or GPT operating instructions change, the GPT editor update is manual.
+- OpenAI Custom GPT schema metadata limits are hard import gates: operation `summary` <= 300 characters, operation `description` <= 300 characters, and parameter/schema property `description` <= 700 characters.
 - Run `pnpm verify:gpt-contract` after regenerating the schema file.
+- The verifier must pass before importing into the GPT editor; it checks the metadata limits above so failures like `description has length 318 exceeding limit of 300` are caught locally.
 - The verifier enforces exactly 5 operations, no `/api/actions/agent/*` routes, focused read modes, small read caps, and timeout/deadline language.
 - `readWorkbenchContext` mode `prepare_task_context` is deterministic source-index context prep. It does not call local AI.
 - If the root schema changes, import `docs/openapi.chatgpt.json` in the Custom GPT editor Actions panel or import from `https://workbench.prochat.tools/api/openapi`.
