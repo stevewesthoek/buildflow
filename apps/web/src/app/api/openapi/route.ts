@@ -209,8 +209,58 @@ const openapi = {
   }
 }
 
-export async function GET() {
-  return NextResponse.json(openapi, {
+const workbenchOperationIds = {
+  getBuildFlowStatus: 'getWorkbenchStatus',
+  readBuildFlowContext: 'readWorkbenchContext',
+  applyBuildFlowFileChange: 'applyWorkbenchFileChange',
+  commitBuildFlowChanges: 'commitWorkbenchChanges',
+  runBuildFlowCommand: 'runWorkbenchCommand'
+} as const
+
+const getRequestOrigin = (request: Request) => {
+  const requestUrl = new URL(request.url)
+  const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim()
+  const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim()
+  const host = forwardedHost || request.headers.get('host') || requestUrl.host
+  const protocol = forwardedProto || requestUrl.protocol.replace(':', '')
+  return {
+    host: host.split(':')[0],
+    origin: `${protocol}://${host}`
+  }
+}
+
+const createWorkbenchSchema = (origin: string) => {
+  const schema = structuredClone(openapi)
+  schema.info = {
+    ...schema.info,
+    title: 'ProChat Workbench API',
+    description: 'ProChat Workbench actions powered by the BuildFlow engine. Each action is bounded by a short BuildFlow deadline and returns structured JSON before platform timeouts.'
+  }
+  schema.servers = [{ url: origin, description: 'ProChat Workbench' }]
+
+  const paths = schema.paths as Record<string, Record<string, { operationId?: string }>>
+  for (const pathItem of Object.values(paths)) {
+    for (const operation of Object.values(pathItem)) {
+      const legacyId = operation.operationId as keyof typeof workbenchOperationIds | undefined
+      if (legacyId && legacyId in workbenchOperationIds) {
+        operation.operationId = workbenchOperationIds[legacyId]
+      }
+    }
+  }
+
+  return schema
+}
+
+export async function GET(request: Request) {
+  const { host, origin } = getRequestOrigin(request)
+  const legacySchema = host === 'buildflow.prochat.tools'
+  const schema = legacySchema ? structuredClone(openapi) : createWorkbenchSchema(origin)
+
+  if (legacySchema) {
+    schema.servers = [{ url: origin, description: 'BuildFlow compatibility' }]
+  }
+
+  return NextResponse.json(schema, {
     headers: { 'Cache-Control': 'public, max-age=60' }
   })
 }

@@ -20,11 +20,13 @@ Route deadlines: status 4s, read-context 8s, apply-file-change 8s, commit-change
 ## Actions
 
 Available actions:
-`getBuildFlowStatus`, `readBuildFlowContext`, `applyBuildFlowFileChange`, `commitBuildFlowChanges`, `runBuildFlowCommand`.
+`getWorkbenchStatus`, `readWorkbenchContext`, `applyWorkbenchFileChange`, `commitWorkbenchChanges`, `runWorkbenchCommand`.
+
+These Workbench operation IDs map to the existing BuildFlow engine routes and contracts.
 
 ## Source Lock
 
-At the first message, call `getBuildFlowStatus?include=sources`.
+At the first message, call `getWorkbenchStatus?include=sources`.
 - If the user named a repo, choose that `sourceId` from the returned sources and treat it as locked in this chat.
 - If no repo was named, show available sources and ask which repo to use.
 - Pass explicit `sourceId` on every repo action.
