@@ -18,13 +18,13 @@ If this project helps you, please **star it, fork it, try it on a real repo, ope
 ```mermaid
 flowchart LR
   You["You in ChatGPT"] --> GPT["Custom GPT"]
-  GPT --> Endpoint["Your BuildFlow endpoint"]
-  Endpoint --> Web["BuildFlow dashboard<br/>localhost:3054"]
+  GPT --> Endpoint["Your Workbench endpoint"]
+  Endpoint --> Web["ProChat Workbench<br/>localhost:3054"]
   Web --> Agent["Local agent<br/>localhost:3052"]
   Agent --> Sources["Repos · notes · docs · skills"]
   Agent --> Writes["Verified writes"]
   Agent --> Commands["Safe commands"]
-  GPT --> Assistant["Fast Repo Assistant"]
+  GPT --> Assistant["Fast Project Assistant"]
   Assistant --> Flow["Read · answer or edit · validate when needed · stop"]
 
   classDef dark fill:#0f172a,stroke:#2563eb,color:#f8fafc;
@@ -36,13 +36,13 @@ flowchart LR
   class Writes,Commands safe;
 ```
 
-## Why BuildFlow exists
+## Why ProChat Workbench exists
 
 AI coding tools are powerful, but they often work in the wrong place.
 
 A remote model may not see your local repo. A browser chat may not be able to run your local tests. A CLI agent may have strong execution but weak long-term planning context. Copying files back and forth wastes time and breaks flow.
 
-BuildFlow bridges that gap.
+ProChat Workbench bridges that gap through the BuildFlow engine.
 
 It keeps ChatGPT as the main interface while your own machine remains the source of truth. Your Custom GPT can ask BuildFlow for exact repo context, read the files it needs, write verified changes back to disk, run allowlisted validation commands, and keep a progress trail.
 
@@ -50,7 +50,7 @@ The result is a ChatGPT-first workflow for real local projects.
 
 ## What you can build with it
 
-BuildFlow is useful for much more than asking questions about a codebase.
+ProChat Workbench is useful for much more than asking questions about a codebase.
 
 You can use it to:
 
@@ -72,7 +72,7 @@ You can use it to:
 
 ## The value in one sentence
 
-**BuildFlow lets you use ChatGPT as the reasoning layer and your local computer as the execution layer.**
+**ProChat Workbench lets you use ChatGPT as the reasoning layer and your local computer as the execution layer.**
 
 That means you can brainstorm, inspect, plan, edit, validate, and iterate on real local projects without turning every task into a separate hosted API workflow.
 
@@ -80,7 +80,7 @@ That means you can brainstorm, inspect, plan, edit, validate, and iterate on rea
 
 ### ChatGPT-first local repo access
 
-BuildFlow exposes a Custom GPT action schema so ChatGPT can talk to your local BuildFlow endpoint.
+ProChat Workbench exposes a Custom GPT action schema through the BuildFlow engine so ChatGPT can talk to your Workbench endpoint.
 
 Your GPT can:
 

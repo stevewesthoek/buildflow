@@ -1,4 +1,18 @@
-# BuildFlow MVP — Setup Guide
+# ProChat Workbench Setup Guide
+
+ProChat Workbench is the public product, powered by the BuildFlow engine. Repository names, CLI commands, package scopes, scripts, environment variables, log prefixes, action operation names, and API contracts continue to use their existing BuildFlow technical identifiers.
+
+Canonical hosted endpoint:
+
+```text
+https://workbench.prochat.tools
+```
+
+Legacy compatibility endpoint:
+
+```text
+https://buildflow.prochat.tools
+```
 
 ## Local Development Setup
 
