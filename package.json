@@ -24,6 +24,7 @@
     "verify:workbench-reliability": "node scripts/verify-workbench-reliability.mjs",
     "test:workbench-timeout": "./packages/cli/node_modules/.bin/tsx apps/web/src/__tests__/actions/timeout.test.ts",
     "test:workbench-response-size": "./packages/cli/node_modules/.bin/tsx apps/web/src/__tests__/actions/response-size.test.ts",
+    "test:cli-compatibility": "node packages/cli/tests/cli-compatibility.test.js",
     "diagnose:workbench-path": "node scripts/diagnose-workbench-path.mjs",
     "restart:local": "bash scripts/restart-buildflow-local.sh",
     "local:status": "bash scripts/buildflow-local-stack.sh status",
