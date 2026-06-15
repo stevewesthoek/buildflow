@@ -11,7 +11,7 @@ const openapi = {
   },
   servers: [
     {
-      url: process.env.PUBLIC_BASE_URL || process.env.LOCAL_DASHBOARD_BASE_URL || 'https://buildflow.prochat.tools',
+      url: process.env.PUBLIC_BASE_URL || process.env.LOCAL_DASHBOARD_BASE_URL || 'https://workbench.prochat.tools',
       description: 'BuildFlow'
     }
   ],
@@ -24,7 +24,7 @@ const openapi = {
   paths: {
     '/api/actions/status': {
       get: {
-        operationId: 'getBuildFlowStatus',
+        operationId: 'getWorkbenchStatus',
         summary: 'Fast status check with a 4s BuildFlow deadline',
         description: 'Compact health check with connection state, optional sources/context, runtime stats, and freshness metadata. Use first to lock sourceId, then call read-context for repo details. Returns unavailable guidance if local services are disconnected.',
         'x-openai-isConsequential': false,
@@ -42,7 +42,7 @@ const openapi = {
     },
     '/api/actions/read-context': {
       post: {
-        operationId: 'readBuildFlowContext',
+        operationId: 'readWorkbenchContext',
         summary: 'Bounded repo context read with an 8s BuildFlow deadline',
         description: 'Fast exact reads and cached Graphify navigation. Unknown areas should call graph_context first, then exact read. Known paths/symbols should skip graph. Broad scope returns needs_narrower_scope.',
         'x-openai-isConsequential': false,
@@ -87,7 +87,7 @@ const openapi = {
     },
     '/api/actions/apply-file-change': {
       post: {
-        operationId: 'applyBuildFlowFileChange',
+        operationId: 'applyWorkbenchFileChange',
         summary: 'Guarded file change with an 8s BuildFlow deadline',
         description: 'Apply a single file change (create, overwrite, patch, append, delete, move) with built-in policy validation. Use dryRun=true to test if a write is allowed without modifying the file. Normally completes in <2s. Larger files or confirmation-gated operations may approach 8s.',
         'x-openai-isConsequential': false,
@@ -132,7 +132,7 @@ const openapi = {
     },
     '/api/actions/commit-changes': {
       post: {
-        operationId: 'commitBuildFlowChanges',
+        operationId: 'commitWorkbenchChanges',
         summary: 'Diff, stage explicit paths, and commit within 10s',
         description: 'Three-step operation: git diff → git add paths → git commit. Always use specific paths (1-10 typical); never commit everything at once. Normally completes in <5s for small commits. Confirmation-gated operations may require a second prompt with the returned token.',
         'x-openai-isConsequential': false,
@@ -166,7 +166,7 @@ const openapi = {
     },
     '/api/actions/run-command': {
       post: {
-        operationId: 'runBuildFlowCommand',
+        operationId: 'runWorkbenchCommand',
         summary: 'Run fast allowlisted command with a 12s GPT cap',
         description: 'Run only fast allowlisted commands (type-check, git-commands, validate-json, security-scan, test with marker). Commands are killed at 12s deadline. Output is truncated to ~8 KB. Large tests or type-checks should run in a separate follow-up prompt.',
         'x-openai-isConsequential': false,
@@ -213,14 +213,6 @@ const openapi = {
   }
 }
 
-const workbenchOperationIds = {
-  getBuildFlowStatus: 'getWorkbenchStatus',
-  readBuildFlowContext: 'readWorkbenchContext',
-  applyBuildFlowFileChange: 'applyWorkbenchFileChange',
-  commitBuildFlowChanges: 'commitWorkbenchChanges',
-  runBuildFlowCommand: 'runWorkbenchCommand'
-} as const
-
 const getRequestOrigin = (request: Request) => {
   const requestUrl = new URL(request.url)
   const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim()
@@ -242,27 +234,12 @@ const createWorkbenchSchema = (origin: string) => {
   }
   schema.servers = [{ url: origin, description: 'ProChat Workbench' }]
 
-  const paths = schema.paths as Record<string, Record<string, { operationId?: string }>>
-  for (const pathItem of Object.values(paths)) {
-    for (const operation of Object.values(pathItem)) {
-      const legacyId = operation.operationId as keyof typeof workbenchOperationIds | undefined
-      if (legacyId && legacyId in workbenchOperationIds) {
-        operation.operationId = workbenchOperationIds[legacyId]
-      }
-    }
-  }
-
   return schema
 }
 
 export async function GET(request: Request) {
-  const { host, origin } = getRequestOrigin(request)
-  const legacySchema = host === 'buildflow.prochat.tools'
-  const schema = legacySchema ? structuredClone(openapi) : createWorkbenchSchema(origin)
-
-  if (legacySchema) {
-    schema.servers = [{ url: origin, description: 'BuildFlow compatibility' }]
-  }
+  const { origin } = getRequestOrigin(request)
+  const schema = createWorkbenchSchema(origin)
 
   return NextResponse.json(schema, {
     headers: { 'Cache-Control': 'public, max-age=60' }

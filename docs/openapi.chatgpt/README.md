@@ -7,16 +7,15 @@ Use one of these for schema import or generation:
 - canonical schema file: `docs/openapi.chatgpt.json`
 - local running endpoint for schema generation: `http://127.0.0.1:3054/api/openapi`
 - canonical hosted endpoint: `https://workbench.prochat.tools/api/openapi`
-- legacy compatibility endpoint: `https://buildflow.prochat.tools/api/openapi`
 - another HTTPS endpoint you control: `https://<your-domain-or-tunnel>/api/openapi`
 
-For actual ChatGPT Actions, the server URL inside the imported schema must be reachable by ChatGPT over HTTPS. A `localhost` server URL is not a valid runtime endpoint for ChatGPT-hosted action calls. New imports should use `https://workbench.prochat.tools`; the legacy hostname remains available for compatibility with existing schemas.
+For actual ChatGPT Actions, the server URL inside the imported schema must be reachable by ChatGPT over HTTPS. A `localhost` server URL is not a valid runtime endpoint for ChatGPT-hosted action calls. New imports must use `https://workbench.prochat.tools`.
 
 ProChat Workbench uses BuildFlow v1.2.13-beta actions to return compact structured results. The GPT must narrate progress before each action and summarize compact action results after each action; the schema alone does not make the assistant explain what it is doing. Custom GPT Actions are synchronous external API calls, so the BuildFlow engine keeps progress visible through small, bounded calls rather than hidden loops or streaming claims.
 
 BuildFlow now enforces GPT-facing deadlines below the platform timeout: status 4s, read-context 8s, apply-file-change 8s, commit-changes 10s, and run-command 12s. If an action cannot finish safely, it returns structured JSON with `status: "timeout"` or `status: "needs_narrower_scope"` and compact diagnostics. This reduces Cloudflare/ChatGPT timeout risk but does not claim to make network or platform outages impossible.
 
-The current canonical Custom GPT surface is exactly these 5 Workbench operations. `applyWorkbenchFileChange` carries maintainer sub-operations through `changeType`; `runWorkbenchCommand` is the only raw command/validation/Git execution surface; `commitWorkbenchChanges` batches diff, explicit staging, and commit into one bounded action. The legacy `buildflow.prochat.tools` compatibility schema keeps the old BuildFlow operation IDs for already-imported GPTs.
+The current canonical Custom GPT surface is exactly these 5 Workbench operations. `applyWorkbenchFileChange` carries maintainer sub-operations through `changeType`; `runWorkbenchCommand` is the only raw command/validation/Git execution surface; `commitWorkbenchChanges` batches diff, explicit staging, and commit into one bounded action.
 
 - `getWorkbenchStatus`
 - `readWorkbenchContext`

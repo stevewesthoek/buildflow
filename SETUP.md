@@ -8,7 +8,7 @@ Canonical hosted endpoint:
 https://workbench.prochat.tools
 ```
 
-Legacy compatibility endpoint:
+Retired legacy endpoint:
 
 ```text
 https://buildflow.prochat.tools
@@ -20,7 +20,7 @@ Canonical action token variable:
 WORKBENCH_ACTION_TOKEN
 ```
 
-`BUILDFLOW_ACTION_TOKEN` remains supported as a compatibility fallback. Configure only one token variable for a given runtime, prefer `WORKBENCH_ACTION_TOKEN` for new setups, and never commit token values to the repository.
+`BUILDFLOW_ACTION_TOKEN` remains supported for backward-compatible local tooling, but the public GPT and hosted Workbench surface are canonical-only. Configure only one token variable for a given runtime, prefer `WORKBENCH_ACTION_TOKEN` for new setups, and never commit token values to the repository.
 
 ## Local Development Setup
 
@@ -68,6 +68,19 @@ npm link
 Now you can run `buildflow` from anywhere.
 
 ## Running Locally
+
+### Docker identity and compatibility
+
+The local relay now runs under the Workbench Docker identity:
+
+```text
+Compose project: workbench
+Image: workbench-relay
+Container: workbench-relay
+Network: workbench_default
+```
+
+The relay intentionally reuses the existing persistent volume `buildflow_buildflow-data`, and the container data path remains `/var/lib/buildflow`. Those retained names preserve existing relay state and represent the internal BuildFlow engine compatibility layer rather than unfinished public branding.
 
 ### Quick Start: All Services (Recommended)
 

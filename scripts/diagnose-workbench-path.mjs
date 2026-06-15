@@ -15,7 +15,6 @@ const LOCAL_WEB = process.env.LOCAL_DASHBOARD_BASE_URL || 'http://127.0.0.1:3054
 const LOCAL_AGENT = process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:3052'
 const LOCAL_RELAY = process.env.LOCAL_RELAY_URL || 'http://127.0.0.1:3053'
 const PUBLIC_WORKBENCH = process.env.PUBLIC_WORKBENCH_BASE_URL || 'https://workbench.prochat.tools'
-const PUBLIC_BUILDFLOW = process.env.PUBLIC_BUILDFLOW_BASE_URL || 'https://buildflow.prochat.tools'
 const token = process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || ''
 
 function redactProcessLine(line) {
@@ -187,8 +186,6 @@ async function main() {
     await fetchProbe('local_status_unauth', `${LOCAL_WEB}/api/actions/status`, { timeoutMs: 5000 }),
     await fetchProbe('public_workbench_openapi', `${PUBLIC_WORKBENCH}/api/openapi`, { timeoutMs: 15000 }),
     await fetchProbe('public_workbench_status_unauth', `${PUBLIC_WORKBENCH}/api/actions/status`, { timeoutMs: 15000 }),
-    await fetchProbe('public_buildflow_openapi', `${PUBLIC_BUILDFLOW}/api/openapi`, { timeoutMs: 15000 }),
-    await fetchProbe('public_buildflow_status_unauth', `${PUBLIC_BUILDFLOW}/api/actions/status`, { timeoutMs: 15000 })
   ]
 
   if (token) {
@@ -200,7 +197,7 @@ async function main() {
     checkedAt: new Date().toISOString(),
     expected: {
       canonicalHostname: 'workbench.prochat.tools',
-      compatibilityHostname: 'buildflow.prochat.tools',
+      retiredHostname: 'buildflow.prochat.tools',
       localOrigin: LOCAL_WEB,
       localAgent: LOCAL_AGENT,
       localRelay: LOCAL_RELAY
@@ -238,7 +235,6 @@ async function main() {
       await runBench('local_relay_health', () => fetchProbe('local_relay_health', `${LOCAL_RELAY}/health`, { timeoutMs: 5000 })),
       await runBench('public_workbench_openapi', () => fetchProbe('public_workbench_openapi', `${PUBLIC_WORKBENCH}/api/openapi`, { timeoutMs: 15000 })),
       await runBench('public_workbench_status_unauth', () => fetchProbe('public_workbench_status_unauth', `${PUBLIC_WORKBENCH}/api/actions/status`, { timeoutMs: 15000 })),
-      await runBench('public_buildflow_openapi', () => fetchProbe('public_buildflow_openapi', `${PUBLIC_BUILDFLOW}/api/openapi`, { timeoutMs: 15000 }))
     ]
   }
 

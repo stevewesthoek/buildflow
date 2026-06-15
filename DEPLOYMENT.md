@@ -6,7 +6,7 @@ This document describes the runtime contract and deployment workflow for ProChat
 
 `https://workbench.prochat.tools` is the canonical public endpoint for ProChat Workbench and is available through the active Cloudflare tunnel.
 
-`https://buildflow.prochat.tools` is the legacy compatibility endpoint. Keep it functional for existing Custom GPT action schemas, bookmarks, and integrations until a separate compatibility retirement is approved. Prefer a proxy or alias to the same service rather than relying on redirects for authenticated POST requests.
+`https://buildflow.prochat.tools` is retired and must not be used as a public availability dependency.
 
 Steve's current local Workbench setup must remain untouched while any Dokploy deployment is prepared and tested. Do not stop, restart, clean up, reconfigure, or decommission the local runtime as part of deployment planning.
 
@@ -18,7 +18,7 @@ Protected local configuration:
 
 Endpoint policy:
 1. **Canonical public endpoint:** `workbench.prochat.tools`.
-2. **Legacy compatibility endpoint:** `buildflow.prochat.tools` must continue reaching the same service during the migration period.
+2. **Legacy compatibility endpoint:** retired on 2026-06-15; do not rely on `buildflow.prochat.tools` for availability, testing, or GPT imports.
 3. **Staging:** use a clearly separate staging hostname before any production infrastructure cutover.
 4. **Production cutover:** only after staging is proven and Steve explicitly approves the cutover.
 5. **Local cleanup:** only after production is proven stable and Steve explicitly approves decommissioning the old local runtime.

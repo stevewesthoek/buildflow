@@ -77,7 +77,6 @@ Use `pnpm diagnose:workbench-path` before changing code or tunnel settings. It s
 - relay container image, name, Compose project, create time, and start time.
 - local web, agent, and relay health.
 - canonical public endpoint `https://workbench.prochat.tools`.
-- compatibility endpoint `https://buildflow.prochat.tools`.
 - `CF-Ray`, `X-Workbench-Request-Id`, content type, status, and response class.
 
 Classification rules:
