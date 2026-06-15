@@ -79,7 +79,7 @@ const openapi = {
         },
         responses: {
           200: {
-            description: 'Files or search results (max 256 KB response)',
+            description: 'Files or search results (bounded to the GPT action payload limit)',
             content: { 'application/json': { schema: { type: 'object', properties: {}, additionalProperties: true } } }
           }
         }

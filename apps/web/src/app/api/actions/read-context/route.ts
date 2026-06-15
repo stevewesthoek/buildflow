@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { dispatchBuildFlowRead, dispatchBuildFlowInspect, unwrapActionError } from '@/lib/actions/gpt'
+import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
 import { executeAction } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
@@ -8,7 +9,7 @@ import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/de
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
-const READ_CONTEXT_RESPONSE_BUDGET_BYTES = 256 * 1024 // 256 KB max
+const READ_CONTEXT_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BYTE_LIMIT
 
 function trimEntries(data: unknown): unknown {
   if (!data || typeof data !== 'object') return data

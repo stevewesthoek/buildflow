@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { executeActionGET } from '@/lib/actions/transport'
+import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
 import { listBuildFlowSources, getBuildFlowActiveContext, setBuildFlowActiveContext, unwrapActionError } from '@/lib/actions/gpt'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 
@@ -10,7 +11,7 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 let activeRequests = 0
-const STATUS_RESPONSE_BUDGET_BYTES = 8_000
+const STATUS_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BYTE_LIMIT
 const WEB_PROCESS_STARTED_AT = new Date().toISOString()
 const WEB_PACKAGE_VERSION = process.env.npm_package_version || '1.2.13-beta'
 

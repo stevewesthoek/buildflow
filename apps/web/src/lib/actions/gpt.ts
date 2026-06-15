@@ -1,6 +1,7 @@
 import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout, type ActionTransportOptions } from './transport'
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
+import { GPT_ACTION_RESPONSE_BYTE_LIMIT, GPT_ACTION_RESPONSE_CHAR_LIMIT } from './payload-budget'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_DEFAULT_INSPECT_LIMIT } from '@buildflow/shared'
 
 type NormalizedSource = {
@@ -520,7 +521,7 @@ function assertVerifiedWriteResult(result: unknown, fallback: string): VerifiedW
 async function fetchJson(endpoint: string, init?: RequestInit, transportOptions?: ActionTransportOptions): Promise<unknown> {
   const startedAt = Date.now()
   const timeoutMs = transportOptions?.timeoutMs ?? 10000
-  const maxResponseBytes = transportOptions?.maxResponseBytes ?? 512 * 1024
+  const maxResponseBytes = transportOptions?.maxResponseBytes ?? GPT_ACTION_RESPONSE_BYTE_LIMIT
   let response: Response
   try {
     response = await fetchWithTimeout(

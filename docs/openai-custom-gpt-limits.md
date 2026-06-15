@@ -95,6 +95,8 @@ BuildFlow previously attempted server-side agent orchestration:
 
 ## BuildFlow Schema — Current Operations
 
+**BuildFlow internal payload policy:** keep every GPT-facing request and response at or below 80,000 characters and 80,000 UTF-8 bytes unless a lower route-specific budget is documented. The internal boundary is deliberately below the OpenAI limit so action payloads remain well clear of the platform cutoff.
+
 **Total: 5 operations** (hard limit: 30)
 
 | `operationId` | Method | Endpoint | Purpose |
@@ -132,7 +134,7 @@ Read-context hard caps:
 - search/list limit defaults to 5 and is capped at 5 for GPT use
 - `read_paths` and multi-file reads accept at most 5 paths
 - `maxBytesPerFile` defaults to 4000 and is capped at 4000 for GPT use
-- files over 100 KB return metadata and a focused-read suggestion, not top-of-file content
+- files over the internal GPT payload boundary return metadata and a focused-read suggestion, not top-of-file content
 - `grep_context` defaults to literal matching; regex is opt-in, length-capped, and rejected when suspiciously broad
 - `read_range` and `read_symbol` output is line-bounded and byte-bounded
 

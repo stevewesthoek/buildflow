@@ -31,8 +31,10 @@ type TransportDiagnostics = {
   proxyMs?: number
 }
 
+import { GPT_ACTION_RESPONSE_BYTE_LIMIT, GPT_ACTION_RESPONSE_CHAR_LIMIT } from './payload-budget'
+
 const REQUEST_TIMEOUT_MS = 12000
-const DEFAULT_RESPONSE_SIZE_LIMIT_BYTES = 512 * 1024 // 512 KB hard cap
+const DEFAULT_RESPONSE_SIZE_LIMIT_BYTES = GPT_ACTION_RESPONSE_BYTE_LIMIT
 
 export type ActionTransportOptions = {
   timeoutMs?: number
@@ -105,13 +107,28 @@ async function readJsonResponse(response: Response, endpoint: string, maxRespons
 
 async function readResponseText(response: Response, endpoint: string, maxResponseBytes = DEFAULT_RESPONSE_SIZE_LIMIT_BYTES): Promise<string> {
   if (!response.body) {
-    return response.text()
+    const text = await response.text()
+    if (text.length > GPT_ACTION_RESPONSE_CHAR_LIMIT || Buffer.byteLength(text, 'utf8') > maxResponseBytes) {
+      throw new ActionTransportError(
+        `Response too large from ${endpoint}`,
+        413,
+        buildActionErrorEnvelope({
+          code: 'RESPONSE_SIZE_EXCEEDED',
+          message: 'BuildFlow response exceeded size limit.',
+          details: `Response from ${endpoint} exceeded ${GPT_ACTION_RESPONSE_CHAR_LIMIT} characters or ${maxResponseBytes} bytes.`,
+          recovery: ['Use a narrower read mode', 'Reduce file count or size', 'Use grep_context instead of broad reads'],
+          status: 'needs_narrower_scope'
+        })
+      )
+    }
+    return text
   }
 
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   const chunks: string[] = []
   let responseBytes = 0
+  let responseChars = 0
 
   try {
     while (true) {
@@ -119,7 +136,9 @@ async function readResponseText(response: Response, endpoint: string, maxRespons
       if (done) break
       if (!value) continue
       responseBytes += value.byteLength
-      if (responseBytes > maxResponseBytes) {
+      const chunk = decoder.decode(value, { stream: true })
+      responseChars += chunk.length
+      if (responseBytes > maxResponseBytes || responseChars > GPT_ACTION_RESPONSE_CHAR_LIMIT) {
         await reader.cancel().catch(() => undefined)
         throw new ActionTransportError(
           `Response too large from ${endpoint}`,
@@ -127,15 +146,30 @@ async function readResponseText(response: Response, endpoint: string, maxRespons
           buildActionErrorEnvelope({
             code: 'RESPONSE_SIZE_EXCEEDED',
             message: 'BuildFlow response exceeded size limit.',
-            details: `Response exceeded ${maxResponseBytes} bytes while reading.`,
+            details: `Response exceeded ${GPT_ACTION_RESPONSE_CHAR_LIMIT} characters or ${maxResponseBytes} bytes while reading.`,
             recovery: ['Use a narrower read mode', 'Reduce file count or size', 'Use grep_context instead of broad reads'],
             status: 'needs_narrower_scope'
           })
         )
       }
-      chunks.push(decoder.decode(value, { stream: true }))
+      chunks.push(chunk)
     }
-    chunks.push(decoder.decode())
+    const finalChunk = decoder.decode()
+    responseChars += finalChunk.length
+    if (responseBytes > maxResponseBytes || responseChars > GPT_ACTION_RESPONSE_CHAR_LIMIT) {
+      throw new ActionTransportError(
+        `Response too large from ${endpoint}`,
+        413,
+        buildActionErrorEnvelope({
+          code: 'RESPONSE_SIZE_EXCEEDED',
+          message: 'BuildFlow response exceeded size limit.',
+          details: `Response exceeded ${GPT_ACTION_RESPONSE_CHAR_LIMIT} characters or ${maxResponseBytes} bytes while reading.`,
+          recovery: ['Use a narrower read mode', 'Reduce file count or size', 'Use grep_context instead of broad reads'],
+          status: 'needs_narrower_scope'
+        })
+      )
+    }
+    chunks.push(finalChunk)
     return chunks.join('')
   } finally {
     reader.releaseLock()

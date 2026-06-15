@@ -11,7 +11,7 @@ Public product: ProChat Workbench
 Technical engine and internal identifier: BuildFlow
 ```
 
-BuildFlow repository names, package scopes, scripts, source IDs, action names, and API contracts remain unchanged during this public naming migration.
+BuildFlow repository names, package scopes, scripts, source IDs, and internal API routes remain technical compatibility identifiers. The canonical public GPT action operation IDs use Workbench names, and the retired BuildFlow hostname is no longer a public compatibility dependency.
 
 If this project helps you, please **star it, fork it, try it on a real repo, open issues, request features, and share what you build with it.**
 

@@ -180,7 +180,7 @@ Use the request ID to determine whether a request reached the web origin:
 | Action | Deadline | Intended Use | Timeout Behavior |
 |--------|----------|--------------|------------------|
 | `status` | 4s | Health check | Returns `unavailable` if dependencies unreachable |
-| `read-context` | 8s | Exact reads or bounded search | Returns `needs_narrower_scope` if response >256 KB |
+| `read-context` | 8s | Exact reads or bounded search | Returns `needs_narrower_scope` if response exceeds the GPT action payload limit |
 | `apply-file-change` | 8s | Single file write/delete/move | Fails fast if write policy rejected or file too large |
 | `commit-changes` | 10s | Diff + stage + commit (3 steps) | Fails at first failing step with diagnostics |
 | `run-command` | 12s | Fast allowlisted commands | Command is killed if exceeds deadline |
@@ -191,7 +191,7 @@ Use the request ID to determine whether a request reached the web origin:
 
 ### Scenario: `read-context` returns `status: "needs_narrower_scope"`
 
-**Meaning:** Response exceeded 256 KB before deadline was reached.
+**Meaning:** Response exceeded the GPT action payload limit before deadline was reached.
 
 **Recovery:**
 1. Check returned `suggestedNarrowerMode` (e.g., `grep_context`, `read_range`)
@@ -444,7 +444,7 @@ time curl -s http://localhost:3054/api/actions/status | jq '.connected'
 - [ ] Deadline enforced via `withGptActionDeadline()`
 - [ ] Request ID passed in response headers and diagnostics
 - [ ] All transport calls pass deadline signal and deadline-aware timeout
-- [ ] Response size validated before returning (cap at 256 KB for reads)
+- [ ] Response size validated before returning (cap at the GPT action payload limit for reads)
 - [ ] Child processes receive abort signal on deadline
 - [ ] Errors are structured JSON, never HTML or plain text
 - [ ] Timeout behavior documented in OpenAPI schema
