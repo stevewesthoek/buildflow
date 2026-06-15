@@ -166,4 +166,6 @@ Safety boundaries:
 - No `.env`, `.git`, `node_modules`, build outputs, generated outputs, runtime outputs, logs, or binary paths.
 - Secret-looking output is redacted before it is returned.
 
+**Docker configuration files** (`docker-compose.yml`, `docker-compose.yaml`, `Dockerfile`, `.dockerignore`, and their variants including env-specific and nested versions like `deploy/compose.production.yaml`) are treated as guarded text configuration. Workbench can create, patch, overwrite, and append them when the target directory is within the approved write roots. Deletion and moves remain confirmation-gated. Environment files, secrets, and credential files remain blocked regardless of Docker context.
+
 After changing the OpenAPI command schema, regenerate `docs/openapi.chatgpt.json`, update the Custom GPT schema in the GPT editor, save the GPT, and start a new chat.

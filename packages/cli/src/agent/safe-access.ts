@@ -253,7 +253,7 @@ const SAFE_WRITE_ROOTS = [
   '.buildflow'
 ]
 
-const PROTECTED_FILES = new Set(['docker-compose.yml'])
+const PROTECTED_FILES = new Set<string>()
 const BLOCKED_DIRECTORY_NAMES = new Set(['node_modules', '.next', 'dist', 'build', 'coverage', '.git'])
 const ALLOWED_DOTFILES = new Set(['.github', '.kiro', '.ai', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example', '.gitignore', '.buildflow', '.nvmrc', '.prettierrc', '.eslintrc'])
 const CONFIRMATION_REQUIRED_GLOBS = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'LICENSE']
@@ -299,6 +299,13 @@ const STATIC_ASSET_ROOT_PATTERNS = [
   'docs/media/**'
 ]
 
+const DOCKER_CONFIG_BASENAMES = /^(docker-compose(\.[a-z0-9_-]+)?\.ya?ml|compose(\.[a-z0-9_-]+)?\.ya?ml|Dockerfile(\.[a-z0-9_-]+)?|\.dockerignore)$/i
+
+export function isDockerConfigPath(normalizedPath: string): boolean {
+  const basename = path.basename(normalizedPath)
+  return DOCKER_CONFIG_BASENAMES.test(basename)
+}
+
 export function isSafeRelativePath(relativePath: string): boolean {
   if (!relativePath || relativePath.includes('..') || relativePath.startsWith('/')) return false
   return true
@@ -323,7 +330,7 @@ export function getDefaultWritePolicy(): WritePolicySummary {
     allowRmdir: true,
     recursiveDeleteRequiresConfirmation: true,
     maxRecursiveDeleteFilesWithoutConfirmation: 0,
-    allowedRoots: ['src/**', 'app/**', 'components/**', 'lib/**', 'pages/**', 'server/**', 'client/**', 'shared/**', 'features/**', 'modules/**', 'utils/**', 'hooks/**', 'services/**', 'styles/**', 'types/**', 'test/**', 'tests/**', '__tests__/**', 'e2e/**', 'playwright/**', 'cypress/**', 'prisma/**', 'scripts/**', 'bin/**', 'tools/**', 'ai/skills/**', 'operations/runbooks/**', 'operations/specs/**', 'operations/specs/video-orchestrator/**', 'projects/*', 'projects/*/**', 'projects/*/src/**', 'projects/probot/src/**', 'services/*/src/**', 'packages/*/src/**', 'specs/**', 'runbooks/**', '*.md', '*.mdx', 'docs/**', 'plans/**', 'notes/**', 'artifacts/**', '.buildflow/**', '.gitignore', 'README.md', 'CHANGELOG.md', 'CLAUDE.md', 'decision-log.md', 'LICENSE', 'package.json', 'docker-compose.yml', 'Dockerfile', 'next.config.*', 'vite.config.*', 'nuxt.config.*', 'remix.config.*', 'astro.config.*', 'tsconfig.json', 'jsconfig.json', 'tailwind.config.*', 'postcss.config.*', 'components.json', 'eslint.config.*', 'prettier.config.*', '.prettierrc', '.prettierrc.*', 'vitest.config.*', 'jest.config.*', 'playwright.config.*', 'cypress.config.*', 'nixpacks.toml', 'turbo.json', 'pnpm-workspace.yaml', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'],
+    allowedRoots: ['src/**', 'app/**', 'components/**', 'lib/**', 'pages/**', 'server/**', 'client/**', 'shared/**', 'features/**', 'modules/**', 'utils/**', 'hooks/**', 'services/**', 'styles/**', 'types/**', 'test/**', 'tests/**', '__tests__/**', 'e2e/**', 'playwright/**', 'cypress/**', 'prisma/**', 'scripts/**', 'bin/**', 'tools/**', 'ai/skills/**', 'operations/runbooks/**', 'operations/specs/**', 'operations/specs/video-orchestrator/**', 'projects/*', 'projects/*/**', 'projects/*/src/**', 'projects/probot/src/**', 'services/*/src/**', 'packages/*/src/**', 'specs/**', 'runbooks/**', '*.md', '*.mdx', 'docs/**', 'plans/**', 'notes/**', 'artifacts/**', '.buildflow/**', '.gitignore', 'README.md', 'CHANGELOG.md', 'CLAUDE.md', 'decision-log.md', 'LICENSE', 'package.json', 'docker-compose.yml', 'docker-compose.yaml', 'docker-compose.*.yml', 'docker-compose.*.yaml', 'compose.yml', 'compose.yaml', 'compose.*.yml', 'compose.*.yaml', 'Dockerfile', 'Dockerfile.*', '.dockerignore', '**/docker-compose*.yml', '**/docker-compose*.yaml', '**/compose*.yml', '**/compose*.yaml', '**/Dockerfile*', '**/.dockerignore', 'next.config.*', 'vite.config.*', 'nuxt.config.*', 'remix.config.*', 'astro.config.*', 'tsconfig.json', 'jsconfig.json', 'tailwind.config.*', 'postcss.config.*', 'components.json', 'eslint.config.*', 'prettier.config.*', '.prettierrc', '.prettierrc.*', 'vitest.config.*', 'jest.config.*', 'playwright.config.*', 'cypress.config.*', 'nixpacks.toml', 'turbo.json', 'pnpm-workspace.yaml', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'],
     blockedGlobs: ['.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa', '**/id_ed25519', '.git/**', 'node_modules/**', '.next/**', 'dist/**', 'build/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**', 'ai/private/**', 'ai/secrets/**'],
     blockedWriteGlobs: ['.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**', 'ai/private/**', 'ai/secrets/**'],
     generatedDeleteAllowedGlobs: ['tsconfig.tsbuildinfo', '.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**'],
@@ -356,6 +363,9 @@ function classifyBlockedPath(normalized: string): { code: WriteValidationErrorCo
     return { code: 'PATH_TRAVERSAL_BLOCKED', reason: 'path_traversal', message: 'Path traversal outside the repo is blocked.', hint: 'Use a normalized path within the connected source root.' }
   }
   if (ENV_TEMPLATE_FILES.has(path.basename(normalized))) {
+    return null
+  }
+  if (isDockerConfigPath(normalized)) {
     return null
   }
   if (/(\.env(\..*)?)$/i.test(normalized) || /(^|\/)\.env(\..*)?$/i.test(normalized)) {
@@ -524,6 +534,17 @@ export function validateWriteTarget(params: {
     confirmationToken: params.confirmationToken
   })) {
     return { ok: false, requestedPath, normalizedPath, sourceRootRelativePath, policy, error: buildConfirmationError('confirmation_required_path', 'Explicitly confirm before editing lockfiles, GitHub workflows, LICENSE, or Prisma migrations.') }
+  }
+
+  if (isDockerConfigPath(normalizedPath) && (params.changeType === 'delete_file' || params.changeType === 'move' || params.changeType === 'rename') && !hasValidConfirmation({
+    sourceId: params.sourceId,
+    changeType: params.changeType,
+    normalizedPath,
+    toPath: params.toPath,
+    confirmedByUser: params.confirmedByUser,
+    confirmationToken: params.confirmationToken
+  })) {
+    return { ok: false, requestedPath, normalizedPath, sourceRootRelativePath, policy, error: buildConfirmationError('docker_config_confirmation_required', 'Explicitly confirm before deleting or moving Docker configuration files.') }
   }
 
   if (normalizedPath === 'package.json') {

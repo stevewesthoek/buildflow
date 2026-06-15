@@ -241,4 +241,46 @@ assert(staticOpenapi.paths?.['/api/actions/apply-file-change']?.post?.requestBod
 assert(staticOpenapi.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.confirmedByUser)
 assert(staticOpenapi.paths?.['/api/actions/commit-changes']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.confirmedByUser)
 
+// --- Docker config write policy ---
+const dockerPatchRoot = validateWriteTarget({ requestedPath: 'docker-compose.yml', changeType: 'patch', sourceRoot: root, content: 'version: "3"\n' })
+assert.equal(dockerPatchRoot.ok, true, 'docker-compose.yml patch allowed')
+
+const dockerNestedPatch = validateWriteTarget({ requestedPath: 'deploy/compose.production.yaml', changeType: 'patch', sourceRoot: root, content: 'services:\n' })
+assert.equal(dockerNestedPatch.ok, true, 'nested compose.production.yaml patch allowed')
+
+const dockerfileOverwrite = validateWriteTarget({ requestedPath: 'Dockerfile', changeType: 'overwrite', sourceRoot: root, content: 'FROM node:18\n' })
+assert.equal(dockerfileOverwrite.ok, true, 'Dockerfile overwrite allowed')
+
+const dockerignoreAppend = validateWriteTarget({ requestedPath: '.dockerignore', changeType: 'append', sourceRoot: root, content: 'node_modules\n' })
+assert.equal(dockerignoreAppend.ok, true, '.dockerignore append allowed')
+
+// delete and move must be confirmation-gated
+const dockerDeleteNoConfirm = validateWriteTarget({ requestedPath: 'docker-compose.yml', changeType: 'delete_file', sourceRoot: root })
+assert.equal(dockerDeleteNoConfirm.ok, false, 'docker-compose.yml delete requires confirmation')
+if (!dockerDeleteNoConfirm.ok) assert.equal(dockerDeleteNoConfirm.error.code, 'REQUIRES_EXPLICIT_CONFIRMATION')
+
+const dockerMoveNoConfirm = validateWriteTarget({ requestedPath: 'Dockerfile', changeType: 'move', sourceRoot: root })
+assert.equal(dockerMoveNoConfirm.ok, false, 'Dockerfile move requires confirmation')
+if (!dockerMoveNoConfirm.ok) assert.equal(dockerMoveNoConfirm.error.code, 'REQUIRES_EXPLICIT_CONFIRMATION')
+
+// staging and commit path (patch) allowed
+const dockerStagingPatch = validateWriteTarget({ sourceId: 'buildflow', requestedPath: 'docker-compose.yml', changeType: 'patch', sourceRoot: root })
+assert.equal(dockerStagingPatch.ok, true, 'docker-compose.yml staging/commit path allowed')
+
+// secrets and protected paths stay blocked
+const envInDockerBlocked = validateWriteTarget({ requestedPath: '.env.production', changeType: 'patch', sourceRoot: root })
+assert.equal(envInDockerBlocked.ok, false, '.env.production still blocked')
+const pemBlocked = validateWriteTarget({ requestedPath: 'server.pem', changeType: 'patch', sourceRoot: root })
+assert.equal(pemBlocked.ok, false, 'server.pem still blocked')
+const gitConfigBlocked = validateWriteTarget({ requestedPath: '.git/config', changeType: 'patch', sourceRoot: root })
+assert.equal(gitConfigBlocked.ok, false, '.git/config still blocked')
+const nodeModulesBlocked = validateWriteTarget({ requestedPath: 'node_modules/foo/index.js', changeType: 'patch', sourceRoot: root })
+assert.equal(nodeModulesBlocked.ok, false, 'node_modules still blocked')
+const traversalBlocked = validateWriteTarget({ requestedPath: '../outside.txt', changeType: 'patch', sourceRoot: root })
+assert.equal(traversalBlocked.ok, false, 'traversal still blocked')
+
+// unrelated YAML retains existing policy
+const unrelatedYamlSafe = validateWriteTarget({ requestedPath: 'scripts/deploy.yaml', changeType: 'patch', sourceRoot: root })
+assert.equal(unrelatedYamlSafe.ok, true, 'scripts/deploy.yaml allowed (safe root)')
+
 console.log('write policy contract checks passed')
