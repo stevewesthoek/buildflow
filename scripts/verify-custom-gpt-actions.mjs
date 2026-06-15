@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const LOCAL_BASE_URL = process.env.LOCAL_DASHBOARD_BASE_URL || 'http://127.0.0.1:3054'
-const TOKEN = process.env.BUILDFLOW_ACTION_TOKEN || ''
+const TOKEN = process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || ''
 const ROOT = process.cwd()
 const DOCS_SCHEMA_FILE = path.join(ROOT, 'docs/openapi.chatgpt.json')
 const INSTRUCTIONS_FILE = path.join(ROOT, 'docs/CUSTOM_GPT_INSTRUCTIONS.md')

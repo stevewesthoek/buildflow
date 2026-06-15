@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getBackendMode } from './actions/config'
+import { getActionToken, getBackendMode } from './actions/config'
 
 export interface AuthResult {
   valid: boolean
@@ -9,7 +9,7 @@ export interface AuthResult {
 
 // Token authentication with mode-aware behavior:
 // - relay-agent mode: pass-through user tokens (forward to bridge unchanged)
-// - direct-agent mode: validate against global BUILDFLOW_ACTION_TOKEN
+// - direct-agent mode: validate against WORKBENCH_ACTION_TOKEN, with BUILDFLOW_ACTION_TOKEN fallback
 export function checkActionAuth(request: NextRequest): AuthResult {
   const mode = getBackendMode()
   const authHeader = request.headers.get('authorization')
@@ -26,14 +26,14 @@ export function checkActionAuth(request: NextRequest): AuthResult {
     return { valid: true, bearerToken: token }
   }
 
-  // Direct-agent mode: validate against global BUILDFLOW_ACTION_TOKEN
-  const token = process.env.BUILDFLOW_ACTION_TOKEN
+  // Direct-agent mode: prefer WORKBENCH_ACTION_TOKEN and retain the legacy fallback.
+  const token = getActionToken()
 
   if (!token) {
     return {
       valid: false,
       error: NextResponse.json(
-        { error: 'Server configuration error: BUILDFLOW_ACTION_TOKEN not set' },
+        { error: 'Server configuration error: WORKBENCH_ACTION_TOKEN not set' },
         { status: 500 }
       )
     }

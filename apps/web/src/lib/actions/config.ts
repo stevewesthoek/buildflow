@@ -9,10 +9,13 @@ export function getBackendMode(): BackendMode {
   return mode || 'direct-agent'
 }
 
+export function getActionToken(): string | null {
+  return process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || null
+}
+
 export function getRelayProxyToken(): string | null {
-  // When calling the relay in relay-agent mode, identify this instance
-  // with the user-facing action token (which maps to the registered device)
-  return process.env.BUILDFLOW_ACTION_TOKEN || null
+  // Prefer the Workbench token name while keeping the BuildFlow variable as a compatibility fallback.
+  return getActionToken()
 }
 
 export function getBackendUrl(): string {

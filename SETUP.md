@@ -1,6 +1,6 @@
 # ProChat Workbench Setup Guide
 
-ProChat Workbench is the public product, powered by the BuildFlow engine. Repository names, CLI commands, package scopes, scripts, environment variables, log prefixes, action operation names, and API contracts continue to use their existing BuildFlow technical identifiers.
+ProChat Workbench is the public product, powered by the BuildFlow engine. Repository names, CLI commands, package scopes, scripts, log prefixes, and API routes continue to use their existing BuildFlow technical identifiers where compatibility requires it.
 
 Canonical hosted endpoint:
 
@@ -13,6 +13,14 @@ Legacy compatibility endpoint:
 ```text
 https://buildflow.prochat.tools
 ```
+
+Canonical action token variable:
+
+```text
+WORKBENCH_ACTION_TOKEN
+```
+
+`BUILDFLOW_ACTION_TOKEN` remains supported as a compatibility fallback. Configure only one token variable for a given runtime, prefer `WORKBENCH_ACTION_TOKEN` for new setups, and never commit token values to the repository.
 
 ## Local Development Setup
 
