@@ -1,5 +1,8 @@
+name: workbench
+
 services:
   relay:
+    image: workbench-relay
     build:
       context: .
       dockerfile: Dockerfile
@@ -17,10 +20,10 @@ services:
       # Phase 5C: Relay proxy token for authenticated relay-agent requests
       # Generate with: openssl rand -hex 32
       # For dev/testing, set a test value; for production, use a strong secret
-      RELAY_PROXY_TOKEN: ${RELAY_PROXY_TOKEN:-dev-proxy-token}
+      RELAY_PROXY_TOKEN: ${RELAY_PROXY_TOKEN:-change-me-in-production}
     volumes:
-      # Persist state across container restarts
-      - buildflow-data:/var/lib/buildflow
+      # Preserve the existing relay state while the Compose project adopts the Workbench name.
+      - workbench-data:/var/lib/buildflow
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "const http = require('http'); http.get('http://localhost:3053/ready', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
@@ -30,5 +33,6 @@ services:
       start_period: 5s
 
 volumes:
-  buildflow-data:
-    driver: local
+  workbench-data:
+    name: buildflow_buildflow-data
+    external: true
