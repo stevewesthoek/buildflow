@@ -9,9 +9,16 @@ export const GPT_ACTION_DEADLINES_MS = {
   runCommand: 12_000
 } as const
 
+function generateRequestId(): string {
+  const timestamp = Date.now().toString(36)
+  const random = Math.random().toString(36).slice(2, 8)
+  return `wr_${timestamp}_${random}`
+}
+
 type DeadlineContext = {
   operationId: string
   route: string
+  requestId: string
   startedAt: number
   deadlineMs: number
   signal: AbortSignal
@@ -49,7 +56,9 @@ function buildDeadlinePayload(context: DeadlineContext, params: DeadlineParams) 
     recovery: DEFAULT_RECOVERY,
     status: 'timeout',
     connected: true,
+    requestId: context.requestId,
     diagnostics: context.diagnostics({
+      requestId: context.requestId,
       elapsedMs: context.elapsedMs(),
       deadlineMs: params.deadlineMs,
       actionDeadlineMs: params.deadlineMs,
@@ -64,8 +73,10 @@ export async function withGptActionDeadline(
   handler: (context: DeadlineContext) => Promise<NextResponse>
 ): Promise<NextResponse> {
   const startedAt = Date.now()
+  const requestId = generateRequestId()
   const controller = new AbortController()
   const mutableDiagnostics: ActionDiagnostics = {
+    requestId,
     operationId: params.operationId,
     route: params.route,
     actionDeadlineMs: params.deadlineMs,
@@ -75,6 +86,7 @@ export async function withGptActionDeadline(
   const context: DeadlineContext = {
     operationId: params.operationId,
     route: params.route,
+    requestId,
     startedAt,
     deadlineMs: params.deadlineMs,
     signal: controller.signal,
@@ -101,14 +113,19 @@ export async function withGptActionDeadline(
       controller.abort()
       resolve(NextResponse.json(buildDeadlinePayload(context, params), {
         status: 200,
-        headers: { 'Cache-Control': 'no-store' }
+        headers: {
+          'Cache-Control': 'no-store',
+          'X-Workbench-Request-Id': requestId
+        }
       }))
     }, params.deadlineMs)
   })
 
   try {
     const actionResponse = handler(context)
-    return await Promise.race([actionResponse, timeoutResponse])
+    const response = await Promise.race([actionResponse, timeoutResponse])
+    response.headers.set('X-Workbench-Request-Id', requestId)
+    return response
   } finally {
     if (timer) clearTimeout(timer)
   }

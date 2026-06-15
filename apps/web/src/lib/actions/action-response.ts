@@ -24,6 +24,7 @@ export type ActionErrorCode =
 export type ActionStatus = 'unavailable' | 'error' | 'timeout' | 'needs_narrower_scope'
 
 export type ActionDiagnostics = {
+  requestId?: string
   operationId?: string
   route?: string
   actionDeadlineMs?: number
@@ -45,6 +46,7 @@ export type ActionErrorEnvelope = {
   ok: false
   connected: boolean
   status: ActionStatus
+  requestId?: string
   error: {
     code: ActionErrorCode
     message: string
@@ -61,12 +63,14 @@ export function buildActionErrorEnvelope(params: {
   recovery?: string[]
   status?: ActionStatus
   connected?: boolean
+  requestId?: string
   diagnostics?: ActionDiagnostics
 }): ActionErrorEnvelope {
   return {
     ok: false,
     connected: params.connected ?? false,
     status: params.status || 'error',
+    ...(params.requestId ? { requestId: params.requestId } : {}),
     error: {
       code: params.code,
       message: params.message,

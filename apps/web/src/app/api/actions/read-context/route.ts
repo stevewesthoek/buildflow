@@ -8,6 +8,8 @@ import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/de
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
+const READ_CONTEXT_RESPONSE_BUDGET_BYTES = 256 * 1024 // 256 KB max
+
 function trimEntries(data: unknown): unknown {
   if (!data || typeof data !== 'object') return data
   const obj = data as Record<string, unknown>
@@ -42,6 +44,15 @@ function withReadActivity(data: unknown, params: { mode: string; sourceId?: stri
       nextStep: params.mode === 'grep_context' ? 'Use read_range around a matching line before patching.' : 'Use the returned evidence to answer or make the next small change.'
     }
   }
+}
+
+function validateResponseSize(data: unknown): { ok: boolean; bytes?: number; error?: string } {
+  if (!data || typeof data !== 'object') return { ok: true }
+  const responseBytes = Buffer.byteLength(JSON.stringify(data), 'utf8')
+  if (responseBytes > READ_CONTEXT_RESPONSE_BUDGET_BYTES) {
+    return { ok: false, bytes: responseBytes, error: `Response ${responseBytes} bytes exceeds budget ${READ_CONTEXT_RESPONSE_BUDGET_BYTES}` }
+  }
+  return { ok: true, bytes: responseBytes }
 }
 
 function boundedInt(value: unknown, fallback: number, min: number, max: number): number {
@@ -134,7 +145,19 @@ export async function POST(request: NextRequest) {
     if (mode === 'list_files' || mode === 'search') {
       deadline.setPhase(mode)
       const data = await dispatchBuildFlowInspect({ ...baseBody, mode }, auth.bearerToken, transport(mode))
-      return NextResponse.json(stripBloat(withReadActivity(trimEntries(data), { mode, sourceId: body.sourceId, path: body.path })))
+      const response = stripBloat(withReadActivity(trimEntries(data), { mode, sourceId: body.sourceId, path: body.path }))
+      const sizeCheck = validateResponseSize(response)
+      if (!sizeCheck.ok) {
+        return NextResponse.json(buildActionErrorEnvelope({
+          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          message: 'BuildFlow response exceeded action size budget.',
+          details: `Response was ${sizeCheck.bytes} bytes, limit is ${READ_CONTEXT_RESPONSE_BUDGET_BYTES} bytes.`,
+          recovery: ['Use grep_context with a more specific pattern', 'Use read_range on a specific file', 'Reduce the limit parameter'],
+          status: 'needs_narrower_scope',
+          diagnostics: { phase: 'response_size_check', responseBytes: sizeCheck.bytes, budgetBytes: READ_CONTEXT_RESPONSE_BUDGET_BYTES }
+        }))
+      }
+      return NextResponse.json(response)
     }
 
     if (mode === 'graph_context') {
@@ -144,7 +167,18 @@ export async function POST(request: NextRequest) {
         query: typeof body.query === 'string' ? body.query : undefined,
         limit: boundedInt(body.limit, 8, 1, 10)
       }, auth.bearerToken, transport('graph_context'))
-      return NextResponse.json(stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId })))
+      const response = stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId }))
+      const sizeCheck = validateResponseSize(response)
+      if (!sizeCheck.ok) {
+        return NextResponse.json(buildActionErrorEnvelope({
+          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          message: 'BuildFlow graph response exceeded action size budget.',
+          details: `Response was ${sizeCheck.bytes} bytes.`,
+          recovery: ['Use a narrower query', 'Reduce the limit', 'Use grep_context instead'],
+          status: 'needs_narrower_scope'
+        }))
+      }
+      return NextResponse.json(response)
     }
 
     if (mode === 'grep_context' || mode === 'read_range' || mode === 'read_symbol') {
@@ -155,7 +189,18 @@ export async function POST(request: NextRequest) {
         after: boundedInt(body.after, 12, 0, 60),
         maxMatches: boundedInt(body.maxMatches, 5, 1, 10)
       }, auth.bearerToken, transport(mode))
-      return NextResponse.json(stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId, path: body.path })))
+      const response = stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId, path: body.path }))
+      const sizeCheck = validateResponseSize(response)
+      if (!sizeCheck.ok) {
+        return NextResponse.json(buildActionErrorEnvelope({
+          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          message: 'BuildFlow focused read response exceeded action size budget.',
+          details: `Response was ${sizeCheck.bytes} bytes.`,
+          recovery: [`Reduce the line context (before/after)`, `Reduce maxMatches`, 'Use read_range with a smaller line range'],
+          status: 'needs_narrower_scope'
+        }))
+      }
+      return NextResponse.json(response)
     }
 
     if (mode === 'search_and_read' && Array.isArray(body.paths) && body.paths.length === 1 && typeof body.query === 'string') {
@@ -169,12 +214,34 @@ export async function POST(request: NextRequest) {
         after: boundedInt(body.after, 12, 0, 60),
         maxMatches: boundedInt(body.maxMatches, 5, 1, 10)
       }, auth.bearerToken, transport('search_and_read_single_path_grep'))
-      return NextResponse.json(stripBloat(withReadActivity({ ...(data as Record<string, unknown>), degradedFrom: 'search_and_read', suggestedNextMode: 'read_range' }, { mode: 'grep_context', sourceId: body.sourceId, path: body.paths[0] })))
+      const response = stripBloat(withReadActivity({ ...(data as Record<string, unknown>), degradedFrom: 'search_and_read', suggestedNextMode: 'read_range' }, { mode: 'grep_context', sourceId: body.sourceId, path: body.paths[0] }))
+      const sizeCheck = validateResponseSize(response)
+      if (!sizeCheck.ok) {
+        return NextResponse.json(buildActionErrorEnvelope({
+          code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+          message: 'BuildFlow search_and_read response exceeded action size budget.',
+          details: `Response was ${sizeCheck.bytes} bytes.`,
+          recovery: ['Use grep_context with a more specific pattern', 'Check if the file is too large for exact reading'],
+          status: 'needs_narrower_scope'
+        }))
+      }
+      return NextResponse.json(response)
     }
 
     deadline.setPhase(mode || 'read_context')
     const data = await dispatchBuildFlowRead(baseBody, auth.bearerToken, transport(mode || 'read_context'))
-    return NextResponse.json(stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId, paths: body.paths })))
+    const response = stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId, paths: body.paths }))
+    const sizeCheck = validateResponseSize(response)
+    if (!sizeCheck.ok) {
+      return NextResponse.json(buildActionErrorEnvelope({
+        code: 'BUILDFLOW_RESPONSE_SIZE_EXCEEDED',
+        message: 'BuildFlow read response exceeded action size budget.',
+        details: `Response was ${sizeCheck.bytes} bytes, limit is ${READ_CONTEXT_RESPONSE_BUDGET_BYTES} bytes.`,
+        recovery: ['Use a narrower read mode', 'Reduce the number of paths', 'Use grep_context instead'],
+        status: 'needs_narrower_scope'
+      }))
+    }
+    return NextResponse.json(response)
   }).catch((err) => {
     const { error, status } = unwrapActionError(err, 'read-context error')
     return NextResponse.json(error && typeof error === 'object' ? error : { error }, { status })

@@ -32,11 +32,13 @@ type TransportDiagnostics = {
 }
 
 const REQUEST_TIMEOUT_MS = 12000
+const DEFAULT_RESPONSE_SIZE_LIMIT_BYTES = 512 * 1024 // 512 KB hard cap
 
 export type ActionTransportOptions = {
   timeoutMs?: number
   signal?: AbortSignal
   diagnostics?: ActionDiagnostics
+  maxResponseBytes?: number
 }
 
 function isTimeoutError(err: unknown) {
@@ -48,11 +50,26 @@ function isConnectionError(err: unknown) {
   return /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed|Failed to fetch|socket hang up|network error/i.test(err.message)
 }
 
-async function readJsonResponse(response: Response, endpoint: string): Promise<FetchResult> {
+async function readJsonResponse(response: Response, endpoint: string, maxResponseBytes = DEFAULT_RESPONSE_SIZE_LIMIT_BYTES): Promise<FetchResult> {
   const readStartedAt = Date.now()
   const text = await response.text()
   const readMs = Date.now() - readStartedAt
   const responseBytes = Buffer.byteLength(text, 'utf8')
+
+  if (responseBytes > maxResponseBytes) {
+    throw new ActionTransportError(
+      `Response too large from ${endpoint}`,
+      413,
+      buildActionErrorEnvelope({
+        code: 'RESPONSE_SIZE_EXCEEDED',
+        message: 'BuildFlow response exceeded size limit.',
+        details: `Response was ${responseBytes} bytes, limit is ${maxResponseBytes} bytes.`,
+        recovery: ['Use a narrower read mode', 'Reduce file count or size', 'Use grep_context instead of read_paths for large files'],
+        status: 'error'
+      })
+    )
+  }
+
   if (!text.trim()) {
     throw new ActionTransportError(
       `Empty response from ${endpoint}`,
@@ -260,7 +277,7 @@ export async function executeAction(
       throw new ActionTransportError(message, response.status, payload)
     }
 
-    const parsed = await readJsonResponse(response, endpoint)
+    const parsed = await readJsonResponse(response, endpoint, options.maxResponseBytes ?? DEFAULT_RESPONSE_SIZE_LIMIT_BYTES)
     return attachTransportDiagnostics(parsed.data, {
       endpoint,
       method: 'POST',
@@ -310,7 +327,7 @@ export async function executeActionGET(
       }, timeoutMs, { signal: options.signal })
       const fetchMs = Date.now() - fetchStartedAt
 
-      const parsed = await readJsonResponse(response, endpoint)
+      const parsed = await readJsonResponse(response, endpoint, options.maxResponseBytes ?? DEFAULT_RESPONSE_SIZE_LIMIT_BYTES)
       const data = attachTransportDiagnostics(parsed.data, {
         endpoint,
         method: 'POST',
@@ -344,7 +361,7 @@ export async function executeActionGET(
     }, timeoutMs, { signal: options.signal })
     const fetchMs = Date.now() - fetchStartedAt
 
-    const parsed = await readJsonResponse(response, endpoint)
+    const parsed = await readJsonResponse(response, endpoint, options.maxResponseBytes ?? DEFAULT_RESPONSE_SIZE_LIMIT_BYTES)
     const data = attachTransportDiagnostics(parsed.data, {
       endpoint,
       method: 'GET',
