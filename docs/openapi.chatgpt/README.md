@@ -1,21 +1,26 @@
 # ProChat Workbench Custom GPT Action Imports
 
-For the self-hosted GitHub path, import the schema from your own ProChat Workbench endpoint. The Workbench product is powered by the BuildFlow engine, so technical action operation names and contracts remain unchanged.
+Use this guide to connect a Custom GPT to your own ProChat Workbench endpoint.
 
-Use one of these for schema import or generation:
+Workbench is designed for two kinds of interaction:
 
-- canonical schema file: `docs/openapi.chatgpt.json`
-- local running endpoint for schema generation: `http://127.0.0.1:3054/api/openapi`
-- canonical hosted endpoint: `https://workbench.prochat.tools/api/openapi`
+- **Quick mode** for focused questions and small edits.
+- **Goal mode** for substantial local development work built from persistent state and multiple bounded action cycles.
+
+The GPT-facing API remains short and fail-fast. Larger goals must be implemented through durable run state, bounded work packets, asynchronous local execution where supported, compact status retrieval, and resume checkpoints—not one indefinitely open request.
+
+## Canonical schema sources
+
+- schema file: `docs/openapi.chatgpt.json`
+- local schema endpoint: `http://127.0.0.1:3054/api/openapi`
+- hosted endpoint: `https://workbench.prochat.tools/api/openapi`
 - another HTTPS endpoint you control: `https://<your-domain-or-tunnel>/api/openapi`
 
-For actual ChatGPT Actions, the server URL inside the imported schema must be reachable by ChatGPT over HTTPS. A `localhost` server URL is not a valid runtime endpoint for ChatGPT-hosted action calls. New imports must use `https://workbench.prochat.tools`.
+For actual ChatGPT Actions, the server URL in the imported schema must be reachable by ChatGPT over HTTPS. A localhost server URL is suitable for local generation and inspection, not for ChatGPT-hosted runtime calls.
 
-ProChat Workbench uses BuildFlow v1.2.13-beta actions to return compact structured results. The GPT must narrate progress before each action and summarize compact action results after each action; the schema alone does not make the assistant explain what it is doing. Custom GPT Actions are synchronous external API calls, so the BuildFlow engine keeps progress visible through small, bounded calls rather than hidden loops or streaming claims.
+## Current action surface
 
-BuildFlow now enforces GPT-facing deadlines below the platform timeout: status 4s, read-context 8s, apply-file-change 8s, commit-changes 10s, and run-command 12s. If an action cannot finish safely, it returns structured JSON with `status: "timeout"` or `status: "needs_narrower_scope"` and compact diagnostics. This reduces Cloudflare/ChatGPT timeout risk but does not claim to make network or platform outages impossible.
-
-The current canonical Custom GPT surface is exactly these 5 Workbench operations. `applyWorkbenchFileChange` carries maintainer sub-operations through `changeType`; `runWorkbenchCommand` is the only raw command/validation/Git execution surface; `commitWorkbenchChanges` batches diff, explicit staging, and commit into one bounded action.
+The current stable schema exposes five operations:
 
 - `getWorkbenchStatus`
 - `readWorkbenchContext`
@@ -23,36 +28,139 @@ The current canonical Custom GPT surface is exactly these 5 Workbench operations
 - `commitWorkbenchChanges`
 - `runWorkbenchCommand`
 
-Long-running job or polling routes are intentionally not exposed in this Custom GPT schema. Do not add them to GPT Actions; the GPT-facing product is Fast Repo Assistant only.
+These operations are the stable quick-mode foundation and the control surface for the first goal-mode phases.
 
-Large-file inspection and graph-assisted navigation use bounded modes through `readWorkbenchContext`:
+Current route deadlines:
 
-- `graph_context` reads only cached Graphify metadata/report sections when present. It is optional navigation, can be stale, and must be verified with exact source reads before patching.
-- `grep_context` finds literal or regex matches in one file with bounded line context.
-- `read_range` returns only a requested line range with line numbers.
-- `read_symbol` returns the enclosing TypeScript class/function/const block for a known symbol.
-- File-specific `search_and_read` with one `paths` entry degrades to bounded grep-style output instead of returning a huge top-of-file excerpt.
-- `read_paths` and multi-file `search_and_read` default to 4 KB per file, at most 5 paths, and metadata-only refusal for files over 100 KB. Use focused modes for those files.
+- status: 4 seconds
+- read context: 8 seconds
+- apply file change: 8 seconds
+- commit changes: 10 seconds
+- run command: 12 seconds
 
-## Notes
+If an operation cannot finish safely, Workbench should return structured timeout, unavailable, confirmation, or narrower-scope guidance before the external action timeout.
 
-- Do not import legacy context actions such as `setBuildFlowContext`.
-- Keep the imported schema aligned with `docs/CUSTOM_GPT_INSTRUCTIONS.md`.
-- Use Bearer API key auth with `Authorization: Bearer <BUILDFLOW_ACTION_TOKEN>`.
-- Older per-action OpenAPI fragments are historical/reference material unless a release note says otherwise.
+## Goal-mode behavior
 
-## Verification
+The five-operation schema supports persistent goal-mode workflows through the existing bounded action surface described in:
 
-- When OpenAPI descriptions, operation IDs, parameters, response schemas, authentication, or GPT operating instructions change, the GPT editor update is manual.
-- OpenAI Custom GPT schema metadata limits are hard import gates: operation `summary` <= 300 characters, operation `description` <= 300 characters, and parameter/schema property `description` <= 700 characters.
-- Run `pnpm verify:gpt-contract` after regenerating the schema file.
-- The verifier must pass before importing into the GPT editor; it checks the metadata limits above so failures like `description has length 318 exceeding limit of 300` are caught locally.
-- The verifier enforces exactly 5 operations, no `/api/actions/agent/*` routes, focused read modes, small read caps, and timeout/deadline language.
-- `readWorkbenchContext` mode `prepare_task_context` is deterministic source-index context prep. It does not call local AI.
-- If the root schema changes, import `docs/openapi.chatgpt.json` in the Custom GPT editor Actions panel or import from `https://workbench.prochat.tools/api/openapi`.
-- If `docs/CUSTOM_GPT_INSTRUCTIONS.md` changes, paste the updated instructions into the GPT editor Instructions field.
-- In Preview, test all five canonical operations after any schema or instruction update: `getWorkbenchStatus`, `readWorkbenchContext`, `applyWorkbenchFileChange`, `commitWorkbenchChanges`, and `runWorkbenchCommand`.
-- Start a new chat after updating so the GPT uses the updated action schema and instructions.
-- Restarting BuildFlow Local alone is not enough to update a previously imported GPT action definition.
-- Activity metadata changes also require a schema reimport if the OpenAPI contract changes.
-- Update [`docs/CUSTOM_GPT_INSTRUCTIONS.md`](../CUSTOM_GPT_INSTRUCTIONS.md) with the narration rules so the assistant explains what BuildFlow is checking, reading, preflighting, changing, blocking, verifying, and what needs confirmation.
+- `docs/product/philosophy.md`
+- `docs/product/strategy.md`
+- `docs/product/roadmap.md`
+- `docs/product/plans/agentic-work-packets.md`
+
+The implemented model is:
+
+```text
+Custom GPT accepts a high-level goal
+  -> loads or creates persistent run state
+  -> verifies exact repository context
+  -> compiles or reserves a bounded work packet
+  -> submits through a short action
+  -> Workbench executes locally
+  -> GPT retrieves compact persisted evidence
+  -> GPT continues only when continuation state permits it
+```
+
+The public contract remains five bounded operations. Persistent behavior is exposed through the existing action surface and verified change types rather than by importing legacy job routes directly into the Custom GPT schema.
+
+Goal-mode safety requirements remain:
+
+- bounded request and response sizes
+- explicit `sourceId`
+- idempotency
+- stale-`HEAD` protection
+- full packet preflight before writes
+- exact changed paths
+- compact status retrieval
+- restart recovery
+- confirmation, cancellation, and repair stop policies
+- no arbitrary shell execution, broad staging, hidden model runtime, or default push
+
+Quick mode remains available for focused questions and small edits. Goal mode should use durable run state, bounded packets, compact result review, exact resume state, and persisted continuation decisions without relying on arbitrary per-turn action counts.
+
+## Context and navigation modes
+
+`readWorkbenchContext` supports bounded navigation and exact reads:
+
+- `graph_context` reads cached Graphify navigation metadata when present
+- `grep_context` finds bounded matches in one file
+- `read_range` returns a requested line range
+- `read_symbol` returns a known TypeScript symbol block
+- `read_paths` reads up to five exact files within byte limits
+- `prepare_task_context` performs one bounded deterministic discovery pass
+
+Use Graphify for unknown architecture, then verify exact source before editing. Graphify may be stale and must never be treated as source truth.
+
+## Source behavior
+
+- Every repo-specific action must pass an explicit `sourceId`.
+- Dashboard active context is not implicit GPT scope.
+- A conversation should lock one source until the user explicitly changes it.
+- Configured Git worktrees may be grouped for dashboard use, but Workbench must not switch the GPT’s source silently.
+
+## Write and Git behavior
+
+- Use guarded repo-relative paths only.
+- Verify writes on disk.
+- Use `dryRun` for unfamiliar sensitive paths.
+- Never write secrets, `.env`, private keys, `.git/**`, vendor output, or generated build output.
+- Stage explicit paths only.
+- Never use broad automatic staging.
+- Keep auto-push disabled by default.
+- Push only with explicit user approval or a future reviewed source policy.
+
+## Consequential operations
+
+The schema should mark operations accurately for the Custom GPT platform.
+
+- Reads and status checks are non-consequential.
+- Writes, deletes, moves, commits, pushes, and protected maintenance operations require the appropriate consequential/confirmation behavior.
+- A packet action must not hide consequential steps behind misleading metadata.
+
+## Legacy compatibility
+
+Use **ProChat Workbench** in public product language.
+
+The identifier **BuildFlow** may remain in:
+
+- repository and source IDs
+- legacy CLI and script aliases
+- environment variable fallbacks
+- package internals
+- historical releases and diagnostics
+
+Legacy `/api/actions/agent/*` routes are retired from the current public GPT schema. If an old imported schema still calls them, reimport the current schema rather than treating those routes as supported goal-mode APIs.
+
+## Import workflow
+
+1. Start or deploy Workbench.
+2. Open the `/api/openapi` endpoint.
+3. Confirm the server URL is the HTTPS endpoint ChatGPT can reach.
+4. Import the schema into the Custom GPT action editor.
+5. Configure bearer authentication.
+6. Apply the canonical instructions from `docs/CUSTOM_GPT_INSTRUCTIONS.md`.
+7. Test status and source locking.
+8. Test one exact read.
+9. Test a write with `dryRun` before a real write.
+10. Reimport the schema whenever operation contracts or descriptions change.
+
+## Contract verification
+
+Run:
+
+```text
+pnpm verify:gpt-actions
+```
+
+The verifier should continue checking:
+
+- operation IDs and count
+- schema and route alignment
+- payload budgets
+- OpenAI metadata description limits
+- retired legacy routes
+- source-lock requirements
+- documentation alignment
+
+As goal-mode operations are introduced, extend the verifier before exposing them publicly.

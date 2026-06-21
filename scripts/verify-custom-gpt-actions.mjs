@@ -11,7 +11,7 @@ const INSTRUCTIONS_FILE = path.join(ROOT, 'docs/CUSTOM_GPT_INSTRUCTIONS.md')
 const DOCS_SCHEMA_DIR = path.join(ROOT, 'docs/openapi.chatgpt')
 
 const MAX_SCHEMA_BYTES = 100_000
-const MAX_INSTRUCTIONS_BYTES = 8_000
+const MAX_INSTRUCTIONS_CHARACTERS = 8_000
 const MAX_OPERATION_SUMMARY_CHARS = 300
 const MAX_OPERATION_DESCRIPTION_CHARS = 300
 const MAX_PARAMETER_DESCRIPTION_CHARS = 700
@@ -173,20 +173,38 @@ function ensureSchemaRules(schema) {
 function ensureInstructions() {
   assert(fs.existsSync(INSTRUCTIONS_FILE), `Missing instructions file: ${INSTRUCTIONS_FILE}`)
   const text = fs.readFileSync(INSTRUCTIONS_FILE, 'utf8')
+  const characters = [...text].length
   const bytes = byteLength(text)
-  assert(bytes <= MAX_INSTRUCTIONS_BYTES, `Custom GPT instructions exceed ${MAX_INSTRUCTIONS_BYTES} bytes: ${bytes}`)
+  assert(characters <= MAX_INSTRUCTIONS_CHARACTERS, `Custom GPT instructions exceed ${MAX_INSTRUCTIONS_CHARACTERS} characters: ${characters}`)
   for (const required of EXPECTED_OPERATION_IDS) {
     assert(text.includes(required), `Instructions must mention ${required}`)
   }
-  assert(text.includes('sourceId'), 'Instructions must require explicit sourceId usage')
-  assert(text.includes('maxBytesPerFile'), 'Instructions must include read-size guidance')
-  assert(text.includes('Hard action budget per response: 3 BuildFlow actions'), 'Instructions must include hard action budget')
+  for (const required of [
+    'sourceId',
+    'maxBytesPerFile',
+    'Quick Mode',
+    'Goal Mode',
+    'persistent run',
+    'bounded deterministic packet',
+    'persisted continuation state',
+    'confirmation is required',
+    'single automatic repair attempt is exhausted',
+    'Never force push'
+  ]) {
+    assert(text.includes(required), `Instructions must include ${required}`)
+  }
   assert(/deadline|fail fast|timeout/i.test(text), 'Instructions must include timeout/deadline guidance')
   for (const mode of ['grep_context', 'read_range', 'read_symbol']) {
     assert(text.includes(mode), `Instructions must mention ${mode}`)
   }
-  assert(text.includes('Never force push'), 'Instructions must preserve git safety (no force push)')
-  return { bytes }
+  for (const forbidden of [
+    '8–12 short actions',
+    'Until persistent packet APIs are implemented',
+    'arbitrary per-turn action counts'
+  ]) {
+    assert(!text.includes(forbidden), `Instructions must not contain stale migration wording: ${forbidden}`)
+  }
+  return { characters, bytes }
 }
 
 function ensureNoStaleSchemaFragments() {
@@ -213,7 +231,10 @@ function ensureDocumentationAlignment() {
     'Keep the six GPT-facing operations',
     'setBuildFlowActiveContext` | POST',
     'Clear small batch: up to 3 tightly related tasks',
-    'Hard maximum: 5 small tasks'
+    'Hard maximum: 5 small tasks',
+    'Until persistent packet APIs are implemented',
+    'does not yet expose the final persistent run and packet contract',
+    'Current use before packet APIs ship'
   ]
   const scanned = []
   for (const rel of docsToCheck) {
@@ -239,7 +260,7 @@ function ensureSourceDeadlineLayer() {
     assert(fs.existsSync(file), `Missing source file for deadline verification: ${label}`)
   }
   const deadlineText = fs.readFileSync(files.deadline, 'utf8')
-  assert(deadlineText.includes('BUILDFLOW_ACTION_DEADLINE_EXCEEDED'), 'Deadline helper must emit structured deadline code')
+  assert(deadlineText.includes('WORKBENCH_ACTION_DEADLINE_EXCEEDED'), 'Deadline helper must emit canonical structured deadline code')
   assert(deadlineText.includes('GPT_ACTION_DEADLINES_MS'), 'Deadline helper must define action deadlines')
   const transportText = fs.readFileSync(files.transport, 'utf8')
   assert(transportText.includes('signal?: AbortSignal'), 'Transport must accept AbortSignal')
@@ -248,11 +269,42 @@ function ensureSourceDeadlineLayer() {
   assert(fs.readFileSync(files.runCommand, 'utf8').includes('commandTimeoutMs'), 'run-command route must clamp GPT command timeouts')
 }
 
+function ensureRetiredAgentActionRoutes() {
+  const helper = path.join(ROOT, 'apps/web/src/lib/actions/retired-agent-actions.ts')
+  assert(fs.existsSync(helper), 'Retired Agent Mode action helper must exist')
+  const helperText = fs.readFileSync(helper, 'utf8')
+  assert(helperText.includes('WORKBENCH_AGENT_ACTION_RETIRED'), 'Retired Agent Mode helper must emit canonical retired-action code')
+  assert(helperText.includes('status: 200'), 'Retired Agent Mode helper must return HTTP 200 so stale GPT actions fail fast without platform connection errors')
+
+  const retiredRoutes = [
+    'control',
+    'execute-task',
+    'manage',
+    'start',
+    'status'
+  ]
+  for (const route of retiredRoutes) {
+    const file = path.join(ROOT, `apps/web/src/app/api/actions/agent/${route}/route.ts`)
+    assert(fs.existsSync(file), `Missing retired Agent Mode route: ${route}`)
+    const text = fs.readFileSync(file, 'utf8')
+    assert(text.includes('retiredAgentAction'), `${route} Agent Mode route must return retiredAgentAction`)
+    assert(!text.includes("@/lib/actions/gpt"), `${route} Agent Mode route must not import GPT agent helpers`)
+    assert(!text.includes("executeAction('/api/agent-jobs/"), `${route} Agent Mode route must not proxy to agent jobs`)
+  }
+
+  const dashboardText = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/dashboard/page.tsx'), 'utf8')
+  assert(dashboardText.includes('if (!hasActiveAgentJob) return'), 'Dashboard must not poll agent jobs when no active job exists')
+  assert(!dashboardText.includes(': 7000'), 'Dashboard must not keep idle 7s agent-job polling')
+
+  return { retiredRoutes }
+}
+
 function ensureActionBudgetAndTimeoutLanguage() {
   const text = fs.readFileSync(INSTRUCTIONS_FILE, 'utf8')
-  assert(text.includes('Prefer 1-2'), 'Instructions must document action count preference (1-2 preferred)')
-  assert(text.includes('exact next'), 'Instructions must include "exact next" prompt guidance for stop conditions')
-  assert(/fail fast|deadline/i.test(text), 'Instructions must include fail-fast or deadline language')
+  assert(text.includes('Prefer the smallest useful action set'), 'Instructions must preserve bounded quick-mode action guidance')
+  assert(text.includes('exact resume action') || text.includes('exact resume point'), 'Instructions must include exact resume guidance for stop conditions')
+  assert(text.includes('Do not stop after an arbitrary action count'), 'Goal mode must not use a hard per-turn action limit')
+  assert(/fail fast|deadline|timeout/i.test(text), 'Instructions must include fail-fast, deadline, or timeout language')
 
   const deadlineText = fs.readFileSync(path.join(ROOT, 'apps/web/src/lib/actions/deadline.ts'), 'utf8')
   assert(deadlineText.includes('suggestedNextAction'), 'Deadline helper must support suggestedNextAction parameter')
@@ -311,12 +363,434 @@ async function runLiveSmokeChecks() {
   const status = await requestJson('/api/actions/status', { method: 'GET' })
   assert(status.response.status === 200, `status action returned ${status.response.status}`)
   assert(status.bytes <= HARD_ACTION_RESPONSE_BYTES, `status action exceeds hard budget: ${status.bytes}`)
+  const retiredAgentStatus = await requestJson('/api/actions/agent/status', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'update' })
+  })
+  assert(retiredAgentStatus.response.status === 200, `retired agent status returned HTTP ${retiredAgentStatus.response.status}`)
+  assert(retiredAgentStatus.json?.error?.code === 'WORKBENCH_AGENT_ACTION_RETIRED', 'retired agent status must return WORKBENCH_AGENT_ACTION_RETIRED')
   return {
     skipped: false,
     statusBytes: status.bytes,
+    retiredAgentStatus: retiredAgentStatus.json?.status,
     targetBytes: TARGET_ACTION_RESPONSE_BYTES,
     hardBudgetBytes: HARD_ACTION_RESPONSE_BYTES,
     statusOverTarget: status.bytes > TARGET_ACTION_RESPONSE_BYTES
+  }
+}
+
+function ensureWorkbenchRunModel() {
+  const modelText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/agent-jobs.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_RUN_SCHEMA_VERSION',
+    'planVersion',
+    'completedPacketIds',
+    'resumeState',
+    'metrics',
+    'AgentJobUpdate',
+    'nextTaskId: patch.resumeState?.nextTaskId || activeTaskId',
+    'Array.from(new Set((patch.completedPacketIds || job.completedPacketIds).filter(Boolean)))',
+    'planVersion: Math.max(job.planVersion',
+    'getActiveWorkbenchRun',
+    'runSchemaVersion',
+    'fs.renameSync(temporaryPath, JOB_STORE_PATH)'
+  ]) {
+    assert(modelText.includes(required), `Workbench run model must include ${required}`)
+  }
+
+  const serverText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/server.ts'), 'utf8')
+  assert(serverText.includes("'/api/workbench-runs/active'"), 'Local server must expose the active-run endpoint')
+
+  const routeText = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'), 'utf8')
+  assert(routeText.includes("mode === 'active_run'"), 'Read-context route must dispatch active_run')
+
+  const schema = readJson(DOCS_SCHEMA_FILE)
+  const readSchema = schema.paths?.['/api/actions/read-context']?.post?.requestBody?.content?.['application/json']?.schema
+  const modes = readSchema?.properties?.mode?.enum || []
+  assert(modes.includes('active_run'), 'OpenAPI schema must expose active_run')
+
+  for (const required of ['createWorkbenchRun', 'resumeWorkbenchRun']) {
+    assert(modelText.includes(required), `Workbench run model must include ${required}`)
+  }
+  for (const endpoint of ["'/api/workbench-runs/create'", "'/api/workbench-runs/resume'"]) {
+    assert(serverText.includes(endpoint), `Local server must expose ${endpoint}`)
+  }
+  const applySchema = schema.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema
+  const changeTypes = applySchema?.properties?.changeType?.enum || []
+  for (const changeType of ['create_run', 'resume_run']) {
+    assert(changeTypes.includes(changeType), `OpenAPI schema must expose ${changeType}`)
+  }
+  assert(applySchema?.properties?.goal, 'OpenAPI schema must include goal for create_run')
+  assert(applySchema?.properties?.runId, 'OpenAPI schema must include runId for resume_run')
+
+  const packetText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packets.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_PACKET_SCHEMA_VERSION',
+    'idempotencyKey !== `${packet.runId}:${packet.packetId}`',
+    "execFileSync('git', ['rev-parse', 'HEAD']",
+    'STALE_EXPECTED_HEAD',
+    'PACKET_ALREADY_COMPLETED',
+    'validateWriteTarget',
+    'errors.length > 0'
+  ]) {
+    assert(packetText.includes(required), `Workbench packet preflight must include ${required}`)
+  }
+  assert(serverText.includes("'/api/workbench-packets/preflight'"), 'Local server must expose packet preflight')
+  assert(serverText.includes('writesPerformed: false'), 'Packet preflight must report that no writes were performed')
+  assert(changeTypes.includes('packet_preflight'), 'OpenAPI schema must expose packet_preflight')
+  assert(applySchema?.properties?.packet, 'OpenAPI schema must include packet payload')
+  assert(applySchema?.properties?.packet?.properties?.steps?.maxItems === 5, 'Packet steps must be bounded to 5')
+
+  const packetStoreText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-store.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_PACKET_STORE_VERSION',
+    "fs.openSync(LOCK_PATH, 'wx')",
+    'reserveWorkbenchPacket',
+    "status: 'queued'",
+    'PACKET_ID_CONFLICT',
+    'IDEMPOTENCY_KEY_CONFLICT',
+    'fs.renameSync(temporaryPath, STORE_PATH)',
+    'updateWorkbenchPacketStatus',
+    'listWorkbenchPacketRecords'
+  ]) {
+    assert(packetStoreText.includes(required), `Workbench packet store must include ${required}`)
+  }
+  assert(serverText.includes('reservationCreated: reservation.created'), 'Packet preflight must report reservation creation')
+  assert(serverText.includes("status: 'queued'"), 'Accepted packet preflight must return queued status')
+  assert(serverText.includes('listWorkbenchPacketRecords'), 'Active-run response must include packet lifecycle summaries')
+  for (const required of [
+    "const packets = listWorkbenchPacketRecords({ limit: 20 }).map(record => {",
+    'packetId: record.packet.packetId',
+    'runId: record.packet.runId',
+    'taskId: record.packet.taskId',
+    'sourceId: record.packet.sourceId',
+    'status: record.status',
+    'exactPaths: record.exactPaths.slice(0, 10)',
+    'completedSteps: result?.completedSteps || 0',
+    'failedStep: result?.failedStep',
+    'rolledBack: result?.rolledBack === true',
+    'validation: (result?.validation || []).slice(0, 5)',
+    'commitHash: result?.commitHash || record.commitHash',
+    'errorCodes: (result?.errors || []).slice(0, 5).map(error => error.code)'
+  ]) {
+    assert(serverText.includes(required), `Agent jobs status packet observability must include ${required}`)
+  }
+  for (const required of [
+    'claimNextWorkbenchPacket',
+    'renewWorkbenchPacketLease',
+    'releaseWorkbenchPacketLease',
+    'recoverStaleWorkbenchPacketLeases',
+    'leaseToken',
+    'leaseExpiresAt',
+    'claimAttempt',
+    "status: 'running'",
+    "status: 'queued'"
+  ]) {
+    assert(packetStoreText.includes(required), `Workbench packet leases must include ${required}`)
+  }
+  for (const endpoint of [
+    "'/api/workbench-packets/claim'",
+    "'/api/workbench-packets/renew'",
+    "'/api/workbench-packets/release'",
+    "'/api/workbench-packets/recover-stale'"
+  ]) {
+    assert(serverText.includes(endpoint), `Local server must expose ${endpoint}`)
+  }
+  assert(serverText.includes('const recoveredPacketLeases = recoverStaleWorkbenchPacketLeases()'), 'Server startup must recover stale packet leases')
+  assert(serverText.includes('writesPerformed: false'), 'Packet lease controls must not execute file writes')
+
+  const packetPlanText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-plan.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_EXECUTION_PLAN_VERSION',
+    'record.leaseToken !== leaseToken',
+    'LEASE_EXPIRED',
+    "execFileSync('git', ['rev-parse', 'HEAD']",
+    'STALE_EXPECTED_HEAD',
+    'validateWriteTarget',
+    'RESERVED_PATHS_MISMATCH',
+    'planHash: sha256(canonical)',
+    'writesPerformed: false'
+  ]) {
+    assert(packetPlanText.includes(required), `Workbench execution planner must include ${required}`)
+  }
+  assert(serverText.includes("'/api/workbench-packets/plan'"), 'Local server must expose packet planning')
+  assert(serverText.includes('planWorkbenchPacketExecution'), 'Local server must use the deterministic execution planner')
+  assert(changeTypes.includes('packet_plan'), 'OpenAPI schema must expose packet_plan')
+  assert(applySchema?.properties?.packetId, 'OpenAPI schema must include packetId for packet_plan')
+  assert(applySchema?.properties?.leaseToken, 'OpenAPI schema must include leaseToken for packet_plan')
+
+  const executorText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-executor.ts'), 'utf8')
+  for (const required of [
+    'executeWorkbenchPacket',
+    'planWorkbenchPacketExecution(params)',
+    'restoreSnapshots',
+    'verifyFileHash',
+    "status: 'completed'",
+    "status: 'failed'",
+    'finalizeWorkbenchPacketExecution',
+    'syncRunOutcome',
+    'rolledBack'
+  ]) {
+    assert(executorText.includes(required), `Workbench packet executor must include ${required}`)
+  }
+  assert(packetStoreText.includes('finalizeWorkbenchPacketExecution'), 'Packet store must finalize execution under the active lease')
+  assert(serverText.includes("'/api/workbench-packets/execute'"), 'Local server must expose packet execution')
+  assert(serverText.includes('executeWorkbenchPacket'), 'Local server must use the rollback-capable executor')
+  assert(changeTypes.includes('packet_execute'), 'OpenAPI schema must expose packet_execute')
+
+  const journalText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-execution-journal.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_EXECUTION_JOURNAL_VERSION',
+    'prepareWorkbenchExecutionJournal',
+    'markWorkbenchExecutionJournalStep',
+    'restoreWorkbenchExecutionJournal',
+    'recoverWorkbenchExecutionJournals',
+    'fs.renameSync(temporary, target)',
+    'contentBase64',
+    "status: 'restoring'"
+  ]) {
+    assert(journalText.includes(required), `Workbench execution journal must include ${required}`)
+  }
+  assert(packetStoreText.includes('recoverInterruptedWorkbenchPacket'), 'Packet store must persist interrupted execution recovery')
+  assert(executorText.includes('prepareWorkbenchExecutionJournal'), 'Packet executor must journal before mutation')
+  assert(executorText.includes('markWorkbenchExecutionJournalStep'), 'Packet executor must checkpoint verified steps')
+  assert(executorText.includes('completeWorkbenchExecutionJournal'), 'Packet executor must remove finalized journals')
+  assert(serverText.includes('const recoveredExecutionJournals = recoverWorkbenchExecutionJournals'), 'Server startup must recover interrupted execution journals')
+  assert(serverText.indexOf('recoverWorkbenchExecutionJournals') < serverText.indexOf('recoverStaleWorkbenchPacketLeases()'), 'Journal recovery must run before stale lease recovery')
+  for (const required of [
+    'WorkbenchPacketValidation',
+    'MAX_PACKET_VALIDATIONS',
+    'PACKET_VALIDATION_TIMEOUT_INVALID',
+    'PACKET_COMMIT_NOT_AUTHORIZED'
+  ]) {
+    assert(packetText.includes(required), `Workbench packet validation policy must include ${required}`)
+  }
+  for (const required of [
+    'await runSafeCommand',
+    "commandKind: 'git_add_paths'",
+    "commandKind: 'git_commit'",
+    'record.exactPaths',
+    'Validation ${result.commandKind} failed',
+    'completeWorkbenchExecutionJournal(params.packetId)'
+  ]) {
+    assert(executorText.includes(required), `Workbench packet validation/commit execution must include ${required}`)
+  }
+  const packetSchema = applySchema?.properties?.packet
+  assert(packetSchema?.properties?.validation?.maxItems === 3, 'OpenAPI packet validation must be bounded to three commands')
+  assert(packetSchema?.properties?.commit, 'OpenAPI packet schema must expose commit policy')
+  for (const required of [
+    'assertCleanPacketPaths',
+    "['status', '--porcelain=v1', '--untracked-files=all'",
+    "['diff', '--cached', '--name-only']",
+    'verifyExactPathSet',
+    "['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD']",
+    "['rev-parse', 'HEAD']",
+    'currentCommit: commitHash || run.currentCommit'
+  ]) {
+    assert(executorText.includes(required), `Workbench Git-state isolation must include ${required}`)
+  }
+  assert(packetStoreText.includes('commitHash?: string'), 'Packet records must persist commit hashes')
+  assert(packetStoreText.includes("commitHash: params.status === 'completed' ? params.commitHash"), 'Packet finalization must store verified commit hashes')
+  assert(serverText.includes('commitHash: record.commitHash'), 'Active-run packet summaries must expose commit hashes')
+  for (const required of [
+    'advanceWorkbenchRunAfterPacket',
+    "status: 'completed' as const",
+    "status: 'running' as const",
+    'currentIteration: Math.min(job.maxIterations, job.currentIteration + 1)',
+    'activeTaskId: nextTaskId',
+    'nextTaskId,',
+    "allTasks.every(task => task.status === 'completed' || task.status === 'skipped')",
+    "status === 'completed'"
+  ]) {
+    assert(modelText.includes(required), `Workbench run progression must include ${required}`)
+  }
+  assert(modelText.includes("Object.prototype.hasOwnProperty.call(patch, 'activeTaskId')"), 'Run updates must allow activeTaskId to be cleared')
+  assert(executorText.includes('advanceWorkbenchRunAfterPacket({'), 'Packet completion must advance the persistent run')
+
+  const workerText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-worker.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_PACKET_WORKER_VERSION',
+    'runNextWorkbenchPacket',
+    'claimNextWorkbenchPacket',
+    'renewWorkbenchPacketLease',
+    'releaseWorkbenchPacketLease',
+    'executeWorkbenchPacket',
+    "type: 'packet_claimed'",
+    "type: 'packet_started'",
+    "const eventType = execution.status === 'completed'",
+    "? 'packet_paused'",
+    "? 'packet_cancelled'",
+    "status: 'requeued'",
+    'clearInterval(renewal)'
+  ]) {
+    assert(workerText.includes(required), `Workbench asynchronous worker core must include ${required}`)
+  }
+  assert(!serverText.includes('runNextWorkbenchPacket('), 'Server routes must not execute packets inline during staged async migration')
+  assert(modelText.includes('activePacketId?: string'), 'Workbench runs must persist activePacketId')
+  assert(modelText.includes("| 'activePacketId'"), 'Run updates and compact status must include activePacketId')
+  assert(workerText.includes('setRunActivePacket(runId, packetId)'), 'Packet claims must set activePacketId')
+  assert(workerText.includes('setRunActivePacket(runId)'), 'Terminal worker paths must clear activePacketId')
+  const eventText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/agent-events.ts'), 'utf8')
+  for (const required of ["'packet_paused'", "'packet_resumed'", "'packet_cancelled'"]) {
+    assert(eventText.includes(required), `Packet lifecycle events must include ${required}`)
+  }
+  assert(workerText.includes("? 'packet_paused'"), 'Cooperative worker pause must emit packet_paused')
+  assert(workerText.includes("? 'packet_cancelled'"), 'Cooperative worker cancel must emit packet_cancelled')
+  assert(serverText.includes("? 'packet_resumed'"), 'Run resume controls must emit packet_resumed')
+
+  const coordinatorText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-coordinator.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_PACKET_COORDINATOR_VERSION',
+    'scheduleWorkbenchPacket',
+    'scheduledPacketIds',
+    "status: 'already_scheduled'",
+    'setImmediate(() => {',
+    'runNextWorkbenchPacket({',
+    'scheduledPacketIds.delete(packetId)',
+    'packetId,'
+  ]) {
+    assert(coordinatorText.includes(required), `Workbench asynchronous coordinator must include ${required}`)
+  }
+  assert(packetStoreText.includes('packetId?: string'), 'Packet claims must support exact packet selection')
+  assert(packetStoreText.includes('record.packet.packetId === params.packetId'), 'Exact packet claims must filter atomically by packetId')
+  assert(workerText.includes('packetId: params.packetId'), 'Worker claims must target the scheduled packet')
+  assert(serverText.includes("'/api/workbench-packets/submit-async'"), 'Local server must expose staged asynchronous submission')
+  assert(serverText.includes('scheduleWorkbenchPacket({'), 'Staged submission must use the duplicate-safe coordinator')
+  assert(!schema.paths?.['/api/workbench-packets/submit-async'], 'Internal async submission must not be exposed in the public GPT schema yet')
+  assert(!changeTypes.includes('packet_submit_async'), 'Public GPT change types must not expose async submission during staged migration')
+  for (const required of [
+    'drainQueuedWorkbenchPackets',
+    'drainInProgress',
+    "status: 'already_running'",
+    'Math.min(20, Number(params.limit || 5))',
+    "if (record.status !== 'queued') return false",
+    '.sort((a, b) => a.reservedAt.localeCompare(b.reservedAt))'
+  ]) {
+    assert(coordinatorText.includes(required), `Workbench restart-safe drain must include ${required}`)
+  }
+  assert(serverText.includes("'/api/workbench-packets/drain'"), 'Local server must expose the internal bounded drain endpoint')
+  assert(serverText.includes('const drained = drainQueuedWorkbenchPackets({'), 'Server startup must drain queued packets after recovery')
+  assert(serverText.indexOf('recoverStaleWorkbenchPacketLeases()') < serverText.indexOf('const drained = drainQueuedWorkbenchPackets({'), 'Startup drain must run after stale lease recovery')
+  assert(!schema.paths?.['/api/workbench-packets/drain'], 'Internal packet drain must not be exposed in the public GPT schema yet')
+  assert(!changeTypes.includes('packet_drain'), 'Public GPT change types must not expose packet drain during staged migration')
+
+  const resultStoreText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-results.ts'), 'utf8')
+  for (const required of [
+    'WORKBENCH_PACKET_RESULT_STORE_VERSION',
+    'recordWorkbenchPacketResult',
+    'getWorkbenchPacketResult',
+    'MAX_PACKET_RESULTS',
+    'MAX_ERRORS',
+    'fs.renameSync(temporaryPath, RESULT_STORE_PATH)',
+    'validation:',
+    'commitHash:'
+  ]) {
+    assert(resultStoreText.includes(required), `Workbench compact packet results must include ${required}`)
+  }
+  assert(workerText.includes('recordWorkbenchPacketResult({'), 'Packet worker must persist compact outcomes')
+  assert(serverText.includes("'/api/workbench-packets/status'"), 'Local server must expose compact packet status retrieval')
+  assert(serverText.includes('getWorkbenchPacketResult(packetId)'), 'Packet status must include persisted compact results')
+  assert(serverText.includes("listAgentEvents({ jobId: record.packet.runId, limit: 8 })"), 'Packet status must include bounded lifecycle evidence')
+  assert(!schema.paths?.['/api/workbench-packets/status'], 'Internal packet status must not be exposed in the public GPT schema yet')
+  assert(!changeTypes.includes('packet_status'), 'Public GPT change types must not expose packet status during staged migration')
+
+  const continuationText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-continuation-decisions.ts'), 'utf8')
+  for (const required of [
+    'WorkbenchContinuationDecision',
+    'recordWorkbenchContinuationDecision',
+    'getWorkbenchContinuationDecision',
+    'listWorkbenchContinuationDecisions',
+    'MAX_DECISIONS',
+    'fs.renameSync(temporaryPath, STORE_PATH)',
+    "outcome: 'continue' | 'stop' | 'repair' | 'blocked'"
+  ]) {
+    assert(continuationText.includes(required), `Workbench continuation decisions must include ${required}`)
+  }
+  assert(workerText.includes('recordWorkbenchContinuationDecision({'), 'Terminal packet results must persist continuation decisions')
+  assert(workerText.includes("if (!['completed', 'failed', 'paused', 'cancelled'].includes(result.status)) return result"), 'Only terminal packet results may produce continuation decisions')
+  assert(workerText.includes('nextTaskId: nextTaskId || run.resumeState.nextTaskId'), 'Continuation review must persist the exact next task in resume state')
+  assert(workerText.includes('Continuation ${outcome} after packet ${result.packetId}.'), 'Run resume instructions must include compact continuation evidence')
+  assert(coordinatorText.includes("result.status === 'completed' && decision.outcome === 'continue' && decision.nextTaskId"), 'Automatic continuation must require a completed result and explicit continue decision')
+  assert(coordinatorText.includes("run.status !== 'running' || run.requiresConfirmation || run.activePacketId"), 'Automatic continuation must stop for non-running, confirmation-required, or already-active runs')
+  assert(coordinatorText.includes('run.activeTaskId !== decision.nextTaskId'), 'Automatic continuation must match the authoritative next task')
+  assert(coordinatorText.includes("candidate.status === 'queued'") && coordinatorText.includes('candidate.packet.taskId === decision.nextTaskId'), 'Automatic continuation must schedule only an already-reserved queued packet for the next task')
+  assert(coordinatorText.includes('.sort((a, b) => a.reservedAt.localeCompare(b.reservedAt))[0]'), 'Automatic continuation must choose only the oldest matching queued packet')
+
+  const configText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/config.ts'), 'utf8')
+  assert(configText.includes('autoCommitSourceIds?: string[]'), 'Agent config must expose a per-source auto-commit allowlist')
+  assert(executorText.includes('(config?.autoCommitSourceIds || []).includes(params.sourceId)'), 'Packet executor must enforce the per-source auto-commit allowlist')
+  assert(executorText.includes("run?.autoCommit === true && sourceAllowsAutoCommit"), 'Automatic commits must also require the run autoCommit flag')
+  assert(executorText.includes("Automatic commit requires at least one targeted validation."), 'Automatic commits must require targeted validation')
+  assert(executorText.includes("commandKind: 'security_scan_paths'"), 'Commit-capable packets must run an exact-path security scan')
+  assert(executorText.includes("patternSet: 'forbidden_secret_material'"), 'Pre-commit scanning must block forbidden secret material')
+  assert(executorText.includes("const commitMessage = record.packet.commit?.message?.trim() || `workbench: ${derivedTitle}`"), 'Commit messages must derive from the active task when not explicitly supplied')
+  assert(executorText.includes('Workbench-Run: ${record.packet.runId}'), 'Commits must include a Workbench run trailer')
+  assert(executorText.includes('Workbench-Packet: ${record.packet.packetId}'), 'Commits must include a Workbench packet trailer')
+  assert(executorText.includes("commandKind: 'git_add_paths'"), 'Packet commits must preserve explicit-path staging')
+  assert(!executorText.includes("commandKind: 'git_push'"), 'Packet execution must not auto-push by default')
+  assert(executorText.includes('export function undoWorkbenchPacketCommit'), 'Phase 7 must expose bounded Workbench packet commit undo')
+  assert(executorText.includes("Safe undo requires the Workbench-created commit to be the current HEAD."), 'Safe undo must reject non-HEAD packet commits')
+  assert(executorText.includes('Workbench-Run: ${record.packet.runId}'), 'Safe undo must verify the Workbench run trailer')
+  assert(executorText.includes('Workbench-Packet: ${record.packet.packetId}'), 'Safe undo must verify the Workbench packet trailer')
+  assert(executorText.includes("'UNDO_PATH_MISMATCH'"), 'Safe undo must reject commit path mismatches')
+  assert(executorText.includes("'UNDO_INDEX_NOT_CLEAN'"), 'Safe undo must require an empty Git index')
+  assert(executorText.includes("'UNDO_PACKET_PATHS_DIRTY'"), 'Safe undo must reject dirty packet paths')
+  assert(executorText.includes("execFileSync('git', ['revert', '--no-edit', head]"), 'Safe undo must create a bounded Git revert commit')
+  assert(executorText.includes("'Undo commit'"), 'Safe undo must verify the revert commit exact path set')
+
+  const repairStateFile = path.join(ROOT, 'packages/cli/src/agent/workbench-repair-state.ts')
+  assert(fs.existsSync(repairStateFile), 'Phase 8 repair-state store must exist')
+  const repairStateText = fs.readFileSync(repairStateFile, 'utf8')
+  assert(repairStateText.includes('WORKBENCH_REPAIR_STATE_VERSION = 1'), 'Repair-state store must be versioned')
+  assert(repairStateText.includes('MAX_AUTOMATIC_REPAIR_ATTEMPTS = 1'), 'Repair-state store must allow exactly one automatic repair attempt')
+  assert(repairStateText.includes("status: 'eligible' | 'accepted' | 'exhausted' | 'cleared'"), 'Repair-state lifecycle must be explicit')
+  assert(repairStateText.includes("path.join(getConfigDir(), 'workbench-repair-state.json')"), 'Repair state must persist in the Workbench config directory')
+  assert(repairStateText.includes('fs.renameSync(temporaryPath, STORE_PATH)'), 'Repair-state persistence must be atomic')
+  assert(repairStateText.includes('previous.failedPacketId !== params.failedPacketId'), 'Repair acceptance must match the persisted failed packet')
+  assert(repairStateText.includes("previous.status !== 'eligible'"), 'Repair acceptance must reject non-eligible state')
+  assert(repairStateText.includes('previous.attemptCount >= MAX_AUTOMATIC_REPAIR_ATTEMPTS'), 'Repair acceptance must enforce the attempt limit')
+  assert(repairStateText.includes('acceptedRepairPacketId: params.repairPacketId'), 'Repair acceptance must persist the accepted repair packet')
+
+  const repairCoordinatorFile = path.join(ROOT, 'packages/cli/src/agent/workbench-packet-coordinator.ts')
+  assert(fs.existsSync(repairCoordinatorFile), 'Workbench packet coordinator must exist')
+  const repairCoordinatorText = fs.readFileSync(repairCoordinatorFile, 'utf8')
+  assert(repairCoordinatorText.includes("decision.outcome !== 'repair'"), 'Repair dispatch must require a persisted repair continuation decision')
+  assert(repairCoordinatorText.includes('run.activeTaskId !== taskId'), 'Repair dispatch must require the failed task to remain active')
+  assert(repairCoordinatorText.includes("repairState.status !== 'eligible'"), 'Repair dispatch must require eligible persisted repair state')
+  assert(repairCoordinatorText.includes('repairState.failedPacketId !== result.packetId'), 'Repair dispatch must match the persisted failed packet')
+  assert(repairCoordinatorText.includes('candidate.packet.taskId === taskId'), 'Repair dispatch must target the same task')
+  assert(repairCoordinatorText.includes('acceptWorkbenchRepairAttempt({'), 'Repair dispatch must consume the single attempt before scheduling')
+  assert(repairCoordinatorText.includes('repairPacketId: repairRecord.packet.packetId'), 'Repair acceptance must persist the selected repair packet identity')
+  assert(repairCoordinatorText.includes('scheduledPacketIds.has(repairRecord.packet.packetId)'), 'Repair dispatch must prevent duplicate scheduling')
+  assert(repairCoordinatorText.includes("result.status !== 'failed'"), 'Repair dispatch must only follow a terminal failed worker result')
+  assert(repairCoordinatorText.includes('getWorkbenchRepairState(record.packet.runId, record.packet.taskId)'), 'Restart queue drain must load persisted repair state for each queued task')
+  assert(repairCoordinatorText.includes("repairState.status === 'cleared'"), 'Restart queue drain must allow cleared repair state to resume normal scheduling')
+  assert(repairCoordinatorText.includes("repairState.status === 'accepted'"), 'Restart queue drain must handle accepted repair state explicitly')
+  assert(repairCoordinatorText.includes('repairState.acceptedRepairPacketId === record.packet.packetId'), 'Restart queue drain must allow only the exact accepted repair packet')
+  assert(repairCoordinatorText.includes('return false'), 'Restart queue drain must block eligible, exhausted, and duplicate accepted repair packets')
+
+  return {
+    schemaVersion: 1,
+    atomicPersistence: true,
+    legacyJobCompatibility: true,
+    activeRunMode: true,
+    runCreateResume: true,
+    packetPreflight: true,
+    packetReservation: true,
+    packetLeases: true,
+    packetExecutionPlan: true,
+    packetExecution: true,
+    executionJournalRecovery: true,
+    packetValidationCommit: true,
+    packetGitIsolation: true,
+    deterministicRunProgression: true,
+    asynchronousWorkerCore: true,
+    asynchronousCoordinator: true,
+    restartSafeQueueDrain: true,
+    packetControls: true,
+    compactPacketResults: true,
+    continuationDecisions: true
   }
 }
 
@@ -327,8 +801,10 @@ async function main() {
   const staleFragments = ensureNoStaleSchemaFragments()
   const documentationAlignment = ensureDocumentationAlignment()
   ensureSourceDeadlineLayer()
+  const retiredAgentActions = ensureRetiredAgentActionRoutes()
   ensureActionBudgetAndTimeoutLanguage()
   ensureFocusedModeGuardrails()
+  const workbenchRunModel = ensureWorkbenchRunModel()
   const live = await runLiveSmokeChecks()
 
   const ops = collectOperations(schema)
@@ -341,6 +817,8 @@ async function main() {
     expectedOperationCount: EXPECTED_OPERATION_IDS.length,
     statusContractVerified,
     documentationAlignment,
+    retiredAgentActions,
+    workbenchRunModel,
     payloadBudgets: {
       statusBudgetBytes: 8_000,
       targetBytes: TARGET_ACTION_RESPONSE_BYTES,
