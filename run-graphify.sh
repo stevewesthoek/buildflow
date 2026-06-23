@@ -3,14 +3,12 @@ set -euo pipefail
 
 export MTPLX_API_KEY="not-needed"
 
-echo "Running Graphify Phase 1 for buildflow with Qwen 3.6 27B MTPLX Speed..."
+echo "Running graphify Phase 1+2 for buildflow with Qwen 3.6 27B MTPLX Speed..."
 
-# Phase 1: Extract
 graphify extract . --backend mtplx --model mtplx --token-budget 4000 --max-concurrency 1 --api-timeout 900
 
 echo "Extract complete, now clustering..."
 
-# Phase 1: Cluster
 GRAPHIFY_VIZ_NODE_LIMIT=30000 graphify cluster-only . --backend=mtplx --model mtplx
 
-echo "Graphify Phase 1 complete!"
+echo "Graphify complete!"
