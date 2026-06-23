@@ -160,3 +160,35 @@ if (require.main === module) {
 }
 
 module.exports = { main }
+
+
+
+
+function testPathPermissionCompatibility() {
+  console.log('Testing: repo path permission compatibility')
+  const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx')
+  const permissionsPath = path.join(__dirname, '..', 'src', 'agent', 'permissions.ts')
+  const script = `
+    import assert from 'node:assert/strict'
+    import { pathToFileURL } from 'node:url'
+    const { isPathAllowed } = await import(pathToFileURL(${JSON.stringify(permissionsPath)}).href)
+    assert.equal(isPathAllowed('src/app/api/[[...segments]]/route.ts'), true)
+    assert.equal(isPathAllowed('src/app/blog/[...slug]/page.tsx'), true)
+    assert.equal(isPathAllowed('src/components/file..name.tsx'), true)
+    assert.equal(isPathAllowed('../secrets.txt'), false)
+    assert.equal(isPathAllowed('src/../../outside.ts'), false)
+    assert.equal(isPathAllowed('src\\..\\outside.ts'), false)
+    assert.equal(isPathAllowed('/absolute/path.ts'), false)
+  `
+  const result = spawnSync(tsxBin, ['--eval', script], {
+    encoding: 'utf-8',
+  })
+  assert.strictEqual(
+    result.status,
+    0,
+    `path permission compatibility should pass:\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+  )
+  console.log('✓ Next.js catch-all paths allowed; real traversal remains blocked')
+}
+
+testPathPermissionCompatibility()

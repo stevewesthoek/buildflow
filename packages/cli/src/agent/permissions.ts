@@ -15,8 +15,10 @@ const ALLOWED_DOTFILE_READS = new Set([
 ])
 
 export function isPathAllowed(relativePath: string): boolean {
-  // Block path traversal attempts
-  if (relativePath.includes('..') || relativePath.startsWith('/')) {
+  // Block only real parent-directory traversal segments. Framework route names such
+  // as `[...slug]` and `[[...segments]]` are valid repo-relative path segments.
+  const normalizedPath = relativePath.replace(/\\/g, '/')
+  if (normalizedPath.startsWith('/') || normalizedPath.split('/').includes('..')) {
     return false
   }
 
