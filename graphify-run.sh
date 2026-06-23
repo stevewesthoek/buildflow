@@ -3,6 +3,13 @@ set -euo pipefail
 
 export MTPLX_API_KEY="not-needed"
 
+# Stop Ollama to free memory for MTPLX (they can't coexist on 24GB)
+if pgrep -q -f "Ollama"; then
+  echo "Stopping Ollama to free memory for MTPLX..."
+  osascript -e 'quit app "Ollama"' 2>/dev/null || true
+  sleep 3
+fi
+
 echo "Running Graphify Phase 1 for buildflow with Qwen 3.6 27B MTPLX Speed..."
 
 # Phase 1: Extract
