@@ -307,7 +307,9 @@ export function isDockerConfigPath(normalizedPath: string): boolean {
 }
 
 export function isSafeRelativePath(relativePath: string): boolean {
-  if (!relativePath || relativePath.includes('..') || relativePath.startsWith('/')) return false
+  if (!relativePath) return false
+  const normalized = relativePath.replace(/\\/g, '/')
+  if (path.posix.isAbsolute(normalized) || normalized.split('/').includes('..')) return false
   return true
 }
 
@@ -356,10 +358,13 @@ function isWithinAllowedRoots(normalized: string): boolean {
 }
 
 function classifyBlockedPath(normalized: string): { code: WriteValidationErrorCode; reason: string; message: string; hint: string } | null {
-  if (normalized.startsWith('/') || path.isAbsolute(normalized)) {
+  const posixPath = normalized.replace(/\\/g, '/')
+  const normalizedPosixPath = path.posix.normalize(posixPath)
+  if (path.posix.isAbsolute(posixPath) || path.isAbsolute(normalized)) {
     return { code: 'ABSOLUTE_PATH_BLOCKED', reason: 'absolute_path', message: 'Absolute paths outside the repo are blocked.', hint: 'Use a repo-relative path inside the connected source.' }
   }
-  if (normalized.includes('..')) {
+  const pathSegments = posixPath.split('/')
+  if (pathSegments.some(segment => segment === '..') || normalizedPosixPath === '..' || normalizedPosixPath.startsWith('../')) {
     return { code: 'PATH_TRAVERSAL_BLOCKED', reason: 'path_traversal', message: 'Path traversal outside the repo is blocked.', hint: 'Use a normalized path within the connected source root.' }
   }
   if (ENV_TEMPLATE_FILES.has(path.basename(normalized))) {
@@ -547,7 +552,7 @@ export function validateWriteTarget(params: {
     return { ok: false, requestedPath, normalizedPath, sourceRootRelativePath, policy, error: buildConfirmationError('docker_config_confirmation_required', 'Explicitly confirm before deleting or moving Docker configuration files.') }
   }
 
-  if (normalizedPath === 'package.json') {
+  if (normalizedPath === 'package.json' && (params.changeType === 'create' || params.changeType === 'overwrite')) {
     if (typeof params.content === 'string') {
       try {
         JSON.parse(params.content)

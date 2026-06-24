@@ -187,11 +187,25 @@ assert.equal(nodeModulesDelete.ok, false)
 if (!nodeModulesDelete.ok) assert.equal(nodeModulesDelete.error.code, 'PROTECTED_PATH')
 fs.rmSync(trackedAssetRoot, { recursive: true, force: true })
 
+const allowedDotSegmentCases = [
+  'src/app/[slug]/page.tsx',
+  'src/app/[...segments]/page.tsx',
+  'src/app/[[...segments]]/page.tsx',
+  'src/files/report..draft.md'
+]
+
+for (const requestedPath of allowedDotSegmentCases) {
+  const result = validateWriteTarget({ requestedPath, changeType: 'create', sourceRoot: root, content: 'export default null\n' })
+  assert.equal(result.ok, true, requestedPath)
+}
+
 const blockedCases = [
   { requestedPath: '.env', code: 'SECRET_PATH_BLOCKED' },
   { requestedPath: '.env.local', code: 'SECRET_PATH_BLOCKED' },
   { requestedPath: 'ai/private/example.md', code: 'SECRET_PATH_BLOCKED' },
   { requestedPath: '../outside.md', code: 'PATH_TRAVERSAL_BLOCKED' },
+  { requestedPath: 'folder/../outside.md', code: 'PATH_TRAVERSAL_BLOCKED' },
+  { requestedPath: '..', code: 'PATH_TRAVERSAL_BLOCKED' },
   { requestedPath: '/tmp/outside.md', code: 'ABSOLUTE_PATH_BLOCKED' },
   { requestedPath: 'secrets.pem', code: 'SECRET_PATH_BLOCKED' },
   { requestedPath: 'id_rsa', code: 'SECRET_PATH_BLOCKED' },
@@ -234,9 +248,9 @@ assert(gptActionsSource.includes('writeProfile'))
 assert(serverSource.includes('allowMultiple?: boolean'))
 assert(serverSource.includes('allowMultiple = false'))
 assert(serverSource.includes('allowMultiple === true ? original.split(find).join(replace) : original.replace(find, replace)'))
-assert(instructionsSource.includes('`allowMultiple` only when replacing every identical match is intended'))
-assert(instructionsSource.includes('BuildFlow narration and activity feedback'))
-assert(instructionsSource.includes('already tracked static/binary asset'))
+assert(instructionsSource.includes('use `allowMultiple` only when every identical match should change'))
+assert(instructionsSource.includes('Before every Workbench action, write one sentence under 15 words describing the exact next action. After each result, summarize the evidence in one compact sentence.'))
+assert(instructionsSource.includes('edit `.env`, private keys, PEM files, secrets, `.git/**`, vendor directories, binaries, or generated build output'))
 assert(staticOpenapi.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.allowMultiple)
 assert(staticOpenapi.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.confirmedByUser)
 assert(staticOpenapi.paths?.['/api/actions/commit-changes']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.confirmedByUser)
