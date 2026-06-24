@@ -8,6 +8,7 @@ const ALLOWED_DOTFILE_READS = new Set([
   '.env.development.example',
   '.env.production.example',
   '.gitignore',
+  '.graphifyignore',
   '.github',
   '.buildflow',
   '.kiro',

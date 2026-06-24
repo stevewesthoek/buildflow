@@ -133,14 +133,21 @@ const confirmationTarget = validateWriteTarget({
 })
 assert.equal(confirmationTarget.ok, true)
 
+const graphifyIgnoreOverwrite = validateWriteTarget({ requestedPath: '.graphifyignore', changeType: 'overwrite', sourceRoot: root, content: 'graphify-out/\n' })
+assert.equal(graphifyIgnoreOverwrite.ok, true)
+const graphifyIgnorePatch = validateWriteTarget({ requestedPath: '.graphifyignore', changeType: 'patch', sourceRoot: root })
+assert.equal(graphifyIgnorePatch.ok, true)
+
 assert.equal(validatePath('.env.example').valid, true)
 assert.equal(validatePath('.gitignore').valid, true)
+assert.equal(validatePath('.graphifyignore').valid, true)
 assert.equal(validatePath('.github/workflows/example.yml').valid, true)
 assert.equal(validatePath('.kiro/specs/example.md').valid, true)
 assert.equal(validatePath('.ai/current.md').valid, true)
 assert.equal(validatePath('.env').valid, false)
 assert.equal(validatePath('.git/config').valid, false)
 assert.equal(validatePath('.env.local').valid, false)
+assert.equal(validatePath('.private-config').valid, false)
 
 const generatedDelete = validateWriteTarget({ requestedPath: 'tsconfig.tsbuildinfo', changeType: 'delete_file', sourceRoot: root })
 assert.equal(generatedDelete.ok, true)
