@@ -474,7 +474,7 @@ async function runRepoLocalTsxScript(request: SafeCommandRequest, scriptPath: st
       message: `${request.commandKind} requires package.json in the selected source root.`
     }, '', 1)
   }
-  return runProcess(request, ['pnpm', 'exec', 'tsx', normalizedScript], sourceRoot)
+  return runProcess(request, ['pnpm', '--dir', 'packages/cli', 'exec', 'tsx', fullScriptPath], sourceRoot)
 }
 
 function currentBranch(sourceRoot: string): string {
