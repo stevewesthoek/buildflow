@@ -1,4 +1,5 @@
 import fs from 'fs'
+import { createHash } from 'crypto'
 import { execFileSync, spawn } from 'child_process'
 import path from 'path'
 import { normalizeRepoRelativePath, validateWriteTarget } from './safe-access'
@@ -33,6 +34,24 @@ export type SafeCommandKind =
   | 'diagnose_performance'
   | 'local_cli_github_auth_status'
   | 'local_cli_github_repo_view'
+  | 'run_exact_command'
+
+export type ExactCommandExecutable = 'node' | 'pnpm'
+
+export type ExactCommandPolicy = {
+  denyDatabaseCommands?: boolean
+  denyMigrationCommands?: boolean
+  denyDeploymentCommands?: boolean
+  denyNetworkCommands?: boolean
+}
+
+export type ExactCommandRuntimeEvidence = {
+  requestedNodeVersion?: '20'
+  nodeExecutable?: string
+  nodeVersion?: string
+  nodeMajorVersion?: number
+  pnpmVersion?: string
+}
 
 export type LocalCliCapabilityProfile = {
   name: 'github'
@@ -73,21 +92,37 @@ export type SafeCommandRequest = {
   remote?: string
   branch?: string
   patternSet?: SecurityPatternSet
+  executable?: ExactCommandExecutable
+  args?: string[]
+  nodeVersion?: '20'
+  policy?: ExactCommandPolicy
+  protectedPaths?: string[]
+  requiredBranch?: string
+  networkAccess?: false
   confirmedByUser?: boolean
   confirmationToken?: string
 }
 
 export type SafeCommandResult = {
-  status: 'completed' | 'failed' | 'timed_out' | 'needs_confirmation'
+  status: 'completed' | 'failed' | 'timed_out' | 'needs_confirmation' | 'blocked'
   commandKind: SafeCommandKind
   command: string[]
   cwd: string
+  executable?: ExactCommandExecutable
+  args?: string[]
+  packageDir?: string
+  requiredBranch?: string
+  actualBranch?: string
+  runtime?: ExactCommandRuntimeEvidence
   exitCode: number | null
   signal: NodeJS.Signals | null
   stdout: string
   stderr: string
   outputTruncated: boolean
   durationMs: number
+  changedPaths?: string[]
+  protectedPathsChanged?: string[]
+  riskLevel?: 'medium' | 'high'
   confirmationToken?: string
   requiresConfirmation?: boolean
   reason?: string
@@ -120,6 +155,9 @@ const secretPatternSources = [
 ]
 
 const SECRET_PATTERNS = secretPatternSources.map(source => new RegExp(source, 'g'))
+const SECRET_ASSIGNMENT_PATTERN = /\b(DATABASE_URL|API_KEY|ACCESS_TOKEN|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET|PRIVATE_KEY|PASSWORD|PASSWD|SECRET|TOKEN)\s*[:=]\s*([^\s'\"`]+)/gi
+const AUTHENTICATED_URL_PATTERN = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s\/@:]+):([^\s\/@]+)@/gi
+const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi
 const SAFE_SCRIPT_NAME = /^[A-Za-z0-9:_-]+$/
 const SAFE_MARKER = /^[A-Za-z0-9 _:\-()|]+$/
 const SAFE_REMOTE = /^[A-Za-z0-9._-]+$/
@@ -137,7 +175,10 @@ const SECURITY_PATTERNS: Record<Exclude<SecurityPatternSet, 'forbidden_all_high_
   ],
   forbidden_secret_material: [
     { name: 'private_key', pattern: /BEGIN (RSA|OPENSSH|EC) PRIVATE KEY/i },
-    { name: 'token_prefix', pattern: /(g' \+ 'hp_|github_' \+ 'pat_|s' \+ 'k_live_|r' \+ 'k_live_|xox' \+ 'b-|A' \+ 'KIA|A' \+ 'Iza)/i },
+    ...secretPatternSources.map((source, index) => ({
+      name: `secret_pattern_${index + 1}`,
+      pattern: new RegExp(source, 'i')
+    })),
     { name: 'secret_assignment', pattern: /\b(secret|token|password|credential|api[_-]?key)\b\s*[:=]/i }
   ],
   forbidden_upload_network: [
@@ -147,8 +188,21 @@ const SECURITY_PATTERNS: Record<Exclude<SecurityPatternSet, 'forbidden_all_high_
   ]
 }
 
+function registeredSecretValues(): string[] {
+  const secretName = /(DATABASE_URL|API_KEY|ACCESS_TOKEN|AUTH_TOKEN|BEARER_TOKEN|CLIENT_SECRET|PRIVATE_KEY|PASSWORD|PASSWD|SECRET|TOKEN)/i
+  return Object.entries(process.env)
+    .filter(([key, value]) => secretName.test(key) && typeof value === 'string' && value.length >= 4)
+    .map(([, value]) => value as string)
+    .sort((a, b) => b.length - a.length)
+}
+
 function redactOutput(value: string): string {
-  return SECRET_PATTERNS.reduce((current, pattern) => current.replace(pattern, '[REDACTED]'), value)
+  let current = SECRET_PATTERNS.reduce((redacted, pattern) => redacted.replace(pattern, '[REDACTED]'), value)
+  current = current.replace(SECRET_ASSIGNMENT_PATTERN, (_match, name: string) => `${name}=[REDACTED]`)
+  current = current.replace(AUTHENTICATED_URL_PATTERN, (_match, scheme: string) => `${scheme}[REDACTED]@`)
+  current = current.replace(BEARER_PATTERN, 'Bearer [REDACTED]')
+  for (const secret of registeredSecretValues()) current = current.split(secret).join('[REDACTED]')
+  return current
 }
 
 function normalizeRepoPath(input: string): string {
@@ -590,12 +644,264 @@ export function getAllowedCommandKinds(): SafeCommandKind[] {
     'security_scan_paths',
     'diagnose_performance',
     'local_cli_github_auth_status',
-    'local_cli_github_repo_view'
+    'local_cli_github_repo_view',
+    'run_exact_command'
   ]
+}
+
+function exactBlockedResult(request: SafeCommandRequest, reason: string, actualBranch?: string): SafeCommandResult {
+  return {
+    status: 'blocked',
+    commandKind: request.commandKind,
+    command: ['buildflow', 'run_exact_command'],
+    cwd: path.resolve(request.sourceRoot),
+    executable: request.executable,
+    args: request.args,
+    packageDir: request.packageDir || '.',
+    requiredBranch: request.requiredBranch,
+    actualBranch,
+    exitCode: null,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    outputTruncated: false,
+    durationMs: 0,
+    changedPaths: [],
+    protectedPathsChanged: [],
+    riskLevel: 'medium',
+    requiresConfirmation: false,
+    reason
+  }
+}
+
+function exactRealpathWithin(sourceRoot: string, candidate: string, label: string): string {
+  const rootReal = fs.realpathSync(sourceRoot)
+  const candidateReal = fs.realpathSync(candidate)
+  if (candidateReal !== rootReal && !candidateReal.startsWith(`${rootReal}${path.sep}`)) throw new Error(`${label} escaped the source root through a symlink`)
+  return candidateReal
+}
+
+function exactValidateArgs(sourceRoot: string, cwd: string, args: unknown): string[] {
+  if (!Array.isArray(args)) throw new Error('args must be an array')
+  return args.map((value, index) => {
+    if (typeof value !== 'string') throw new Error(`args[${index}] must be a string`)
+    if (/\0|[\r\n]|;|&&|\|\||\||>|<|`|\$\(/.test(value)) throw new Error(`args[${index}] contains prohibited shell syntax`)
+    if (path.isAbsolute(value)) {
+      const resolved = path.resolve(value)
+      if (resolved !== sourceRoot && !resolved.startsWith(`${sourceRoot}${path.sep}`)) throw new Error(`args[${index}] contains an absolute path outside the source root`)
+    } else if (value.includes('..')) {
+      const resolved = path.resolve(cwd, value)
+      if (resolved !== sourceRoot && !resolved.startsWith(`${sourceRoot}${path.sep}`)) throw new Error(`args[${index}] resolves outside the source root`)
+    }
+    return value
+  })
+}
+
+function exactResolveNode20(): { nodeExecutable: string; binDir: string; nodeVersion: string; nodeMajorVersion: number } {
+  const candidates: string[] = []
+  const nvmDir = process.env.NVM_DIR
+  if (nvmDir) {
+    const versionsDir = path.join(nvmDir, 'versions', 'node')
+    if (fs.existsSync(versionsDir)) {
+      for (const entry of fs.readdirSync(versionsDir).filter(name => /^v20\./.test(name)).sort().reverse()) {
+        candidates.push(path.join(versionsDir, entry, 'bin', process.platform === 'win32' ? 'node.exe' : 'node'))
+      }
+    }
+  }
+  if (process.version.startsWith('v20.')) candidates.push(process.execPath)
+  for (const nodeExecutable of candidates) {
+    if (!fs.existsSync(nodeExecutable)) continue
+    const nodeVersion = execFileSync(nodeExecutable, ['--version'], { encoding: 'utf8', timeout: 2_000 }).trim()
+    const nodeMajorVersion = Number(nodeVersion.replace(/^v/, '').split('.')[0])
+    if (nodeMajorVersion === 20) return { nodeExecutable, binDir: path.dirname(nodeExecutable), nodeVersion, nodeMajorVersion }
+  }
+  throw new Error('Node 20 is not installed or could not be resolved')
+}
+
+function exactMinimalEnv(binDir: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`, CI: '1', NO_COLOR: '1' }
+  for (const key of ['HOME', 'USER', 'TMPDIR', 'TEMP', 'TMP', 'TERM', 'FORCE_COLOR', 'NVM_DIR', 'PNPM_HOME', 'COREPACK_HOME', 'XDG_CACHE_HOME']) {
+    if (process.env[key] !== undefined) env[key] = process.env[key]
+  }
+  return env
+}
+
+function exactPackageScript(cwd: string, executable: ExactCommandExecutable, args: string[]): { resolvedScriptName?: string; scriptCommand?: string } {
+  if (executable !== 'pnpm' || args.length === 0 || args[0] === '--version') return {}
+  let scriptName: string | undefined
+  if (args[0] === 'run') scriptName = args[1]
+  else if (args[0] !== 'exec') scriptName = args[0]
+  if (!scriptName) return {}
+  if (!SAFE_SCRIPT_NAME.test(scriptName)) throw new Error('package script name contains unsafe characters')
+  const packageJson = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }
+  const scriptCommand = packageJson.scripts?.[scriptName]
+  if (typeof scriptCommand !== 'string') throw new Error(`Package script does not exist: ${scriptName}`)
+  return { resolvedScriptName: scriptName, scriptCommand }
+}
+
+function exactAssertPolicy(scriptCommand: string | undefined, policy: ExactCommandPolicy | undefined): void {
+  if (!scriptCommand) return
+  const normalized = scriptCommand.toLowerCase()
+  const checks: Array<[boolean | undefined, RegExp, string]> = [
+    [policy?.denyDatabaseCommands, /\b(payload\s+migrate(?::status)?|prisma\s+(migrate|db)|seed|db:init|database:init|psql|mysql|sqlite3|mongosh|redis-cli)\b/i, 'database command'],
+    [policy?.denyMigrationCommands, /\b(payload\s+migrate(?::status)?|prisma\s+migrate)\b/i, 'migration command'],
+    [policy?.denyDeploymentCommands, /\b(docker\s+push|docker\s+compose\s+up|kubectl|deploy|production|latest)\b/i, 'deployment command'],
+    [policy?.denyNetworkCommands, /\b(curl|wget|nc|netcat|ssh|scp|rsync)\b/i, 'network command']
+  ]
+  for (const [enabled, pattern, label] of checks) if (enabled && pattern.test(normalized)) throw new Error(`Package script is blocked by policy: ${label}`)
+}
+
+function exactGitSnapshot(sourceRoot: string): Map<string, string> {
+  const output = execFileSync('git', ['status', '--porcelain=v1', '-uall'], { cwd: sourceRoot, encoding: 'utf8' })
+  const result = new Map<string, string>()
+  for (const line of output.split('\n').filter(Boolean)) result.set(normalizeRepoRelativePath(line.slice(3)), line.slice(0, 2))
+  return result
+}
+
+function exactChangedPaths(before: Map<string, string>, after: Map<string, string>): string[] {
+  return [...new Set([...before.keys(), ...after.keys()])]
+    .filter(item => !path.isAbsolute(item) && !item.split('/').includes('..'))
+    .filter(item => before.get(item) !== after.get(item))
+    .sort()
+}
+
+const EXACT_PROTECTED_SCAN_LIMIT = 150_000
+const EXACT_PROTECTED_EXTENSIONS = new Set(['.pem', '.key', '.p12', '.pfx'])
+
+function exactIsProtectedFile(relativePath: string): boolean {
+  const normalized = normalizeRepoRelativePath(relativePath)
+  const parts = normalized.split('/')
+  const basename = path.basename(normalized)
+  return parts.includes('.git') || parts.includes('node_modules') || basename === '.env' || /^\.env\./.test(basename) || EXACT_PROTECTED_EXTENSIONS.has(path.extname(basename).toLowerCase())
+}
+
+function exactProtectedFilesystemSnapshot(sourceRoot: string): Map<string, string> {
+  const rootReal = fs.realpathSync(sourceRoot)
+  const snapshot = new Map<string, string>()
+  let visited = 0
+  const visit = (absolutePath: string, relativePath: string) => {
+    visited += 1
+    if (visited > EXACT_PROTECTED_SCAN_LIMIT) throw new Error('Protected path scan exceeded its bounded entry limit')
+    const stat = fs.lstatSync(absolutePath)
+    const normalized = normalizeRepoRelativePath(relativePath)
+    const protectedEntry = normalized ? exactIsProtectedFile(normalized) : false
+    if (protectedEntry) {
+      snapshot.set(normalized, `${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'dir' : 'file'}`)
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return
+    for (const entry of fs.readdirSync(absolutePath, { withFileTypes: true })) {
+      const childAbsolute = path.join(absolutePath, entry.name)
+      const childRelative = normalized ? `${normalized}/${entry.name}` : entry.name
+      const resolved = path.resolve(childAbsolute)
+      if (resolved !== rootReal && !resolved.startsWith(`${rootReal}${path.sep}`)) throw new Error('Protected path scan escaped the source root')
+      visit(childAbsolute, childRelative)
+    }
+  }
+  visit(rootReal, '')
+  return snapshot
+}
+
+function exactProtectedChanges(before: Map<string, string>, after: Map<string, string>): string[] {
+  return [...new Set([...before.keys(), ...after.keys()])]
+    .filter(item => before.get(item) !== after.get(item))
+    .sort()
+}
+
+function exactPathHash(sourceRoot: string, relativePath: string): string {
+  const fullPath = path.join(sourceRoot, relativePath)
+  if (!fs.existsSync(fullPath)) return 'missing'
+  const stat = fs.statSync(fullPath)
+  if (stat.isDirectory()) {
+    const entries = fs.readdirSync(fullPath, { recursive: true }).map(String).sort()
+    const hash = createHash('sha256')
+    for (const entry of entries) {
+      const child = path.join(fullPath, entry)
+      if (fs.statSync(child).isFile()) hash.update(entry).update(fs.readFileSync(child))
+    }
+    return hash.digest('hex')
+  }
+  return createHash('sha256').update(fs.readFileSync(fullPath)).digest('hex')
+}
+
+async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommandResult> {
+  const sourceRoot = fs.realpathSync(path.resolve(request.sourceRoot))
+  const cwd = request.packageDir === '.' || !request.packageDir ? sourceRoot : assertPackageDir(sourceRoot, request.packageDir)
+  exactRealpathWithin(sourceRoot, cwd, 'packageDir')
+  const actualBranch = currentBranch(sourceRoot)
+  if (request.requiredBranch && actualBranch !== request.requiredBranch) return exactBlockedResult(request, 'branch_mismatch', actualBranch)
+  if (request.executable !== 'node' && request.executable !== 'pnpm') throw new Error('executable must be node or pnpm')
+  const args = exactValidateArgs(sourceRoot, cwd, request.args)
+  const runtime = exactResolveNode20()
+  if (request.nodeVersion === '20' && runtime.nodeMajorVersion !== 20) throw new Error('Resolved child runtime is not Node 20')
+  const { resolvedScriptName, scriptCommand } = exactPackageScript(cwd, request.executable, args)
+  exactAssertPolicy(scriptCommand, request.policy)
+  const protectedPaths = (request.protectedPaths || []).map(item => assertSafeRepoPath(item, 'protectedPath'))
+  const protectedBefore = new Map(protectedPaths.map(item => [item, exactPathHash(sourceRoot, item)]))
+  const mandatoryProtectedBefore = exactProtectedFilesystemSnapshot(sourceRoot)
+  const before = exactGitSnapshot(sourceRoot)
+  const pnpmName = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+  const pnpmCandidates = [
+    path.join(runtime.binDir, pnpmName),
+    process.env.PNPM_HOME ? path.join(process.env.PNPM_HOME, pnpmName) : undefined
+  ].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0)
+  const executablePath = request.executable === 'node'
+    ? runtime.nodeExecutable
+    : pnpmCandidates.find(candidate => fs.existsSync(candidate))
+  if (!executablePath) throw new Error(`Unable to resolve ${request.executable} in the Node 20 environment`)
+  const startedAt = Date.now()
+  const outputState = { bytes: 0, truncated: false }
+  const timeoutMs = Math.min(12_000, Math.max(1_000, request.timeoutMs || 8_000))
+  const result = await new Promise<SafeCommandResult>((resolve, reject) => {
+    const child = spawn(executablePath, args, { cwd, shell: false, detached: process.platform !== 'win32', env: exactMinimalEnv(runtime.binDir) })
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+    let killTimer: NodeJS.Timeout | undefined
+    const signalProcess = (signal: NodeJS.Signals) => {
+      if (child.pid && process.platform !== 'win32') {
+        try { process.kill(-child.pid, signal); return } catch { /* direct child fallback */ }
+      }
+      child.kill(signal)
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      signalProcess('SIGTERM')
+      killTimer = setTimeout(() => signalProcess('SIGKILL'), 500)
+    }, timeoutMs)
+    child.stdout.on('data', chunk => { stdout = appendLimited(stdout, Buffer.from(chunk), outputState) })
+    child.stderr.on('data', chunk => { stderr = appendLimited(stderr, Buffer.from(chunk), outputState) })
+    child.on('error', error => { clearTimeout(timer); if (killTimer) clearTimeout(killTimer); reject(error) })
+    child.on('close', (exitCode, signal) => {
+      clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+      resolve({
+        status: timedOut ? 'timed_out' : exitCode === 0 ? 'completed' : 'failed', commandKind: request.commandKind,
+        command: [request.executable!, ...args], cwd, executable: request.executable, args, packageDir: request.packageDir || '.',
+        requiredBranch: request.requiredBranch, actualBranch, runtime: { requestedNodeVersion: request.nodeVersion, nodeExecutable: runtime.nodeExecutable, nodeVersion: runtime.nodeVersion, nodeMajorVersion: runtime.nodeMajorVersion },
+        exitCode, signal, stdout, stderr, outputTruncated: outputState.truncated, durationMs: Date.now() - startedAt,
+        changedPaths: [], protectedPathsChanged: [], riskLevel: 'medium', requiresConfirmation: false,
+        details: resolvedScriptName ? { resolvedScriptName } : undefined
+      })
+    })
+  })
+  if (request.executable === 'pnpm') {
+    try { result.runtime = { ...result.runtime, pnpmVersion: execFileSync(executablePath, ['--version'], { cwd, env: exactMinimalEnv(runtime.binDir), encoding: 'utf8', timeout: 2_000 }).trim() } } catch { /* retain command evidence */ }
+  }
+  result.changedPaths = exactChangedPaths(before, exactGitSnapshot(sourceRoot))
+  const callerProtectedChanges = protectedPaths.filter(item => protectedBefore.get(item) !== exactPathHash(sourceRoot, item))
+  const mandatoryProtectedChanges = exactProtectedChanges(mandatoryProtectedBefore, exactProtectedFilesystemSnapshot(sourceRoot))
+  result.protectedPathsChanged = [...new Set([...callerProtectedChanges, ...mandatoryProtectedChanges])].sort()
+  if (result.protectedPathsChanged.length > 0) {
+    result.status = 'blocked'
+    result.reason = mandatoryProtectedChanges.length > 0 ? 'mandatory_protected_path_changed' : 'protected_path_changed'
+  }
+  return result
 }
 
 export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeCommandResult> {
   const sourceRoot = path.resolve(request.sourceRoot)
+
+  if (request.commandKind === 'run_exact_command') return runExactCommand(request)
 
   if (request.commandKind === 'verify_write_policy') return runRepoLocalTsxScript(request, 'scripts/verify-write-policy.ts')
   if (request.commandKind === 'verify_source_reindex_resilience') return runRepoLocalTsxScript(request, 'scripts/verify-source-reindex-resilience.ts')
@@ -654,5 +960,43 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
 
   const command = STATIC_COMMANDS[request.commandKind]
   if (!command) throw new Error(`Command kind is not allowlisted: ${request.commandKind}`)
+
+  if (request.commandKind === 'git_diff' || request.commandKind === 'git_diff_stat' || request.commandKind === 'git_diff_name_only') {
+    const pathspecs = (request.paths || []).map(item => {
+      if (typeof item !== 'string' || !item.trim()) throw new Error('paths must contain non-empty repository-relative strings')
+      const normalized = normalizeRepoRelativePath(item)
+      if (!normalized || normalized === '.' || normalized.startsWith('-')) throw new Error(`Unsafe git pathspec: ${item}`)
+      const resolved = path.resolve(sourceRoot, normalized)
+      const relative = path.relative(sourceRoot, resolved)
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Git pathspec escaped the source root: ${item}`)
+      return normalized
+    })
+    const result = await runProcess(request, pathspecs.length > 0 ? [...command, '--', ...pathspecs] : command, sourceRoot)
+    if (pathspecs.length === 0) return result
+
+    const status = await runProcess(
+      request,
+      ['git', 'status', '--short', '--untracked-files=all', '--', ...pathspecs],
+      sourceRoot
+    )
+    const untracked = status.stdout
+      .split('\n')
+      .map(line => line.trimEnd())
+      .filter(line => line.startsWith('?? '))
+    if (untracked.length > 0) {
+      const outputState = {
+        bytes: Buffer.byteLength(result.stdout, 'utf8'),
+        truncated: result.outputTruncated
+      }
+      result.stdout = appendLimited(
+        result.stdout,
+        Buffer.from(`${result.stdout.endsWith('\n') || result.stdout.length === 0 ? '' : '\n'}\nUntracked path evidence:\n${untracked.join('\n')}\n`),
+        outputState
+      )
+      result.outputTruncated = outputState.truncated
+    }
+    return result
+  }
+
   return runProcess(request, command, sourceRoot)
 }
