@@ -15,13 +15,20 @@ import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot
 import type { Workspace } from '@workbench/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
 import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
-import { compactAgentJob, controlAgentJob, getAgentJob, listAgentJobs, startAgentJob, updateAgentJob, type AgentJobControlAction } from './agent-jobs'
+import { compactAgentJob, controlAgentJob, createWorkbenchRun, getActiveWorkbenchRun, getAgentJob, listAgentJobs, resumeWorkbenchRun, startAgentJob, updateAgentJob, type AgentJobControlAction } from './agent-jobs'
 import { listAgentEvents, appendAgentEvent } from './agent-events'
 import { startLocalAgentPreflight } from './agent-runtime'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from './payload-budget'
 import { prepareTaskContext } from './prepare-task-context'
 import { handleFocusedRead } from './focused-read'
 import { handleGraphContext } from './graph-context'
+import { preflightWorkbenchPacket, type WorkbenchPacket } from './workbench-packets'
+import { planWorkbenchPacketExecution } from './workbench-packet-plan'
+import { executeWorkbenchPacket } from './workbench-packet-executor'
+import { recoverWorkbenchExecutionJournals } from './workbench-execution-journal'
+import { getWorkbenchPacketResult } from './workbench-packet-results'
+import { drainQueuedWorkbenchPackets, scheduleWorkbenchPacket } from './workbench-packet-coordinator'
+import { claimNextWorkbenchPacket, controlWorkbenchPacketsForRun, getWorkbenchPacketRecord, listWorkbenchPacketRecords, recoverInterruptedWorkbenchPacket, recoverStaleWorkbenchPacketLeases, releaseWorkbenchPacketLease, renewWorkbenchPacketLease, reserveWorkbenchPacket } from './workbench-packet-store'
 import { getBuildSha, getBuildTimestamp } from '@workbench/shared'
 
 let cliVersion = '1.2.13-beta'
@@ -42,6 +49,47 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   const indexer = new Indexer()
   const config = loadConfig()
+  const recoveredExecutionJournals = recoverWorkbenchExecutionJournals({
+    sourceRootFor: sourceId => getSourcesSafe().find(source => source.id === sourceId && source.enabled)?.path,
+    onRecovered: journal => {
+      recoverInterruptedWorkbenchPacket({
+        packetId: journal.packetId,
+        failureReason: `Recovered interrupted packet execution from journal after ${journal.completedSteps} completed step(s).`
+      })
+      const run = getAgentJob(journal.runId)
+      if (run) {
+        updateAgentJob(run.id, {
+          activePacketId: undefined,
+          metrics: { ...run.metrics, failedPackets: run.metrics.failedPackets + 1 },
+          summary: `Packet ${journal.packetId} was restored after interrupted execution.`
+        })
+      }
+    }
+  })
+  if (recoveredExecutionJournals.recovered > 0) {
+    console.log(`[Workbench packets] Restored ${recoveredExecutionJournals.recovered} interrupted execution journal(s).`)
+  }
+  for (const failed of recoveredExecutionJournals.failed) {
+    console.error(`[Workbench packets] Failed to restore journal ${failed.packetId}: ${failed.error}`)
+  }
+  const recoveredPacketLeases = recoverStaleWorkbenchPacketLeases()
+  for (const packetId of recoveredPacketLeases.packetIds) {
+    const packet = getWorkbenchPacketRecord(packetId)
+    const run = packet ? getAgentJob(packet.packet.runId) : undefined
+    if (run?.activePacketId === packetId) updateAgentJob(run.id, { activePacketId: undefined })
+  }
+  if (recoveredPacketLeases.recovered > 0) {
+    console.log(`[Workbench packets] Requeued ${recoveredPacketLeases.recovered} stale lease(s): ${recoveredPacketLeases.packetIds.join(', ')}`)
+  }
+  setTimeout(() => {
+    const drained = drainQueuedWorkbenchPackets({
+      limit: 5,
+      sourceRootFor: sourceId => getSourcesSafe().find(source => source.id === sourceId && source.enabled)?.path
+    })
+    if (drained.scheduled > 0) {
+      console.log(`[Workbench packets] Scheduled ${drained.scheduled} queued packet(s) after startup recovery: ${drained.packetIds.join(', ')}`)
+    }
+  }, 250)
   const indexingSources = new Set<string>()
   let searcher = new VaultSearcher(indexer.getDocs())
 
@@ -368,9 +416,28 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         const maxJobs = Math.min(20, Math.max(1, Number(limit || 10)))
         const jobs = listAgentJobs().slice(0, maxJobs)
         const events = listAgentEvents({ limit: 20 })
+        const packets = listWorkbenchPacketRecords({ limit: 20 }).map(record => {
+          const result = getWorkbenchPacketResult(record.packet.packetId)
+          return {
+            packetId: record.packet.packetId,
+            runId: record.packet.runId,
+            taskId: record.packet.taskId,
+            sourceId: record.packet.sourceId,
+            status: record.status,
+            exactPaths: record.exactPaths.slice(0, 10),
+            updatedAt: record.updatedAt,
+            completedSteps: result?.completedSteps || 0,
+            failedStep: result?.failedStep,
+            rolledBack: result?.rolledBack === true,
+            validation: (result?.validation || []).slice(0, 5),
+            commitHash: result?.commitHash || record.commitHash,
+            errorCodes: (result?.errors || []).slice(0, 5).map(error => error.code)
+          }
+        })
         return reply.header('Cache-Control', 'no-store').send({
           status: 'ok',
           jobs: full === true ? jobs : jobs.map(compactAgentJob),
+          packets,
           events: events.events,
           eventBytes: events.returnedBytes,
           eventBudgetBytes: events.budgetBytes
@@ -399,8 +466,29 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       if (!existing) return reply.code(404).send({ error: `Agent job not found: ${jobId}` })
 
       let job = existing
+      let packetControl: { updated: number; packetIds: string[] } | undefined
       if (action === 'pause' || action === 'resume' || action === 'cancel') {
         job = controlAgentJob(jobId, action, reason)
+        packetControl = controlWorkbenchPacketsForRun({ runId: jobId, action, reason })
+        for (const packetId of packetControl.packetIds) {
+          const packet = getWorkbenchPacketRecord(packetId)
+          const packetEventType = action === 'resume'
+            ? 'packet_resumed'
+            : action === 'pause' && packet?.status === 'paused'
+              ? 'packet_paused'
+              : action === 'cancel' && packet?.status === 'cancelled'
+                ? 'packet_cancelled'
+                : undefined
+          if (packetEventType) {
+            appendAgentEvent({
+              jobId,
+              sourceId: job.sourceId,
+              type: packetEventType,
+              status: packet?.status,
+              message: reason ? `Packet ${packetId} ${action}d: ${reason}` : `Packet ${packetId} ${action}d.`
+            })
+          }
+        }
         appendAgentEvent({
           jobId,
           sourceId: job.sourceId,
@@ -408,9 +496,21 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           message: reason ? `${action} requested: ${reason}` : `${action} requested.`,
           status: job.status
         })
-        if (action === 'resume' && job.autonomyLevel === 'hands_off_safe') {
+        if (action === 'resume') {
           const source = getSourcesSafe().find(item => item.id === job.sourceId)
-          if (source?.enabled) setImmediate(() => startLocalAgentPreflight({ jobId: job.id, sourceId: job.sourceId, sourceRoot: source.path }))
+          if (source?.enabled) {
+            setImmediate(() => {
+              drainQueuedWorkbenchPackets({
+                sourceId: job.sourceId,
+                runId: job.id,
+                limit: 5,
+                sourceRootFor: requestedSourceId => requestedSourceId === source.id ? source.path : undefined
+              })
+              if (job.autonomyLevel === 'hands_off_safe') {
+                startLocalAgentPreflight({ jobId: job.id, sourceId: job.sourceId, sourceRoot: source.path })
+              }
+            })
+          }
         }
       } else if (action !== 'events') {
         return reply.code(400).send({ error: `Unsupported control action: ${action}` })
@@ -421,6 +521,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         status: 'ok',
         action,
         job: full === true ? job : compactAgentJob(job),
+        packetControl,
         events: events.events,
         returnedBytes: events.returnedBytes,
         budgetBytes: events.budgetBytes
@@ -430,14 +531,62 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; timeoutMs?: number; paths?: string[]; packageDir?: string; scriptName?: string; marker?: string; message?: string; body?: string; remote?: string; branch?: string; patternSet?: 'forbidden_runtime_execution' | 'forbidden_secret_material' | 'forbidden_upload_network' | 'forbidden_all_high_risk'; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/commands/run', async (request, reply) => {
+  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; validationJobOperation?: 'submit' | 'status'; validationJobId?: string; idempotencyKey?: string; runId?: string; packetId?: string; taskId?: string; timeoutMs?: number; paths?: string[]; packageDir?: string; scriptName?: string; marker?: string; message?: string; body?: string; remote?: string; branch?: string; patternSet?: 'forbidden_runtime_execution' | 'forbidden_secret_material' | 'forbidden_upload_network' | 'forbidden_all_high_risk'; executable?: 'node' | 'pnpm'; args?: string[]; nodeVersion?: '20'; policy?: { denyDatabaseCommands?: boolean; denyMigrationCommands?: boolean; denyDeploymentCommands?: boolean; denyNetworkCommands?: boolean }; protectedPaths?: string[]; requiredBranch?: string; networkAccess?: false; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/commands/run', async (request, reply) => {
     try {
-      const { sourceId, commandKind, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, confirmedByUser, confirmationToken } = request.body
+      const { sourceId, commandKind, validationJobOperation, validationJobId, idempotencyKey, runId, packetId, taskId, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, executable, args, nodeVersion, policy, protectedPaths, requiredBranch, networkAccess, confirmedByUser, confirmationToken } = request.body
       if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
-      if (!commandKind || !getAllowedCommandKinds().includes(commandKind)) return reply.code(400).send({ error: 'commandKind is not allowlisted' })
       const source = getSourcesSafe().find(item => item.id === sourceId)
       if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
-      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, confirmedByUser, confirmationToken })
+
+      if (validationJobOperation === 'submit') {
+        const { submitWorkbenchValidationJob } = await import('./workbench-validation-jobs')
+        const submitted = submitWorkbenchValidationJob({
+          sourceId,
+          idempotencyKey: String(idempotencyKey || ''),
+          commandKind: commandKind as 'run_package_script' | 'run_package_test' | 'run_package_test_marker' | 'type_check_web' | 'type_check_cli',
+          packageDir,
+          scriptName,
+          marker,
+          timeoutMs,
+          runId,
+          packetId,
+          taskId,
+          nodeVersion,
+          requiredBranch,
+          protectedPaths
+        })
+        if ('code' in submitted) {
+          return reply.code(submitted.code === 'VALIDATION_JOB_STORE_BUSY' ? 409 : 400).header('Cache-Control', 'no-store').send(submitted)
+        }
+        const schedule = submitted.job.status === 'queued'
+          ? (await import('./workbench-validation-jobs')).scheduleWorkbenchValidationJob({
+              jobId: submitted.job.jobId,
+              sourceId,
+              sourceRoot: source.path,
+              leaseMs: Math.max(30_000, Math.min((timeoutMs || 300_000) + 60_000, 960_000))
+            })
+          : undefined
+        return reply.header('Cache-Control', 'no-store').send({
+          status: schedule?.status === 'scheduled' ? 'running' : submitted.job.status,
+          validationJobOperation,
+          created: submitted.created,
+          job: schedule?.status === 'scheduled'
+            ? { ...submitted.job, status: 'running', workerId: schedule.workerId }
+            : submitted.job,
+          schedule
+        })
+      }
+
+      if (validationJobOperation === 'status') {
+        if (!validationJobId) return reply.code(400).send({ error: 'validationJobId is required for validation job status' })
+        const { getCompactWorkbenchValidationJob } = await import('./workbench-validation-jobs')
+        const job = getCompactWorkbenchValidationJob(validationJobId, sourceId)
+        if (!job) return reply.code(404).header('Cache-Control', 'no-store').send({ error: 'Validation job not found for the selected source.' })
+        return reply.header('Cache-Control', 'no-store').send({ status: job.status, validationJobOperation, job })
+      }
+
+      if (!commandKind || !getAllowedCommandKinds().includes(commandKind)) return reply.code(400).send({ error: 'commandKind is not allowlisted' })
+      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, executable, args, nodeVersion, policy, protectedPaths, requiredBranch, networkAccess, confirmedByUser, confirmationToken })
       return reply.header('Cache-Control', 'no-store').send(result)
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
@@ -457,24 +606,41 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       const readinessMs = Date.now() - readinessStartedAt
       if (rejection) return rejection
       const searchStartedAt = Date.now()
-      const results = searcher.search(query, limit, resolvedSourceIds)
+      const search = searcher.searchBounded(query, limit, resolvedSourceIds, {
+        startedAt,
+        deadlineMs: 1200,
+        maxDocsPerSource: 1500,
+        maxContentDocsPerSource: 350
+      })
       const searchMs = Date.now() - searchStartedAt
+      const needsNarrowerScope = search.results.length === 0 && search.sourceWarnings.length > 0
+      const status = needsNarrowerScope ? 'needs_narrower_scope' : search.partial ? 'partial' : 'ok'
 
       logToFile({
         timestamp: new Date().toISOString(),
         tool: 'search',
-        status: 'success'
+        status: 'success',
+        resultStatus: status
       })
 
       return {
-        results,
+        status,
+        results: search.results,
+        ...(search.sourceWarnings.length > 0 ? {
+          sourceWarnings: search.sourceWarnings,
+          suggestedNarrowerMode: search.mode === 'content' ? 'grep_context' : 'graph_context',
+          suggestedNextAction: 'Use graph_context for map-level discovery, then grep_context/read_range/read_paths on exact files or paths.'
+        } : {}),
         timings: {
           totalMs: Date.now() - startedAt,
           sourceResolveMs,
           readinessMs,
           searchMs,
           sourceCount: resolvedSourceIds.length,
-          resultCount: results.length
+          searchedSourceCount: search.searchedSourceCount,
+          searchedDocCount: search.searchedDocCount,
+          totalDocCount: search.totalDocCount,
+          resultCount: search.results.length
         }
       }
     } catch (err) {
@@ -514,6 +680,236 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   fastify.post<{ Body: { sourceId: string; query?: string; limit?: number } }>('/api/graph-context', async (request, reply) => {
     const result = await handleGraphContext(request.body)
     return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.payload)
+  })
+
+  fastify.post<{ Body: { sourceId: string } }>('/api/workbench-runs/active', async (request, reply) => {
+    const sourceId = String(request.body?.sourceId || '').trim()
+    if (!sourceId) return reply.code(400).send({ error: 'sourceId is required' })
+    const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+    if (!source) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+    const run = getActiveWorkbenchRun(sourceId)
+    const packets = run && typeof run.id === 'string'
+      ? listWorkbenchPacketRecords({ runId: run.id, limit: 10 }).map(record => ({
+          packetId: record.packet.packetId,
+          taskId: record.packet.taskId,
+          status: record.status,
+          exactPaths: record.exactPaths,
+          reservedAt: record.reservedAt,
+          updatedAt: record.updatedAt,
+          failureReason: record.failureReason,
+          commitHash: record.commitHash,
+          leaseOwner: record.leaseOwner,
+          leaseAcquiredAt: record.leaseAcquiredAt,
+          leaseExpiresAt: record.leaseExpiresAt,
+          claimAttempt: record.claimAttempt
+        }))
+      : []
+    return reply.header('Cache-Control', 'no-store').send({ status: 'ok', sourceId, activeRun: run ? { ...run, packets } : null })
+  })
+
+  fastify.post<{ Body: { sourceId: string; goal: string; documentationPath?: string; maxIterations?: number; autoCommit?: boolean } }>('/api/workbench-runs/create', async (request, reply) => {
+    try {
+      const { sourceId, goal, documentationPath, maxIterations, autoCommit } = request.body || {}
+      const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+      if (!source) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+      const result = createWorkbenchRun({ sourceId, goal, documentationPath, maxIterations, autoCommit, autoPush: false, autonomyLevel: 'hands_off_safe' })
+      return reply.header('Cache-Control', 'no-store').send({
+        status: 'ok',
+        created: result.created,
+        verified: true,
+        run: getActiveWorkbenchRun(sourceId)
+      })
+    } catch (err) {
+      return reply.code(409).header('Cache-Control', 'no-store').send({ error: String(err) })
+    }
+  })
+
+  fastify.post<{ Body: { sourceId: string; runId?: string } }>('/api/workbench-runs/resume', async (request, reply) => {
+    try {
+      const { sourceId, runId } = request.body || {}
+      const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+      if (!source) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+      resumeWorkbenchRun({ sourceId, runId })
+      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', resumed: true, verified: true, run: getActiveWorkbenchRun(sourceId) })
+    } catch (err) {
+      return reply.code(409).header('Cache-Control', 'no-store').send({ error: String(err) })
+    }
+  })
+
+  fastify.post<{ Body: { sourceId: string; packet: WorkbenchPacket } }>('/api/workbench-packets/preflight', async (request, reply) => {
+    const { sourceId, packet } = request.body || {}
+    const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+    if (!source) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+    if (!packet || packet.sourceId !== sourceId) {
+      return reply.code(400).send({ error: 'packet.sourceId must match sourceId' })
+    }
+    const result = preflightWorkbenchPacket({ packet, sourceRoot: source.path })
+    if (!result.accepted) {
+      return reply
+        .code(409)
+        .header('Cache-Control', 'no-store')
+        .send({ ...result, verified: false, writesPerformed: false, reservationCreated: false })
+    }
+
+    const reservation = reserveWorkbenchPacket({ packet, exactPaths: result.exactPaths || [] })
+    if (reservation.ok === false) {
+      return reply
+        .code(reservation.code === 'PACKET_STORE_BUSY' ? 503 : 409)
+        .header('Cache-Control', 'no-store')
+        .send({
+          status: 'rejected',
+          accepted: false,
+          verified: false,
+          writesPerformed: false,
+          reservationCreated: false,
+          packetId: packet.packetId,
+          runId: packet.runId,
+          sourceId,
+          errors: [{ code: reservation.code, message: reservation.message }]
+        })
+    }
+
+    return reply.header('Cache-Control', 'no-store').send({
+      ...result,
+      status: 'queued',
+      accepted: true,
+      verified: true,
+      writesPerformed: false,
+      reservationCreated: reservation.created,
+      packetStatus: reservation.record.status,
+      reservedAt: reservation.record.reservedAt
+    })
+  })
+
+  fastify.post<{ Body: { sourceId?: string; runId?: string; limit?: number; leaseMs?: number } }>('/api/workbench-packets/drain', async (request, reply) => {
+    const { sourceId, runId, limit, leaseMs } = request.body || {}
+    const result = drainQueuedWorkbenchPackets({
+      sourceId,
+      runId,
+      limit,
+      leaseMs,
+      sourceRootFor: requestedSourceId => getSourcesSafe().find(source => source.id === requestedSourceId && source.enabled)?.path
+    })
+    return reply
+      .code(result.status === 'already_running' ? 409 : 200)
+      .header('Cache-Control', 'no-store')
+      .send({ ...result, writesPerformed: false })
+  })
+
+  fastify.post<{ Body: { sourceId: string; packetId: string; leaseMs?: number } }>('/api/workbench-packets/submit-async', async (request, reply) => {
+    const { sourceId, packetId, leaseMs } = request.body || {}
+    const result = scheduleWorkbenchPacket({
+      sourceId,
+      packetId,
+      leaseMs,
+      sourceRootFor: requestedSourceId => getSourcesSafe().find(source => source.id === requestedSourceId && source.enabled)?.path
+    })
+    return reply
+      .code(result.status === 'rejected' ? 409 : 202)
+      .header('Cache-Control', 'no-store')
+      .send({ ...result, writesPerformed: false })
+  })
+
+  fastify.post<{ Body: { sourceId: string; packetId: string } }>('/api/workbench-packets/status', async (request, reply) => {
+    const { sourceId, packetId } = request.body || {}
+    const record = getWorkbenchPacketRecord(packetId)
+    if (!record || record.packet.sourceId !== sourceId) {
+      return reply.code(404).header('Cache-Control', 'no-store').send({
+        status: 'not_found',
+        packetId,
+        sourceId,
+        writesPerformed: false
+      })
+    }
+    const compactResult = getWorkbenchPacketResult(packetId)
+    const events = listAgentEvents({ jobId: record.packet.runId, limit: 8 }).events
+      .filter(event => event.message.includes(packetId))
+      .slice(0, 5)
+      .map(event => ({
+        type: event.type,
+        status: event.status,
+        message: event.message,
+        createdAt: event.createdAt
+      }))
+    return reply.header('Cache-Control', 'no-store').send({
+      status: record.status,
+      packetId,
+      runId: record.packet.runId,
+      sourceId,
+      taskId: record.packet.taskId,
+      exactPaths: record.exactPaths,
+      reservedAt: record.reservedAt,
+      startedAt: record.startedAt,
+      updatedAt: record.updatedAt,
+      completedAt: record.completedAt,
+      failedAt: record.failedAt,
+      cancelledAt: record.cancelledAt,
+      failureReason: record.failureReason,
+      commitHash: record.commitHash,
+      claimAttempt: record.claimAttempt,
+      leaseOwner: record.leaseOwner,
+      leaseExpiresAt: record.leaseExpiresAt,
+      result: compactResult,
+      events,
+      writesPerformed: false
+    })
+  })
+
+  fastify.post<{ Body: { workerId: string; sourceId?: string; runId?: string; leaseMs?: number } }>('/api/workbench-packets/claim', async (request, reply) => {
+    const result = claimNextWorkbenchPacket(request.body || { workerId: '' })
+    return reply
+      .code(result.ok === true ? 200 : result.code === 'PACKET_STORE_BUSY' ? 503 : 409)
+      .header('Cache-Control', 'no-store')
+      .send(result.ok
+        ? { status: 'running', claimed: result.claimed, record: result.record, writesPerformed: false }
+        : { status: 'rejected', ...result, writesPerformed: false })
+  })
+
+  fastify.post<{ Body: { sourceId: string; packetId: string; leaseToken: string } }>('/api/workbench-packets/plan', async (request, reply) => {
+    const { sourceId, packetId, leaseToken } = request.body || {}
+    const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+    if (!source) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+    const result = planWorkbenchPacketExecution({ packetId, leaseToken, sourceId, sourceRoot: source.path })
+    return reply
+      .code(result.ready ? 200 : 409)
+      .header('Cache-Control', 'no-store')
+      .send(result)
+  })
+
+  fastify.post<{ Body: { sourceId: string; packetId: string; leaseToken: string } }>('/api/workbench-packets/execute', async (request, reply) => {
+    const { sourceId, packetId, leaseToken } = request.body || {}
+    const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+    if (!source) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+    const result = await executeWorkbenchPacket({ packetId, leaseToken, sourceId, sourceRoot: source.path })
+    return reply
+      .code(result.status === 'completed' ? 200 : result.status === 'rejected' ? 409 : 500)
+      .header('Cache-Control', 'no-store')
+      .send(result)
+  })
+
+  fastify.post<{ Body: { packetId: string; leaseToken: string; leaseMs?: number } }>('/api/workbench-packets/renew', async (request, reply) => {
+    const result = renewWorkbenchPacketLease(request.body || { packetId: '', leaseToken: '' })
+    return reply
+      .code(result.ok === true ? 200 : result.code === 'PACKET_STORE_BUSY' ? 503 : 409)
+      .header('Cache-Control', 'no-store')
+      .send(result.ok
+        ? { status: 'running', renewed: true, record: result.record, writesPerformed: false }
+        : { status: 'rejected', ...result, writesPerformed: false })
+  })
+
+  fastify.post<{ Body: { packetId: string; leaseToken: string; requeue?: boolean } }>('/api/workbench-packets/release', async (request, reply) => {
+    const result = releaseWorkbenchPacketLease(request.body || { packetId: '', leaseToken: '' })
+    return reply
+      .code(result.ok === true ? 200 : result.code === 'PACKET_STORE_BUSY' ? 503 : 409)
+      .header('Cache-Control', 'no-store')
+      .send(result.ok
+        ? { status: result.record.status, released: true, record: result.record, writesPerformed: false }
+        : { status: 'rejected', ...result, writesPerformed: false })
+  })
+
+  fastify.post('/api/workbench-packets/recover-stale', async (_request, reply) => {
+    const result = recoverStaleWorkbenchPacketLeases()
+    return reply.header('Cache-Control', 'no-store').send({ status: 'ok', ...result, writesPerformed: false })
   })
 
   // Read endpoint (multi-source aware with guardrails)

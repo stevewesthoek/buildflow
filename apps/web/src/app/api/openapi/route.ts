@@ -7,7 +7,7 @@ const openapi = {
   info: {
     title: 'ProChat Workbench API',
     version: '4.0.0',
-    description: 'ProChat Workbench actions powered by the BuildFlow engine. Each action is bounded by a short BuildFlow deadline and returns structured JSON before platform timeouts.'
+    description: 'ProChat Workbench connects ChatGPT to guarded local project tools. Each action is bounded by a short Workbench deadline and returns compact structured JSON before platform timeouts.'
   },
   servers: [
     {
@@ -25,7 +25,7 @@ const openapi = {
     '/api/actions/status': {
       get: {
         operationId: 'getWorkbenchStatus',
-        summary: 'Fast status check with a 4s BuildFlow deadline',
+        summary: 'Fast status check with a 4s Workbench deadline',
         description: 'Compact health check with connection state, optional sources/context, runtime stats, and freshness metadata. Use first to lock sourceId, then call read-context for repo details. Returns unavailable guidance if local services are disconnected.',
         'x-openai-isConsequential': false,
         security: [bearer],
@@ -43,7 +43,7 @@ const openapi = {
     '/api/actions/read-context': {
       post: {
         operationId: 'readWorkbenchContext',
-        summary: 'Bounded repo context read with an 8s BuildFlow deadline',
+        summary: 'Bounded repo context read with an 8s Workbench deadline',
         description: 'Fast exact reads and cached Graphify navigation. Unknown areas should call graph_context first, then exact read. Known paths/symbols should skip graph. Broad scope returns needs_narrower_scope.',
         'x-openai-isConsequential': false,
         security: [bearer],
@@ -55,7 +55,7 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol', 'graph_context'], description: 'Mode determines operation. Use graph_context first for unknown areas, then verify with exact reads. Known paths use read_paths/grep_context/read_range directly. Known symbols use read_symbol.' },
+                  mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol', 'graph_context', 'active_run'], description: 'Mode determines operation. Use active_run to resume source-scoped goal work; graph_context for unknown areas; exact read modes for known paths or symbols.' },
                   sourceId: { type: 'string' },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 5, description: 'At most 5 exact repo-relative paths for GPT use. For read_paths, enforced; for search_and_read, used as filter.' },
                   query: { type: 'string', maxLength: 200, description: 'Concrete task goal or search query. Broad unscoped queries ("all", "repo", "code") fail fast with narrower-mode guidance. For graph_context, ranks cached Graphify navigation hints. For search modes, must be specific (e.g., "function name", "error message pattern").' },
@@ -88,7 +88,7 @@ const openapi = {
     '/api/actions/apply-file-change': {
       post: {
         operationId: 'applyWorkbenchFileChange',
-        summary: 'Guarded file change with an 8s BuildFlow deadline',
+        summary: 'Guarded file change with an 8s Workbench deadline',
         description: 'Apply a single file change (create, overwrite, patch, append, delete, move) with built-in policy validation. Use dryRun=true to test if a write is allowed without modifying the file. Normally completes in <2s. Larger files or confirmation-gated operations may approach 8s.',
         'x-openai-isConsequential': false,
         security: [bearer],
@@ -103,10 +103,74 @@ const openapi = {
                   sourceId: { type: 'string' },
                   changeType: {
                     type: 'string',
-                    enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move'],
-                    description: 'create=new file; overwrite=replace full content; patch=find+replace snippet; append=add to end; delete_file=remove; move=rename/relocate'
+                    enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move', 'create_run', 'resume_run', 'packet_preflight', 'packet_plan', 'packet_execute'],
+                    description: 'File operations, run controls, packet preflight/planning, or lease-guarded packet_execute with rollback.'
                   },
-                  path: { type: 'string', description: 'Repo-relative path, e.g. src/lib/utils.ts' },
+                  path: { type: 'string', description: 'Repo-relative path for file operations.' },
+                  goal: { type: 'string', maxLength: 3000, description: 'Goal for create_run.' },
+                  runId: { type: 'string', description: 'Optional run ID for resume_run; otherwise resumes the source active run.' },
+                  packetId: { type: 'string', description: 'Reserved running packet ID for packet_plan.' },
+                  leaseToken: { type: 'string', description: 'Current execution lease token required for packet_plan.' },
+                  documentationPath: { type: 'string', description: 'Optional repo-relative handoff path for create_run.' },
+                  maxIterations: { type: 'integer', minimum: 1, maximum: 40, description: 'Maximum bounded run iterations.' },
+                  autoCommit: { type: 'boolean', description: 'Whether validated run work may auto-commit when policy allows.' },
+                  packet: {
+                    type: 'object',
+                    additionalProperties: false,
+                    description: 'Deterministic packet for packet_preflight. Full preflight rejects all errors before any write.',
+                    properties: {
+                      version: { type: 'integer', enum: [1] },
+                      runId: { type: 'string' },
+                      packetId: { type: 'string', minLength: 8, maxLength: 160 },
+                      idempotencyKey: { type: 'string', minLength: 8, maxLength: 160, description: 'Must equal runId:packetId.' },
+                      sourceId: { type: 'string' },
+                      taskId: { type: 'string' },
+                      goalSummary: { type: 'string', maxLength: 500 },
+                      expectedHead: { type: 'string', minLength: 7, maxLength: 64 },
+                      createdAt: { type: 'string' },
+                      steps: {
+                        type: 'array', minItems: 1, maxItems: 5,
+                        items: {
+                          type: 'object', additionalProperties: false,
+                          properties: {
+                            type: { type: 'string', enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move'] },
+                            path: { type: 'string' },
+                            to: { type: 'string' },
+                            content: { type: 'string' },
+                            find: { type: 'string' },
+                            replace: { type: 'string' }
+                          },
+                          required: ['type', 'path']
+                        }
+                      },
+                      validation: {
+                        type: 'array', maxItems: 3,
+                        items: {
+                          type: 'object', additionalProperties: false,
+                          properties: {
+                            commandKind: { type: 'string', enum: ['type_check_web', 'type_check_cli', 'validate_json_files', 'security_scan_paths', 'run_package_script', 'run_package_test', 'run_package_test_marker'] },
+                            timeoutMs: { type: 'integer', minimum: 1000, maximum: 300000 },
+                            paths: { type: 'array', items: { type: 'string' }, maxItems: 50 },
+                            packageDir: { type: 'string' },
+                            scriptName: { type: 'string' },
+                            marker: { type: 'string' },
+                            patternSet: { type: 'string', enum: ['forbidden_runtime_execution', 'forbidden_secret_material', 'forbidden_upload_network', 'forbidden_all_high_risk'] }
+                          },
+                          required: ['commandKind']
+                        }
+                      },
+                      commit: {
+                        type: 'object', additionalProperties: false,
+                        properties: {
+                          enabled: { type: 'boolean' },
+                          message: { type: 'string', maxLength: 200 },
+                          body: { type: 'string', maxLength: 2000 }
+                        },
+                        required: ['enabled']
+                      }
+                    },
+                    required: ['version', 'runId', 'packetId', 'idempotencyKey', 'sourceId', 'taskId', 'goalSummary', 'expectedHead', 'steps', 'createdAt']
+                  },
                   content: { type: 'string', description: 'Full file content for create/overwrite, appended text for append' },
                   find: { type: 'string', description: 'Exact string to find for patch changeType' },
                   replace: { type: 'string', description: 'Replacement string for patch changeType' },
@@ -117,7 +181,7 @@ const openapi = {
                   confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated file changes.' },
                   dryRun: { type: 'boolean', description: 'If true, validates the write policy without writing. Use to check if a path is allowed before writing.' }
                 },
-                required: ['sourceId', 'changeType', 'path']
+                required: ['sourceId', 'changeType']
               }
             }
           }
@@ -167,8 +231,8 @@ const openapi = {
     '/api/actions/run-command': {
       post: {
         operationId: 'runWorkbenchCommand',
-        summary: 'Run fast allowlisted command with a 12s GPT cap',
-        description: 'Run only fast allowlisted commands (type-check, git-commands, validate-json, security-scan, test with marker). Commands are killed at 12s deadline. Output is truncated to ~8 KB. Large tests or type-checks should run in a separate follow-up prompt.',
+        summary: 'Run or track allowlisted command with a 12s GPT cap',
+        description: 'Run fast allowlisted commands synchronously, or submit/check a persisted allowlisted validation job that continues outside the GPT request. Status checks reuse the same job ID and never start a duplicate command.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -182,8 +246,30 @@ const openapi = {
                   sourceId: { type: 'string' },
                   commandKind: {
                     type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance']
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance', 'run_exact_command']
                   },
+                  validationJobOperation: { type: 'string', enum: ['submit', 'status'], description: 'Submit an allowlisted persisted validation job or check an existing job without resubmitting it.' },
+                  validationJobId: { type: 'string', description: 'Stable persisted validation job ID returned by submit and reused for status checks.' },
+                  idempotencyKey: { type: 'string', maxLength: 200, description: 'Stable submission key. Reusing it returns the same job; conflicting commands are rejected.' },
+                  runId: { type: 'string', description: 'Optional persistent Workbench run linked to the validation job.' },
+                  packetId: { type: 'string', description: 'Optional Workbench packet linked to the validation job.' },
+                  taskId: { type: 'string', description: 'Optional persistent run task linked to the validation job.' },
+                  executable: { type: 'string', enum: ['node', 'pnpm'], description: 'Allowlisted executable for run_exact_command.' },
+                  args: { type: 'array', items: { type: 'string' }, description: 'Exact argument array for run_exact_command. Raw shell strings are not accepted.' },
+                  nodeVersion: { type: 'string', enum: ['20'], description: 'Require execution under an installed Node 20 runtime.' },
+                  policy: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      denyDatabaseCommands: { type: 'boolean' },
+                      denyMigrationCommands: { type: 'boolean' },
+                      denyDeploymentCommands: { type: 'boolean' },
+                      denyNetworkCommands: { type: 'boolean' }
+                    }
+                  },
+                  protectedPaths: { type: 'array', items: { type: 'string' }, description: 'Repository-relative paths that must not change during execution.' },
+                  requiredBranch: { type: 'string', description: 'Exact branch required before command execution. BuildFlow never switches branches automatically.' },
+                  networkAccess: { type: 'boolean', enum: [false], description: 'Validation commands default to no network access where platform enforcement is available.' },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 50 },
                   message: { type: 'string' },
                   body: { type: 'string' },
@@ -230,7 +316,7 @@ const createWorkbenchSchema = (origin: string) => {
   schema.info = {
     ...schema.info,
     title: 'ProChat Workbench API',
-    description: 'ProChat Workbench actions powered by the BuildFlow engine. Each action is bounded by a short BuildFlow deadline and returns structured JSON before platform timeouts.'
+    description: 'ProChat Workbench connects ChatGPT to guarded local project tools. Each action is bounded by a short Workbench deadline and returns compact structured JSON before platform timeouts.'
   }
   schema.servers = [{ url: origin, description: 'ProChat Workbench' }]
 

@@ -1124,18 +1124,28 @@ const SAFE_COMMAND_KINDS = new Set([
   'security_scan_paths',
   'diagnose_performance',
   'local_cli_github_auth_status',
-  'local_cli_github_repo_view'
+  'local_cli_github_repo_view',
+  'run_exact_command'
 ])
 
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
 export async function dispatchWorkbenchCommand(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
   const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
   const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''
+  const validationJobOperation = body.validationJobOperation === 'submit' || body.validationJobOperation === 'status'
+    ? body.validationJobOperation
+    : undefined
   if (!sourceId) throw new Error('sourceId is required')
   if (!SAFE_COMMAND_KINDS.has(commandKind)) throw new Error('commandKind is not allowlisted')
   const result = await executeAction('/api/commands/run', {
     sourceId,
     commandKind,
+    validationJobOperation,
+    validationJobId: typeof body.validationJobId === 'string' ? body.validationJobId : undefined,
+    idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
+    runId: typeof body.runId === 'string' ? body.runId : undefined,
+    packetId: typeof body.packetId === 'string' ? body.packetId : undefined,
+    taskId: typeof body.taskId === 'string' ? body.taskId : undefined,
     timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
     paths: Array.isArray(body.paths) ? body.paths : undefined,
     packageDir: typeof body.packageDir === 'string' ? body.packageDir : undefined,
@@ -1146,28 +1156,51 @@ export async function dispatchWorkbenchCommand(body: Record<string, unknown>, us
     remote: typeof body.remote === 'string' ? body.remote : undefined,
     branch: typeof body.branch === 'string' ? body.branch : undefined,
     patternSet: typeof body.patternSet === 'string' ? body.patternSet : undefined,
+    executable: body.executable === 'node' || body.executable === 'pnpm' ? body.executable : undefined,
+    args: Array.isArray(body.args) ? body.args.filter((item: unknown): item is string => typeof item === 'string') : undefined,
+    nodeVersion: body.nodeVersion === '20' ? '20' : undefined,
+    policy: typeof body.policy === 'object' && body.policy !== null ? body.policy : undefined,
+    protectedPaths: Array.isArray(body.protectedPaths) ? body.protectedPaths.filter((item: unknown): item is string => typeof item === 'string') : undefined,
+    requiredBranch: typeof body.requiredBranch === 'string' ? body.requiredBranch : undefined,
+    networkAccess: body.networkAccess === false ? false : undefined,
     confirmedByUser: typeof body.confirmedByUser === 'boolean' ? body.confirmedByUser : undefined,
     confirmationToken: typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
   }, userToken, transportOptions)
-  const status = typeof (result as Record<string, unknown>).status === 'string' ? (result as Record<string, unknown>).status : 'failed'
-  const exitCode = typeof (result as Record<string, unknown>).exitCode === 'number' ? (result as Record<string, unknown>).exitCode : null
-  const outputTruncated = (result as Record<string, unknown>).outputTruncated === true
-  return withActivity(result as Record<string, unknown>, makeActivity({
+  const resultRecord = result as Record<string, unknown>
+  const status = typeof resultRecord.status === 'string' ? resultRecord.status : 'failed'
+  const job = resultRecord.job && typeof resultRecord.job === 'object' ? resultRecord.job as Record<string, unknown> : undefined
+  const jobId = typeof job?.jobId === 'string' ? job.jobId : undefined
+  const isActiveValidationJob = validationJobOperation !== undefined && (status === 'queued' || status === 'running')
+  const exitCode = typeof resultRecord.exitCode === 'number'
+    ? resultRecord.exitCode
+    : typeof job?.exitCode === 'number' ? job.exitCode : null
+  const outputTruncated = resultRecord.outputTruncated === true || job?.outputTruncated === true
+  return withActivity(resultRecord, makeActivity({
     operationId: 'runWorkbenchCommand',
-    phase: status === 'completed' ? 'completed' : 'failed',
-    actionLabel: 'Ran safe validation command',
-    userMessage: `Workbench ran ${commandKind} in ${sourceId} and finished with ${status}${exitCode !== null ? ` (exit ${exitCode})` : ''}.`,
+    phase: isActiveValidationJob ? 'verifying' : status === 'completed' ? 'completed' : 'failed',
+    actionLabel: isActiveValidationJob ? 'Tracked long-running validation' : 'Ran safe validation command',
+    userMessage: isActiveValidationJob
+      ? `Workbench validation job ${jobId || 'unknown'} is ${status} in ${sourceId}.`
+      : `Workbench ran ${commandKind} in ${sourceId} and finished with ${status}${exitCode !== null ? ` (exit ${exitCode})` : ''}.`,
     sourceId,
     riskLevel: 'medium',
     requiresConfirmation: false,
     verified: status === 'completed',
     provenFacts: compactList([
       `Command kind: ${commandKind}`,
+      validationJobOperation ? `Validation job operation: ${validationJobOperation}` : undefined,
+      jobId ? `Validation job ID: ${jobId}` : undefined,
       `Status: ${status}`,
       exitCode !== null ? `Exit code: ${exitCode}` : undefined,
       outputTruncated ? 'Output was truncated.' : undefined
     ]),
-    nextStep: status === 'completed' ? 'Use the command result as validation evidence.' : 'Inspect stderr/stdout and decide the next repair step.'
+    whatRemains: isActiveValidationJob ? ['The persisted validation job has not reached a terminal result.'] : undefined,
+    nextActions: isActiveValidationJob && jobId
+      ? [`Check validation job ${jobId} with validationJobOperation status; do not submit a duplicate build.`]
+      : undefined,
+    nextStep: isActiveValidationJob
+      ? 'Wait for the persisted validation to finish, then check the same job ID.'
+      : status === 'completed' ? 'Use the command result as validation evidence.' : 'Inspect stderr/stdout and decide the next repair step.'
   }))
 }
 
@@ -1300,6 +1333,108 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
   if (sourceError) return sourceError
 
   const changeType = body.changeType
+
+  if (changeType === 'create_run') {
+    const result = await executeAction('/api/workbench-runs/create', {
+      sourceId: body.sourceId,
+      goal: body.goal,
+      documentationPath: body.documentationPath,
+      maxIterations: body.maxIterations,
+      autoCommit: body.autoCommit
+    }, userToken, transportOptions)
+    const run = (result as { run?: { id?: string; activeTask?: { title?: string } } }).run
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'applyWorkbenchFileChange',
+      phase: 'planning',
+      actionLabel: 'Created Workbench run',
+      userMessage: run?.id ? `Workbench prepared run ${run.id}.` : 'Workbench returned the existing active run.',
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      nextStep: run?.activeTask?.title ? `Continue active task: ${run.activeTask.title}.` : 'Read active_run and continue the persisted goal.'
+    }))
+  }
+
+  if (changeType === 'resume_run') {
+    const result = await executeAction('/api/workbench-runs/resume', {
+      sourceId: body.sourceId,
+      runId: body.runId
+    }, userToken, transportOptions)
+    const run = (result as { run?: { id?: string; activeTask?: { title?: string } } }).run
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'applyWorkbenchFileChange',
+      phase: 'planning',
+      actionLabel: 'Resumed Workbench run',
+      userMessage: run?.id ? `Workbench resumed run ${run.id}.` : 'Workbench resumed the active run.',
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: true,
+      nextStep: run?.activeTask?.title ? `Continue active task: ${run.activeTask.title}.` : 'Continue from the persisted resume state.'
+    }))
+  }
+
+  if (changeType === 'packet_preflight') {
+    const result = await executeAction('/api/workbench-packets/preflight', {
+      sourceId: body.sourceId,
+      packet: body.packet
+    }, userToken, transportOptions)
+    const accepted = (result as { accepted?: boolean }).accepted === true
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'applyWorkbenchFileChange',
+      phase: accepted ? 'preflight' : 'blocked',
+      actionLabel: accepted ? 'Preflighted Workbench packet' : 'Rejected Workbench packet',
+      userMessage: accepted ? 'Workbench accepted the packet preflight without writing files.' : 'Workbench rejected the packet before any write.',
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      riskLevel: accepted ? 'low' : 'medium',
+      requiresConfirmation: false,
+      verified: accepted,
+      nextStep: accepted ? 'Review the accepted exact paths before packet execution.' : 'Repair the packet errors and preflight again.'
+    }))
+  }
+
+  if (changeType === 'packet_plan') {
+    const result = await executeAction('/api/workbench-packets/plan', {
+      sourceId: body.sourceId,
+      packetId: body.packetId,
+      leaseToken: body.leaseToken
+    }, userToken, transportOptions)
+    const ready = (result as { ready?: boolean }).ready === true
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'applyWorkbenchFileChange',
+      phase: ready ? 'preflight' : 'blocked',
+      actionLabel: ready ? 'Planned Workbench packet execution' : 'Rejected Workbench packet plan',
+      userMessage: ready ? 'Workbench produced a deterministic execution plan without writing files.' : 'Workbench rejected the execution plan before any write.',
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      riskLevel: ready ? 'low' : 'medium',
+      requiresConfirmation: false,
+      verified: ready,
+      nextStep: ready ? 'Review the plan hash, exact paths, and operations before execution.' : 'Repair the lease, HEAD, or policy error and plan again.'
+    }))
+  }
+
+  if (changeType === 'packet_execute') {
+    const result = await executeAction('/api/workbench-packets/execute', {
+      sourceId: body.sourceId,
+      packetId: body.packetId,
+      leaseToken: body.leaseToken
+    }, userToken, transportOptions)
+    const completed = (result as { status?: string }).status === 'completed'
+    const rolledBack = (result as { rolledBack?: boolean }).rolledBack === true
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'applyWorkbenchFileChange',
+      phase: completed ? 'completed' : 'failed',
+      actionLabel: completed ? 'Executed Workbench packet' : rolledBack ? 'Rolled back failed Workbench packet' : 'Workbench packet execution failed',
+      userMessage: completed ? 'Workbench executed and verified the leased packet.' : rolledBack ? 'Workbench stopped on failure and restored the packet paths.' : 'Workbench stopped packet execution after a failure.',
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      riskLevel: completed ? 'medium' : 'high',
+      requiresConfirmation: false,
+      verified: completed || rolledBack,
+      nextStep: completed ? 'Read active_run to continue with the next task.' : 'Inspect the execution errors before retrying.'
+    }))
+  }
+
   const payload: Record<string, unknown> = {
     sourceId: body.sourceId,
     path: typeof body.path === 'string' ? body.path : body.from,

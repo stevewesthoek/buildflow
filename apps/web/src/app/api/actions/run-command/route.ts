@@ -80,9 +80,23 @@ export async function POST(request: NextRequest) {
             'Inspect partial stdout/stderr before retrying.'
           ]
         },
+        sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
         commandKind,
+        executable: clean.executable,
+        args: clean.args,
+        packageDir: clean.packageDir,
+        requiredBranch: clean.requiredBranch,
+        actualBranch: clean.actualBranch,
+        runtime: clean.runtime,
+        changedPaths: clean.changedPaths,
+        protectedPathsChanged: clean.protectedPathsChanged,
+        riskLevel: clean.riskLevel,
+        requiresConfirmation: clean.requiresConfirmation,
+        signal: clean.signal,
+        durationMs: clean.durationMs,
         elapsedMs: clean.durationMs,
         timeoutMs,
+        outputTruncated: clean.outputTruncated,
         stdout: clean.stdout,
         stderr: clean.stderr,
         exitCode: clean.exitCode,
@@ -97,15 +111,32 @@ export async function POST(request: NextRequest) {
       }, { headers: { 'Cache-Control': 'no-store' } })
     }
 
+    const job = clean.job && typeof clean.job === 'object' ? clean.job as Record<string, unknown> : undefined
+    const resolvedExitCode = typeof clean.exitCode === 'number'
+      ? clean.exitCode
+      : typeof job?.exitCode === 'number' ? job.exitCode : null
+    const resolvedStdout = typeof clean.stdout === 'string'
+      ? clean.stdout
+      : typeof job?.stdoutTail === 'string' ? job.stdoutTail : undefined
+    const resolvedStderr = typeof clean.stderr === 'string'
+      ? clean.stderr
+      : typeof job?.stderrTail === 'string' ? job.stderrTail : ''
+    const resolvedOutputTruncated = typeof clean.outputTruncated === 'boolean'
+      ? clean.outputTruncated
+      : typeof job?.outputTruncated === 'boolean' ? job.outputTruncated : undefined
+
     return NextResponse.json({
-      ok: clean.exitCode === 0 && clean.status !== 'failed',
+      ok: clean.status === 'completed' && resolvedExitCode === 0,
       status: clean.status,
       commandKind,
-      stdout: clean.stdout,
-      stderr: clean.stderr,
-      exitCode: clean.exitCode,
-      durationMs: clean.durationMs,
-      outputTruncated: clean.outputTruncated,
+      stdout: resolvedStdout,
+      stderr: resolvedStderr,
+      exitCode: resolvedExitCode,
+      durationMs: clean.durationMs ?? job?.durationMs,
+      outputTruncated: resolvedOutputTruncated,
+      changedPaths: clean.changedPaths ?? job?.changedPaths,
+      terminatedByInfrastructure: clean.terminatedByInfrastructure ?? job?.terminatedByInfrastructure,
+      terminationReason: clean.terminationReason ?? job?.terminationReason ?? null,
       activity: clean.activity
     })
   }).catch((err) => {

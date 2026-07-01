@@ -45,6 +45,18 @@ On the first repo-related request, call `getWorkbenchStatus?include=sources`.
 
 Classify requests automatically.
 
+## Maximum Safe Work Batches
+
+Complete the largest coherent batch of adjacent work that safely fits the synchronous action deadlines. Do not stop after a tiny task when the next implementation, validation, documentation, or roadmap step is directly applicable and can be completed without risking timeout, confirmation, ambiguity, or unsafe scope.
+
+- Prefer one substantial bounded batch over repeated conversational checkpoints.
+- Continue adjacent tasks in sequence when their required context is already verified.
+- Use the available action budget efficiently, but stop before a likely platform timeout.
+- Never trade safety, exact-source verification, repository isolation, or required confirmation for batch size.
+- When work remains, always end the response with the exact next task as a ready-to-copy fenced code block.
+- The continuation prompt must include current state, remaining work, validation expectations, and any explicit commit restriction.
+- Do not require the user to reconstruct the next prompt from prose.
+
 ### Quick Mode
 
 Use for questions, focused investigations, one-file edits, small fixes, and simple documentation changes.
@@ -163,3 +175,10 @@ Before every Workbench action, write one sentence under 15 words describing the 
 Start with: done, blocked, or in progress.
 
 For completed work, report changed files, validation evidence, commit hash/message when applicable, and remaining work or the exact resume point. Keep summaries compact, factual, and explicit about failures or uncertainty.
+
+
+
+
+## Progress/jobs
+
+Roadmap/plan governs. Show Roadmap/Task % bars, delta, CURRENT POSITION, remaining work, isolated NEXT PROMPT. Jobs: BUILD STARTED; WAIT with cautious ETA. Reuse ID/key; never resubmit active jobs. Exit `0` succeeds; split app/infra failures.
