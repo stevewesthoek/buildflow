@@ -1376,6 +1376,26 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
     }))
   }
 
+  if (changeType === 'close_run') {
+    const result = await executeAction('/api/workbench-runs/close', {
+      sourceId: body.sourceId,
+      runId: body.runId,
+      summary: body.summary
+    }, userToken, transportOptions)
+    const run = (result as { run?: { id?: string; status?: string } }).run
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'applyWorkbenchFileChange',
+      phase: 'completed',
+      actionLabel: 'Closed Workbench run',
+      userMessage: run?.id ? `Workbench closed run ${run.id} as ${run.status || 'completed'}.` : 'Workbench closed the requested run.',
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      riskLevel: 'low',
+      requiresConfirmation: false,
+      verified: run?.status === 'completed',
+      nextStep: 'The persisted Workbench run is closed.'
+    }))
+  }
+
   if (changeType === 'packet_preflight') {
     const result = await executeAction('/api/workbench-packets/preflight', {
       sourceId: body.sourceId,

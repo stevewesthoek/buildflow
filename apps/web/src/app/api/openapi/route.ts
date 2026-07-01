@@ -103,12 +103,13 @@ const openapi = {
                   sourceId: { type: 'string' },
                   changeType: {
                     type: 'string',
-                    enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move', 'create_run', 'resume_run', 'packet_preflight', 'packet_plan', 'packet_execute'],
-                    description: 'File operations, run controls, packet preflight/planning, or lease-guarded packet_execute with rollback.'
+                    enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move', 'create_run', 'resume_run', 'close_run', 'packet_preflight', 'packet_plan', 'packet_execute'],
+                    description: 'File operations, run controls including close_run, packet preflight/planning, or lease-guarded packet_execute with rollback.'
                   },
                   path: { type: 'string', description: 'Repo-relative path for file operations.' },
                   goal: { type: 'string', maxLength: 3000, description: 'Goal for create_run.' },
-                  runId: { type: 'string', description: 'Optional run ID for resume_run; otherwise resumes the source active run.' },
+                  runId: { type: 'string', description: 'Run ID for resume_run or close_run; otherwise resume_run uses the source active run.' },
+                  summary: { type: 'string', maxLength: 1000, description: 'Required completion summary for close_run.' },
                   packetId: { type: 'string', description: 'Reserved running packet ID for packet_plan.' },
                   leaseToken: { type: 'string', description: 'Current execution lease token required for packet_plan.' },
                   documentationPath: { type: 'string', description: 'Optional repo-relative handoff path for create_run.' },

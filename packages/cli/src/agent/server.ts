@@ -740,6 +740,19 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
+  fastify.post<{ Body: { sourceId: string; runId: string; summary: string } }>('/api/workbench-runs/close', async (request, reply) => {
+    try {
+      const { sourceId, runId, summary } = request.body || {}
+      const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+      if (!source) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+      const { closeWorkbenchRun } = await import('./workbench-run-close')
+      const run = closeWorkbenchRun({ sourceId, runId, summary })
+      return reply.header('Cache-Control', 'no-store').send({ status: 'ok', closed: true, verified: true, run })
+    } catch (err) {
+      return reply.code(409).header('Cache-Control', 'no-store').send({ error: String(err) })
+    }
+  })
+
   fastify.post<{ Body: { sourceId: string; packet: WorkbenchPacket } }>('/api/workbench-packets/preflight', async (request, reply) => {
     const { sourceId, packet } = request.body || {}
     const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
