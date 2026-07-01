@@ -3,7 +3,7 @@
 set -e
 
 DEMO_VAULT="/tmp/buildflow-demo"
-REPO_ROOT="/Users/Office/Repos/stevewesthoek/buildflow"
+REPO_ROOT="/Users/Office/Repos/prochattools/saas/prochat-workbench"
 
 echo ""
 echo "╔════════════════════════════════════════╗"
