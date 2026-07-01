@@ -1,5 +1,7 @@
 import fs from 'fs'
 import path from 'path'
+import crypto from 'crypto'
+import { execFileSync } from 'child_process'
 import { getConfigPath, expandTilde } from '../utils/paths'
 import type { Workspace, KnowledgeSource, ActiveSourcesMode, WriteMode, DiscoveredRepository, SourceDiscoverySettings } from '@workbench/shared'
 import { getIndexRecord, upsertIndexState, type SourceIndexStatus } from './index-state'
@@ -11,6 +13,7 @@ export const MAX_AUTO_INDEX_INTERVAL_MINUTES = 60
 export const DEFAULT_REPO_DISCOVERY_INTERVAL_MINUTES = 30
 export const MIN_REPO_DISCOVERY_INTERVAL_MINUTES = 10
 export const MAX_REPO_DISCOVERY_INTERVAL_MINUTES = 60
+const GIT_METADATA_TIMEOUT_MS = 1500
 
 export function normalizeAutoIndexIntervalMinutes(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value)
@@ -19,11 +22,12 @@ export function normalizeAutoIndexIntervalMinutes(value: unknown): number {
 }
 
 export function withSourceDefaults(source: KnowledgeSource): KnowledgeSource {
-  return {
+  const withDefaults = {
     ...source,
     autoIndexEnabled: typeof source.autoIndexEnabled === 'boolean' ? source.autoIndexEnabled : DEFAULT_AUTO_INDEX_ENABLED,
     autoIndexIntervalMinutes: normalizeAutoIndexIntervalMinutes(source.autoIndexIntervalMinutes)
   }
+  return withSourceGitMetadata(withDefaults)
 }
 
 export interface AgentConfig {
@@ -39,6 +43,7 @@ export interface AgentConfig {
   writeMode?: WriteMode
   localPort?: number
   sourceDiscovery?: SourceDiscoverySettings
+  autoCommitSourceIds?: string[]
   mode: 'read_create_append'
   allowedExtensions: string[]
   ignorePatterns: string[]
@@ -130,6 +135,100 @@ function getAllConfiguredSources(config: AgentConfig): KnowledgeSource[] {
   }))
 }
 
+function runGit(sourcePath: string, args: string[]): string | undefined {
+  try {
+    return execFileSync('git', ['-C', sourcePath, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: GIT_METADATA_TIMEOUT_MS
+    }).trim()
+  } catch {
+    return undefined
+  }
+}
+
+function resolveGitPath(sourcePath: string, gitPath: string | undefined): string | undefined {
+  if (!gitPath) return undefined
+  const resolved = path.isAbsolute(gitPath) ? gitPath : path.resolve(sourcePath, gitPath)
+  try {
+    return fs.realpathSync(resolved)
+  } catch {
+    return path.resolve(resolved)
+  }
+}
+
+function hashRepoGroupId(commonDir: string): string {
+  return `git:${crypto.createHash('sha1').update(commonDir).digest('hex').slice(0, 16)}`
+}
+
+function getGitSourceMetadata(sourcePath: string): Pick<KnowledgeSource, 'repoGroupId' | 'repoRoot' | 'branchName' | 'availableBranches' | 'isGitWorktree'> {
+  const expanded = expandTilde(sourcePath)
+  if (!expanded || !fs.existsSync(expanded)) return {}
+  try {
+    if (!fs.statSync(expanded).isDirectory()) return {}
+  } catch {
+    return {}
+  }
+
+  const insideWorkTree = runGit(expanded, ['rev-parse', '--is-inside-work-tree'])
+  if (insideWorkTree !== 'true') return {}
+
+  const gitDir = resolveGitPath(expanded, runGit(expanded, ['rev-parse', '--git-dir']))
+  const commonDir = resolveGitPath(expanded, runGit(expanded, ['rev-parse', '--git-common-dir']))
+  const repoRoot = resolveGitPath(expanded, runGit(expanded, ['rev-parse', '--show-toplevel']))
+  if (!commonDir || !repoRoot) return {}
+
+  const branchName = runGit(expanded, ['branch', '--show-current']) || runGit(expanded, ['rev-parse', '--short', 'HEAD'])
+  const branchesOutput = runGit(expanded, ['branch', '--format=%(refname:short)'])
+  const availableBranches = branchesOutput
+    ? Array.from(new Set(branchesOutput.split('\n').map(item => item.trim()).filter(Boolean))).slice(0, 200)
+    : undefined
+
+  return {
+    repoGroupId: hashRepoGroupId(commonDir),
+    repoRoot,
+    ...(branchName ? { branchName } : {}),
+    ...(availableBranches && availableBranches.length > 0 ? { availableBranches } : {}),
+    isGitWorktree: Boolean(gitDir && path.resolve(gitDir) !== path.resolve(commonDir))
+  }
+}
+
+function withSourceGitMetadata(source: KnowledgeSource): KnowledgeSource {
+  return {
+    ...source,
+    ...getGitSourceMetadata(source.path)
+  }
+}
+
+function sourceGroupIdsForSelection(sources: KnowledgeSource[], selectedIds: string[]): Set<string> {
+  const selected = new Set(selectedIds)
+  const selectedGroupIds = new Set<string>()
+  for (const source of sources) {
+    if (!selected.has(source.id)) continue
+    if (source.repoGroupId) selectedGroupIds.add(source.repoGroupId)
+  }
+  return selectedGroupIds
+}
+
+function expandSourceIdsToBranchGroups(sources: KnowledgeSource[], selectedIds: string[]): string[] {
+  const selected = new Set(selectedIds)
+  const selectedGroupIds = sourceGroupIdsForSelection(sources, selectedIds)
+  const expanded: string[] = []
+  for (const source of sources) {
+    if (selected.has(source.id) || (source.repoGroupId && selectedGroupIds.has(source.repoGroupId))) {
+      expanded.push(source.id)
+    }
+  }
+  return Array.from(new Set(expanded))
+}
+
+function getRepoGroupSourceIds(sources: KnowledgeSource[], sourceId: string): string[] {
+  const source = sources.find(item => item.id === sourceId)
+  if (!source) return []
+  if (!source.repoGroupId) return [source.id]
+  return sources.filter(item => item.repoGroupId === source.repoGroupId).map(item => item.id)
+}
+
 function getSourceIndexStatus(source: KnowledgeSource): {
   indexed?: boolean
   indexStatus: SourceIndexStatus
@@ -194,8 +293,12 @@ export function reconcileActiveSources(config: AgentConfig): { mode: ActiveSourc
     if (nextActiveIds.length === 0) {
       nextActiveIds = [enabledSources[0].id]
     }
+    nextActiveIds = expandSourceIdsToBranchGroups(enabledSources, nextActiveIds)
+    if (nextActiveIds.length > 1) {
+      nextMode = 'multi'
+    }
   } else {
-    nextActiveIds = filteredActiveIds.slice(0, 10)
+    nextActiveIds = expandSourceIdsToBranchGroups(enabledSources, filteredActiveIds)
     if (nextActiveIds.length === 0) {
       nextMode = 'all'
       nextActiveIds = enabledSources.map(source => source.id)
@@ -275,19 +378,21 @@ export function discoverRepositories(rootPathInput?: string): { settings: Source
     } catch {
       return
     }
-    if (entries.some(entry => entry.isDirectory() && entry.name === '.git')) {
+    if (entries.some(entry => entry.name === '.git' && (entry.isDirectory() || entry.isFile()))) {
       const resolved = path.resolve(current)
       if (!seen.has(resolved)) {
         seen.add(resolved)
         const relativePath = path.relative(rootPath, resolved) || path.basename(resolved)
         const [account = 'Root'] = relativePath.split(path.sep)
         const existing = configuredByPath.get(resolved)
+        const gitMetadata = getGitSourceMetadata(resolved)
         repositories.push({
           path: resolved,
           label: prettifyRepoLabel(path.basename(resolved)),
           id: `${generateSourceIdFromPath(account)}-${generateSourceIdFromPath(resolved)}`,
           account,
           relativePath,
+          ...gitMetadata,
           alreadyAdded: !!existing,
           sourceId: existing?.id
         })
@@ -354,8 +459,10 @@ export function setActiveSourceContext(mode: ActiveSourcesMode, activeSourceIds:
   }
   if (mode === 'single' && uniqueIds.length !== 1) throw new Error('single mode requires exactly one activeSourceId')
   if (mode === 'multi' && uniqueIds.length === 0) throw new Error('multi mode requires one or more activeSourceIds')
-  config.activeSourcesMode = mode
-  config.activeSourceIds = mode === 'all' ? sources.map(s => s.id) : uniqueIds.slice(0, 10)
+  const expandedIds = mode === 'all' ? sources.map(s => s.id) : expandSourceIdsToBranchGroups(sources, uniqueIds)
+  const nextMode = mode === 'single' && expandedIds.length > 1 ? 'multi' : mode
+  config.activeSourcesMode = nextMode
+  config.activeSourceIds = nextMode === 'all' ? sources.map(s => s.id) : expandedIds
   persistConfig(config)
   return reconcileActiveSources(config)
 }
@@ -438,32 +545,36 @@ export function setSourceEnabled(sourceId: string, enabled: boolean): KnowledgeS
   }
 
   const sources = ensureSources(config)
+  const sourceIdsToToggle = getRepoGroupSourceIds(sources, sourceId)
+  const sourceIdSet = new Set(sourceIdsToToggle)
   const nextSources = sources.map(source => {
-    if (source.id !== sourceId) {
+    if (!sourceIdSet.has(source.id)) {
       return source
     }
 
     return withSourceDefaults({ ...source, enabled })
   })
 
-  if (!sources.some(source => source.id === sourceId)) {
+  if (sourceIdsToToggle.length === 0) {
     throw new Error(`Knowledge source not found: ${sourceId}`)
   }
 
   persistSources(config, nextSources)
-  if (enabled) {
-    upsertIndexState(sourceId, {
-      indexed: false,
-      indexStatus: 'pending',
-      indexedFileCount: 0,
-      indexError: undefined
-    })
-  } else {
-    upsertIndexState(sourceId, {
-      indexed: false,
-      indexStatus: 'disabled',
-      indexError: undefined
-    })
+  for (const toggledSourceId of sourceIdsToToggle) {
+    if (enabled) {
+      upsertIndexState(toggledSourceId, {
+        indexed: false,
+        indexStatus: 'pending',
+        indexedFileCount: 0,
+        indexError: undefined
+      })
+    } else {
+      upsertIndexState(toggledSourceId, {
+        indexed: false,
+        indexStatus: 'disabled',
+        indexError: undefined
+      })
+    }
   }
   return reconcileActiveSources(config).sources
 }

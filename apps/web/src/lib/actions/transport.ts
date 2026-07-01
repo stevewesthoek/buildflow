@@ -202,8 +202,9 @@ function normalizeTransportFailure(err: unknown, endpoint: string, options: { ti
         code: 'LOCAL_STACK_TIMEOUT',
         message: 'Workbench local stack timed out.',
         details: `The request to ${endpoint} exceeded ${options.timeoutMs}ms.`,
-        recovery: ['Open OrbStack', 'Run pnpm local:restart', 'Run scripts/buildflow-local-stack.sh status'],
+        recovery: ['Retry the exact bounded read.', 'Use grep_context or read_range if the request remains slow.', 'Run pnpm local:verify only if health checks also fail.'],
         status: 'timeout',
+        connected: true,
         diagnostics
       })
     )

@@ -1,16 +1,18 @@
-# BuildFlow Local public scope
+# ProChat Workbench Local Public Scope
 
-This repo is for BuildFlow Local only.
+This repo is for ProChat Workbench Local only. BuildFlow remains the technical engine and compatibility name inside the local stack.
 
 Allowed in this repo:
 
-- local-first BuildFlow dashboard
+- local-first Workbench dashboard
 - local agent on the user's machine
 - local relay only when needed for local/Custom GPT connectivity
 - user-owned endpoint, tunnel, and domain guidance
 - local source management
+- branch-aware grouping for configured Git checkouts and linked worktrees
 - local indexing, search, and read workflows
-- active source context
+- dashboard active source context
+- explicit `sourceId` Custom GPT actions
 - safe local write policy
 - verified file operations
 - local activity feed
@@ -21,7 +23,7 @@ Allowed in this repo:
 
 Not allowed in this repo:
 
-- BuildFlow Managed planning
+- Workbench Managed planning
 - SaaS roadmap
 - paid, Pro, or commercial feature planning
 - billing, pricing, subscription, or account docs
@@ -32,4 +34,4 @@ Not allowed in this repo:
 - commercial production hosting plans
 - private roadmap or go-to-market strategy
 
-The public repo should stay BuildFlow Local only and should not explain the private product roadmap.
+The public repo should stay Workbench Local only and should not explain the private product roadmap.

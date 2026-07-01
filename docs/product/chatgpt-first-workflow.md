@@ -1,18 +1,19 @@
-# ChatGPT-first BuildFlow workflow
+# ChatGPT-first ProChat Workbench Workflow
 
-BuildFlow should become more ChatGPT-first over time.
+ProChat Workbench should stay ChatGPT-first.
 
-The self-hosted Local product should keep the local repo engine, source indexer, safety policy, verified writes, and fallback dashboard. The main user experience should move as much as possible into ChatGPT through Custom GPT actions, structured action responses, handoff links, and later optional embedded app surfaces outside the public Local repo.
+The self-hosted Local product should keep the BuildFlow engine, source indexer, safety policy, verified writes, and fallback dashboard. The main user experience should stay in ChatGPT through Custom GPT actions, structured action responses, handoff links, and later optional embedded app surfaces outside the public Local repo.
 
 ## Current state
 
-BuildFlow Local already provides:
+Workbench Local already provides:
 
 - user-owned Custom GPT action schema
 - local agent and dashboard
 - source management
 - local indexing and search
-- active source context
+- dashboard active source context
+- branch-aware grouping for configured Git checkouts/worktrees
 - safe write modes
 - dry-run and preflight checks
 - confirmation-gated writes
@@ -24,31 +25,34 @@ BuildFlow Local already provides:
 - dynamic handoff prompts
 - first-run setup checklist
 - auto-index settings per source
+- five GPT-facing Workbench actions with short route deadlines
+- retired Agent Mode routes for stale schemas
 
-The current friction is that users still move between ChatGPT, the BuildFlow dashboard, and terminal tooling for validation or external execution.
+The current friction is that users still move between ChatGPT, the Workbench dashboard, and terminal tooling for validation or external execution.
 
 ## Product direction
 
-BuildFlow Local should treat ChatGPT as the primary workspace.
+Workbench Local should treat ChatGPT as the primary workspace.
 
-The dashboard should stay lean and useful, but it should not become the only place to understand what is happening. Every important BuildFlow operation should return enough structured information for the Custom GPT to render a clean, useful response in ChatGPT.
+The dashboard should stay lean and useful, but it should not become the only place to understand what is happening. Every important Workbench operation should return enough structured information for the Custom GPT to render a clean, useful response in ChatGPT.
 
 The goal is:
 
 ```text
 ChatGPT = primary interface for planning, approval, progress, and results
-BuildFlow Local = local repo connector, safety engine, indexer, logs, and fallback dashboard
+Workbench Local = local repo connector, safety engine, indexer, logs, and fallback dashboard
 ```
 
-## What belongs in self-hosted BuildFlow Local
+## What belongs in self-hosted Workbench Local
 
-Self-hosted BuildFlow Local should remain full-featured for individual builders and local-first workflows.
+Self-hosted Workbench Local should remain full-featured for individual builders and local-first workflows.
 
 It should include:
 
 - local source indexing and search
 - multi-source context
-- active context selection
+- dashboard active context selection
+- branch-aware source management for configured Git worktrees
 - safe write policy
 - dry-run and preflight checks
 - confirmation-required write flows
@@ -64,7 +68,9 @@ It should include:
 - dashboard fallback for source management, settings, logs, plans, and handoffs
 - public docs and contribution flow
 
-BuildFlow Local should not be intentionally crippled. The open-source version should be useful enough to run real work end-to-end on a user's own machine.
+Workbench Local should not be intentionally crippled. The open-source version should be useful enough to run real work end-to-end on a user's own machine.
+
+Custom GPT actions must still use explicit `sourceId` values. Dashboard active context and branch-group activation are convenience features, not implicit GPT scope.
 
 ## What stays out of the public Local repo
 
@@ -86,7 +92,7 @@ If those surfaces are pursued, document and build them in the separate private r
 
 ### Phase 1: Structured action responses
 
-Make every BuildFlow action easy for the Custom GPT to summarize.
+Make every Workbench action easy for the Custom GPT to summarize.
 
 Every action activity payload should expose safe, UI-ready fields:
 
@@ -117,7 +123,7 @@ The response must stay safe: summaries should mention paths, counts, statuses, a
 
 ### Phase 2: Persistent activity history
 
-Add a local activity/event store for BuildFlow operations.
+Add a local activity/event store for Workbench operations.
 
 Each action should create a safe event with:
 
@@ -190,7 +196,7 @@ This should be treated as a separate product surface outside the public Local re
 The Custom GPT should prefer this format after tool work:
 
 ```text
-BuildFlow result
+Workbench result
 
 What I checked:
 - ...
@@ -209,7 +215,7 @@ Next actions:
 2. ...
 ```
 
-Keep it concise, structured, and grounded in BuildFlow action results.
+Keep it concise, structured, and grounded in Workbench action results.
 
 ## Safety boundary
 
@@ -236,4 +242,4 @@ This strategy is working when:
 - users rarely need to open the dashboard except for setup, source management, logs, or handoff review
 - every write has a clear preflight, confirmation, and verified result
 - every non-executable step becomes a clear handoff prompt or command card
-- BuildFlow Local remains useful, self-hosted, and independent
+- Workbench Local remains useful, self-hosted, and independent

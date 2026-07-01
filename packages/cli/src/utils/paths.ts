@@ -9,7 +9,8 @@ export function expandTilde(filePath: string): string {
 }
 
 export function getConfigDir(): string {
-  return expandTilde('~/.buildflow')
+  const override = String(process.env.WORKBENCH_CONFIG_DIR || '').trim()
+  return override ? path.resolve(expandTilde(override)) : expandTilde('~/.buildflow')
 }
 
 export function getConfigPath(): string {

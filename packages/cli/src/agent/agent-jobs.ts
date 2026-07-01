@@ -3,9 +3,25 @@ import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
 
+export const WORKBENCH_RUN_SCHEMA_VERSION = 1 as const
+
 export type AgentJobStatus = 'queued' | 'running' | 'paused' | 'cancelled' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'
 export type AgentJobMode = 'repo_agent'
 export type AgentAutonomyLevel = 'supervised' | 'hands_off_safe'
+
+export type WorkbenchRunResumeState = {
+  nextTaskId?: string
+  nextFiles: string[]
+  nextSymbols: string[]
+  instructions: string[]
+}
+
+export type WorkbenchRunMetrics = {
+  completedPackets: number
+  failedPackets: number
+  repairAttempts: number
+  userSupervisionEvents: number
+}
 
 export type AgentJobAction =
   | 'select_source'
@@ -53,10 +69,18 @@ export type AgentJobPhase = {
 }
 
 export type AgentJob = {
+  runVersion: typeof WORKBENCH_RUN_SCHEMA_VERSION
   id: string
   sourceId: string
   goal: string
   mode: AgentJobMode
+  planVersion: number
+  startingCommit?: string
+  currentCommit?: string
+  activePacketId?: string
+  completedPacketIds: string[]
+  resumeState: WorkbenchRunResumeState
+  metrics: WorkbenchRunMetrics
   status: AgentJobStatus
   createdAt: string
   updatedAt: string
@@ -90,6 +114,7 @@ export type CompactAgentJob = Pick<
   | 'currentIteration'
   | 'maxIterations'
   | 'activeTaskId'
+  | 'activePacketId'
   | 'completedTaskCount'
   | 'nextActions'
   | 'summary'
@@ -324,10 +349,27 @@ function coerceJob(raw: unknown): AgentJob | null {
   const activeTaskId = findActiveTaskId(roadmapPhases, item.activeTaskId)
   const completedTaskCount = countCompletedTasks(roadmapPhases)
   return {
+    runVersion: WORKBENCH_RUN_SCHEMA_VERSION,
     id: String(item.id),
     sourceId: String(item.sourceId),
     goal: String(item.goal),
     mode: 'repo_agent',
+    planVersion: Math.max(1, Number(item.planVersion || 1)),
+    startingCommit: typeof item.startingCommit === 'string' ? item.startingCommit : undefined,
+    currentCommit: typeof item.currentCommit === 'string' ? item.currentCommit : undefined,
+    completedPacketIds: Array.isArray(item.completedPacketIds) ? item.completedPacketIds.filter(value => typeof value === 'string') : [],
+    resumeState: {
+      nextTaskId: typeof item.resumeState?.nextTaskId === 'string' ? item.resumeState.nextTaskId : activeTaskId,
+      nextFiles: Array.isArray(item.resumeState?.nextFiles) ? item.resumeState.nextFiles.filter(value => typeof value === 'string') : [],
+      nextSymbols: Array.isArray(item.resumeState?.nextSymbols) ? item.resumeState.nextSymbols.filter(value => typeof value === 'string') : [],
+      instructions: Array.isArray(item.resumeState?.instructions) ? item.resumeState.instructions.filter(value => typeof value === 'string') : buildResumeInstructions(documentationPath)
+    },
+    metrics: {
+      completedPackets: Math.max(0, Number(item.metrics?.completedPackets || 0)),
+      failedPackets: Math.max(0, Number(item.metrics?.failedPackets || 0)),
+      repairAttempts: Math.max(0, Number(item.metrics?.repairAttempts || 0)),
+      userSupervisionEvents: Math.max(0, Number(item.metrics?.userSupervisionEvents || 0))
+    },
     status: item.status || 'running',
     createdAt: String(item.createdAt),
     updatedAt: String(item.updatedAt || item.createdAt),
@@ -370,11 +412,14 @@ function loadJobsFromDisk(): void {
 function persistJobs(): void {
   ensureJobStoreDir()
   const payload = {
-    version: 1,
+    version: 2,
+    runSchemaVersion: WORKBENCH_RUN_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
     jobs: Array.from(jobs.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   }
-  fs.writeFileSync(JOB_STORE_PATH, JSON.stringify(payload), 'utf8')
+  const temporaryPath = `${JOB_STORE_PATH}.tmp`
+  fs.writeFileSync(temporaryPath, JSON.stringify(payload), 'utf8')
+  fs.renameSync(temporaryPath, JOB_STORE_PATH)
 }
 
 function buildResumeInstructions(documentationPath: string): string[] {
@@ -432,10 +477,27 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
   const activeTaskId = findActiveTaskId(roadmapPhases)
   const completedTaskCount = countCompletedTasks(roadmapPhases)
   const job: AgentJob = {
+    runVersion: WORKBENCH_RUN_SCHEMA_VERSION,
     id: `agent-${crypto.randomUUID()}`,
     sourceId,
     goal,
     mode: 'repo_agent',
+    planVersion: 1,
+    startingCommit: undefined,
+    currentCommit: undefined,
+    completedPacketIds: [],
+    resumeState: {
+      nextTaskId: activeTaskId,
+      nextFiles: [],
+      nextSymbols: [],
+      instructions: resumeInstructions
+    },
+    metrics: {
+      completedPackets: 0,
+      failedPackets: 0,
+      repairAttempts: 0,
+      userSupervisionEvents: 0
+    },
     status: 'running',
     createdAt: now,
     updatedAt: now,
@@ -467,15 +529,60 @@ export function getAgentJob(jobId: string): AgentJob | undefined {
   return jobs.get(jobId)
 }
 
-export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'status' | 'currentIteration' | 'blockedReason' | 'requiresConfirmation' | 'confirmationReason' | 'nextActions' | 'summary' | 'lastKnownGitStatus' | 'roadmapPhases' | 'activeTaskId' | 'completedTaskCount'>>): AgentJob {
+export type AgentJobUpdate = Partial<Pick<AgentJob,
+  | 'status'
+  | 'currentIteration'
+  | 'blockedReason'
+  | 'requiresConfirmation'
+  | 'confirmationReason'
+  | 'nextActions'
+  | 'summary'
+  | 'lastKnownGitStatus'
+  | 'roadmapPhases'
+  | 'activeTaskId'
+  | 'completedTaskCount'
+  | 'planVersion'
+  | 'startingCommit'
+  | 'currentCommit'
+  | 'activePacketId'
+  | 'completedPacketIds'
+  | 'resumeState'
+  | 'metrics'
+>>
+
+export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
   const job = getAgentJob(jobId)
   if (!job) throw new Error(`Agent job not found: ${jobId}`)
   const roadmapPhases = normalizeRoadmapPhases(patch.roadmapPhases || job.roadmapPhases, job.goal)
-  const activeTaskId = findActiveTaskId(roadmapPhases, patch.activeTaskId || job.activeTaskId)
+  const requestedActiveTaskId = Object.prototype.hasOwnProperty.call(patch, 'activeTaskId') ? patch.activeTaskId : job.activeTaskId
+  const activeTaskId = findActiveTaskId(roadmapPhases, requestedActiveTaskId)
   const completedTaskCount = countCompletedTasks(roadmapPhases)
+  const resumeInstructions = job.resumeInstructions && job.resumeInstructions.length > 0 ? job.resumeInstructions : buildResumeInstructions(job.documentationPath)
+  const completedPacketIds = Array.from(new Set((patch.completedPacketIds || job.completedPacketIds).filter(Boolean)))
+  const resumeState: WorkbenchRunResumeState = {
+    nextTaskId: patch.resumeState?.nextTaskId || activeTaskId,
+    nextFiles: Array.from(new Set(patch.resumeState?.nextFiles || job.resumeState.nextFiles)),
+    nextSymbols: Array.from(new Set(patch.resumeState?.nextSymbols || job.resumeState.nextSymbols)),
+    instructions: patch.resumeState?.instructions?.length
+      ? patch.resumeState.instructions
+      : job.resumeState.instructions.length > 0
+        ? job.resumeState.instructions
+        : resumeInstructions
+  }
+  const metrics: WorkbenchRunMetrics = {
+    completedPackets: Math.max(0, Number(patch.metrics?.completedPackets ?? completedPacketIds.length ?? job.metrics.completedPackets)),
+    failedPackets: Math.max(0, Number(patch.metrics?.failedPackets ?? job.metrics.failedPackets)),
+    repairAttempts: Math.max(0, Number(patch.metrics?.repairAttempts ?? job.metrics.repairAttempts)),
+    userSupervisionEvents: Math.max(0, Number(patch.metrics?.userSupervisionEvents ?? job.metrics.userSupervisionEvents))
+  }
   const base: AgentJob = {
     ...job,
     ...patch,
+    runVersion: WORKBENCH_RUN_SCHEMA_VERSION,
+    planVersion: Math.max(job.planVersion, Number(patch.planVersion || job.planVersion)),
+    completedPacketIds,
+    resumeState,
+    metrics,
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
@@ -483,7 +590,7 @@ export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'sta
       ? patch.nextActions
       : buildLoopNextActions(job.documentationPath, roadmapPhases, activeTaskId),
     updatedAt: new Date().toISOString(),
-    resumeInstructions: job.resumeInstructions && job.resumeInstructions.length > 0 ? job.resumeInstructions : buildResumeInstructions(job.documentationPath),
+    resumeInstructions,
     handoffPath: job.handoffPath || job.documentationPath
   }
   const shouldRefreshFallback = base.status === 'blocked' || base.status === 'failed' || base.status === 'needs_confirmation' || Boolean(base.blockedReason || base.confirmationReason)
@@ -494,6 +601,80 @@ export function updateAgentJob(jobId: string, patch: Partial<Pick<AgentJob, 'sta
   jobs.set(jobId, updated)
   persistJobs()
   return updated
+}
+
+export function advanceWorkbenchRunAfterPacket(params: {
+  runId: string
+  taskId: string
+  packetId: string
+  commitHash?: string
+}): AgentJob {
+  const job = getAgentJob(params.runId)
+  if (!job) throw new Error(`Agent job not found: ${params.runId}`)
+
+  const completedAt = new Date().toISOString()
+  let matchedTask = false
+  const roadmapPhases = job.roadmapPhases.map(phase => ({
+    ...phase,
+    tasks: phase.tasks.map(task => {
+      if (task.id !== params.taskId) return task
+      matchedTask = true
+      return {
+        ...task,
+        status: 'completed' as const,
+        completedAt,
+        blockedReason: undefined
+      }
+    })
+  }))
+  if (!matchedTask) throw new Error(`Run task not found: ${params.taskId}`)
+
+  const initiallyNormalized = normalizeRoadmapPhases(roadmapPhases, job.goal)
+  const nextTaskId = findActiveTaskId(initiallyNormalized)
+  const normalized = normalizeRoadmapPhases(initiallyNormalized.map(phase => ({
+    ...phase,
+    tasks: phase.tasks.map(task => task.id === nextTaskId && task.status === 'pending'
+      ? { ...task, status: 'running' as const }
+      : task)
+  })), job.goal)
+  const allTasks = normalized.flatMap(phase => phase.tasks)
+  const hasFailedTask = allTasks.some(task => task.status === 'failed')
+  const hasBlockedTask = allTasks.some(task => task.status === 'blocked')
+  const allComplete = allTasks.every(task => task.status === 'completed' || task.status === 'skipped')
+  const status: AgentJobStatus = hasFailedTask ? 'failed' : hasBlockedTask ? 'blocked' : allComplete ? 'completed' : 'running'
+  const nextActions = status === 'completed'
+    ? ['Run final handoff review and inspect repository status.']
+    : nextTaskId
+      ? [`Continue roadmap task ${nextTaskId}.`]
+      : []
+
+  return updateAgentJob(params.runId, {
+    roadmapPhases: normalized,
+    activeTaskId: nextTaskId,
+    currentIteration: Math.min(job.maxIterations, job.currentIteration + 1),
+    completedPacketIds: Array.from(new Set([...job.completedPacketIds, params.packetId])),
+    currentCommit: params.commitHash || job.currentCommit,
+    status,
+    blockedReason: hasBlockedTask ? 'One or more roadmap tasks are blocked.' : undefined,
+    nextActions,
+    resumeState: {
+      nextTaskId,
+      nextFiles: [],
+      nextSymbols: [],
+      instructions: status === 'completed'
+        ? ['Review final validation evidence, update the handoff, and inspect git status.']
+        : nextTaskId
+          ? [`Resume with roadmap task ${nextTaskId}.`]
+          : []
+    },
+    metrics: {
+      ...job.metrics,
+      completedPackets: Array.from(new Set([...job.completedPacketIds, params.packetId])).length
+    },
+    summary: status === 'completed'
+      ? `Packet ${params.packetId} completed task ${params.taskId}; all roadmap tasks are complete.`
+      : `Packet ${params.packetId} completed task ${params.taskId}; next task is ${nextTaskId}.`
+  })
 }
 
 export function listAgentJobs(): AgentJob[] {
@@ -521,6 +702,7 @@ export function compactAgentJob(job: AgentJob): CompactAgentJob {
     currentIteration: job.currentIteration,
     maxIterations: job.maxIterations,
     activeTaskId: job.activeTaskId,
+    activePacketId: job.activePacketId,
     completedTaskCount: job.completedTaskCount,
     totalTaskCount: tasks.length,
     nextActions: compactList(job.nextActions, 3),
@@ -585,4 +767,107 @@ export function controlAgentJob(jobId: string, action: AgentJobControlAction, re
     })
   }
   throw new Error(`Unsupported agent control action: ${action}`)
+}
+
+
+
+
+export function getActiveWorkbenchRun(sourceId: string): Record<string, unknown> | undefined {
+  const normalizedSourceId = String(sourceId || '').trim()
+  if (!normalizedSourceId) return undefined
+  const active = listAgentJobs().find(job =>
+    job.sourceId === normalizedSourceId && !['completed', 'failed', 'cancelled'].includes(job.status)
+  )
+  if (!active) return undefined
+  const compact = compactAgentJob(active)
+  return {
+    runVersion: active.runVersion,
+    id: active.id,
+    sourceId: active.sourceId,
+    goal: compactText(active.goal, 500),
+    status: active.status,
+    planVersion: active.planVersion,
+    startingCommit: active.startingCommit,
+    currentCommit: active.currentCommit,
+    completedPacketIds: active.completedPacketIds.slice(-20),
+    resumeState: {
+      nextTaskId: active.resumeState.nextTaskId,
+      nextFiles: active.resumeState.nextFiles.slice(0, 5),
+      nextSymbols: active.resumeState.nextSymbols.slice(0, 5),
+      instructions: compactList(active.resumeState.instructions, 4)
+    },
+    metrics: active.metrics,
+    activeTask: compact.activeTask,
+    roadmapSummary: compact.roadmapSummary,
+    completedTaskCount: compact.completedTaskCount,
+    totalTaskCount: compact.totalTaskCount,
+    summary: compact.summary,
+    nextActions: compact.nextActions,
+    handoffPath: compact.handoffPath,
+    requiresConfirmation: compact.requiresConfirmation,
+    confirmationReason: compact.confirmationReason,
+    blockedReason: compact.blockedReason,
+    updatedAt: active.updatedAt
+  }
+}
+
+
+
+
+export function createWorkbenchRun(params: Parameters<typeof startAgentJob>[0]): { run: AgentJob; created: boolean } {
+  const sourceId = String(params.sourceId || '').trim()
+  if (!sourceId) throw new Error('sourceId is required')
+  const existing = listAgentJobs().find(job =>
+    job.sourceId === sourceId && !['completed', 'failed', 'cancelled'].includes(job.status)
+  )
+  if (existing) {
+    if (existing.goal.trim() === String(params.goal || '').trim()) return { run: existing, created: false }
+    throw new Error(`Source already has an active Workbench run: ${existing.id}`)
+  }
+  return { run: startAgentJob(params), created: true }
+}
+
+export function resumeWorkbenchRun(params: { sourceId: string; runId?: string }): AgentJob {
+  const sourceId = String(params.sourceId || '').trim()
+  if (!sourceId) throw new Error('sourceId is required')
+  const run = params.runId
+    ? getAgentJob(params.runId)
+    : listAgentJobs().find(job => job.sourceId === sourceId && !['completed', 'failed', 'cancelled'].includes(job.status))
+  if (!run || run.sourceId !== sourceId) throw new Error('Active Workbench run not found for source')
+  if (['completed', 'failed', 'cancelled'].includes(run.status)) throw new Error(`Workbench run cannot resume from ${run.status}`)
+  if (run.status === 'blocked' || run.status === 'needs_confirmation') {
+    throw new Error(`Workbench run requires resolution before resume: ${run.status}`)
+  }
+  if (run.status === 'running') return run
+  return updateAgentJob(run.id, {
+    status: 'running',
+    metrics: {
+      ...run.metrics,
+      userSupervisionEvents: run.metrics.userSupervisionEvents + 1
+    },
+    summary: `Workbench run resumed. Continue task ${run.resumeState.nextTaskId || run.activeTaskId || 'from the persisted handoff'}.`
+  })
+}
+
+export function closeWorkbenchRun(params: { sourceId: string; runId: string; summary: string }): AgentJob {
+  const sourceId = String(params.sourceId || '').trim()
+  const runId = String(params.runId || '').trim()
+  const summary = String(params.summary || '').trim()
+  if (!sourceId) throw new Error('sourceId is required')
+  if (!runId) throw new Error('runId is required')
+  if (!summary) throw new Error('summary is required')
+  const run = getAgentJob(runId)
+  if (!run || run.sourceId !== sourceId) throw new Error('Workbench run not found for source')
+  if (['completed', 'failed', 'cancelled'].includes(run.status)) throw new Error(`Workbench run is already terminal: ${run.status}`)
+  return updateAgentJob(run.id, {
+    status: 'completed',
+    activeTaskId: undefined,
+    summary,
+    resumeState: {
+      nextTaskId: undefined,
+      nextFiles: [],
+      nextSymbols: [],
+      instructions: []
+    }
+  })
 }

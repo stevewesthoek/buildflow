@@ -111,7 +111,7 @@ function summarizeCandidate(candidate: CandidateFile): string {
   return 'Search matched this path or its contents.'
 }
 
-function buildPreparedContext(query: string, candidates: CandidateFile[], totalMs: number, searchMs: number, readMs: number): PreparedContext {
+function buildPreparedContext(query: string, candidates: CandidateFile[], totalMs: number, searchMs: number, readMs: number, extraSearchNotes: string[] = []): PreparedContext {
   const readable = candidates.filter(candidate => !candidate.error).slice(0, 5)
   const errored = candidates.filter(candidate => candidate.error)
   const largeCandidates = readable.filter(candidate => typeof candidate.sizeBytes === 'number' && candidate.sizeBytes > LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES)
@@ -149,6 +149,7 @@ function buildPreparedContext(query: string, candidates: CandidateFile[], totalM
     ],
     searchNotes: [
       'Deterministic source-index ranking was used.',
+      ...extraSearchNotes.slice(0, 4),
       largeCandidates.length > 0
         ? 'Large candidates require focused modes; do not request top-of-file fallback content.'
         : 'Use exact read_paths for the planned files before editing.'
@@ -188,10 +189,22 @@ export async function prepareTaskContext(params: {
     : []
 
   const searchStartedAt = Date.now()
-  const pathResults = params.searcher.search(query, limit, sourceIds)
-  const contentResults = params.searcher.search(`content:${query}`, limit, sourceIds)
+  const pathSearch = params.searcher.searchBounded(query, limit, sourceIds, {
+    startedAt: searchStartedAt,
+    deadlineMs: 900,
+    maxDocsPerSource: 1200,
+    maxContentDocsPerSource: 250
+  })
+  const contentSearch = params.searcher.searchBounded(`content:${query}`, limit, sourceIds, {
+    startedAt: searchStartedAt,
+    deadlineMs: 1200,
+    maxDocsPerSource: 1200,
+    maxContentDocsPerSource: 250
+  })
+  const searchNotes = [...pathSearch.sourceWarnings, ...contentSearch.sourceWarnings]
+    .map(warning => warning.message)
   const searchMs = Date.now() - searchStartedAt
-  const candidates = dedupeResults([...pathResults, ...contentResults], seedPaths).slice(0, limit)
+  const candidates = dedupeResults([...pathSearch.results, ...contentSearch.results], seedPaths).slice(0, limit)
 
   const readStartedAt = Date.now()
   for (const candidate of candidates.slice(0, MAX_FILES_TO_EXCERPT)) {
@@ -211,5 +224,5 @@ export async function prepareTaskContext(params: {
   }
   const readMs = Date.now() - readStartedAt
 
-  return buildPreparedContext(query, candidates, Date.now() - startedAt, searchMs, readMs)
+  return buildPreparedContext(query, candidates, Date.now() - startedAt, searchMs, readMs, searchNotes)
 }

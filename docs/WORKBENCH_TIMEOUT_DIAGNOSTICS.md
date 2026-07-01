@@ -36,6 +36,48 @@ Earlier assumptions that were incomplete:
 - `pnpm local:restart` did not prove a fully fresh agent, relay image/container, and web build. Use `pnpm local:restart:fresh` for activation after reliability changes.
 - Unauthorized action responses were fast but were outside the deadline wrapper, so they did not carry a Workbench request ID. Current code wraps auth for the five GPT actions.
 
+## Root Cause Found (2026-06-17)
+
+The recurring "connection down" symptom was reproduced and traced to the local agent search endpoint, not to OpenAI action limits or normal Cloudflare latency.
+
+Observed failure:
+
+- `readWorkbenchContext` called `sourceId:"brain"` with `mode:"search"`.
+- The web action deadline returned structured timeout JSON at about 8 seconds.
+- The downstream agent request kept running after the web timeout.
+- The agent log showed `/api/search` completing after `113453ms`.
+- During that search, the agent Node process was CPU-bound, and unrelated `/api/status`, `/api/list-files`, and `/api/agent-jobs/status` requests queued behind the same event loop.
+- To the Custom GPT, those queued status/list requests looked like intermittent connection failure.
+
+Root cause:
+
+- `packages/cli/src/agent/search.ts` used synchronous Fuse search across a large source index.
+- Large sources such as `brain` can contain more than 13k indexed docs.
+- Fuse search cannot be interrupted by the web route's `AbortSignal` once it is already executing inside the agent.
+- A route deadline at the web layer is therefore not enough; the agent must refuse or bound expensive search work before starting it.
+
+Fix:
+
+- `VaultSearcher.searchBounded()` now caps per-source candidate sets before running Fuse.
+- Large path searches use a fast path/title/tag/content-preview prefilter and return `status:"partial"` with `sourceWarnings`.
+- Large content searches use a smaller cap and truncated candidate content.
+- If no bounded candidates are found, search returns `status:"needs_narrower_scope"` instead of running an unbounded content search.
+- `prepare_task_context` uses bounded path and content searches.
+- Legacy Custom GPT Agent Mode routes now return a retired-action response instead of starting or polling stale agent jobs.
+- Dashboard job polling stops when no active agent job exists.
+
+Regression proof from the fix pass:
+
+- `brain` path search for `types`: HTTP 200 in `72ms`, `status:"partial"`, `docCount:13331`, `searchedDocCount:849`, warning `large_source_bounded`.
+- `brain` no-candidate search with content fallback: HTTP 200 in `155ms`, `status:"needs_narrower_scope"`, warning `no_fast_candidates`.
+- Immediate status after search: HTTP 200 in `46ms`-`50ms`.
+- 60 public authenticated status probes after search: 0 failures, p95 `55ms`.
+- Fresh agent log after patch: `/api/search` completed in `17.5ms`, then fallback searches completed in `8.0ms` and `6.7ms`.
+
+Prevention rule:
+
+No GPT-facing or dashboard-triggered path may run synchronous full-source search over a large indexed source. Search must either run on a bounded candidate set or return narrowing guidance.
+
 ## Live Request Path
 
 ```text
@@ -91,14 +133,14 @@ Classification rules:
 
 Cloudflare HTML alone is not enough evidence. Correlate `CF-Ray`, `X-Workbench-Request-Id`, origin logs, and local health.
 
-## OpenAI Custom GPT Findings (Accessed 2026-06-15)
+## OpenAI Custom GPT Findings (Accessed 2026-06-19)
 
 Official sources checked:
-- **Production notes on GPT Actions** — OpenAI Developers, update date not shown. Documents 45-second round-trip action timeout, 100,000-character request/response payload limit, text-only payloads, no custom headers, TLS 1.2+ on port 443, and OpenAPI description length limits.
-- **Configuring actions in GPTs** — OpenAI Help Center, updated 24 days ago. Documents authentication, OpenAPI schema, operation IDs, schema import/paste flow, action-domain restrictions, and Preview testing after configuration.
-- **Creating and editing GPTs** — OpenAI Help Center, updated 3 days ago. Documents GPT instructions, capabilities, actions, recommended model behavior, Preview testing, and manual Update flow.
-- **Troubleshooting GPTs** — OpenAI Help Center, updated 11 days ago. Documents Preview testing, instruction tightening, apps/actions availability, and workspace-domain checks.
-- **GPTs in ChatGPT** — OpenAI Help Center, updated 12 days ago. Documents GPT components and that a GPT can use either apps or actions, not both.
+- **Production notes on GPT Actions** — OpenAI Developers. Documents 45-second round-trip action timeout, 100,000-character request/response payload limit, text-only payloads, no custom headers, TLS 1.2+ on port 443, and OpenAPI description length limits.
+- **Configuring actions in GPTs** — OpenAI Help Center, marked updated 3 days before access. Documents authentication, OpenAPI schema, operation IDs, schema import/paste flow, action-domain restrictions, Pro-mode limitation, apps/actions exclusivity, and Preview testing after configuration.
+- **Creating and editing GPTs** — OpenAI Help Center, marked updated 20 hours before access. Documents GPT instructions, capabilities, actions, recommended model behavior, Preview testing, and manual Update flow.
+- **Troubleshooting GPTs** — OpenAI Help Center, marked updated 14 days before access. Documents Preview testing, instruction tightening, apps/actions availability, and workspace-domain checks.
+- **GPTs in ChatGPT** — OpenAI Help Center, marked updated 3 days before access. Documents GPT components and that a GPT can use either apps or actions, not both.
 
 Implications:
 - Workbench must return well before the published 45-second GPT Actions timeout; current route deadlines stay at 4s-12s.
@@ -112,7 +154,7 @@ Graphify is a navigation layer, not source truth.
 
 For an unknown repository area:
 
-1. Use `readBuildFlowContext` with `mode:"graph_context"` to inspect cached Graphify hints and freshness.
+1. Use `readWorkbenchContext` with `mode:"graph_context"` to inspect cached Graphify hints and freshness.
 2. Treat stale or missing graph data as navigation metadata only.
 3. Select likely paths or symbols from the hint.
 4. Perform a focused exact read with `read_range`, `read_symbol`, `read_paths`, or `grep_context`.
@@ -204,7 +246,7 @@ Use the request ID to determine whether a request reached the web origin:
   "ok": false,
   "status": "needs_narrower_scope",
   "error": {
-    "code": "BUILDFLOW_RESPONSE_SIZE_EXCEEDED",
+    "code": "WORKBENCH_RESPONSE_SIZE_EXCEEDED",
     "message": "BuildFlow response exceeded action size budget.",
     "recovery": [
       "Use grep_context with a more specific pattern",
@@ -238,9 +280,9 @@ Use the request ID to determine whether a request reached the web origin:
   "status": "timeout",
   "requestId": "wr_xxxxxxx_xxxxxx",
   "error": {
-    "code": "BUILDFLOW_ACTION_DEADLINE_EXCEEDED",
+    "code": "WORKBENCH_ACTION_DEADLINE_EXCEEDED",
     "message": "BuildFlow stopped this action before the hosting gateway timed out.",
-    "details": "readBuildFlowContext exceeded its 8000ms GPT-facing deadline.",
+    "details": "readWorkbenchContext exceeded its 8000ms GPT-facing deadline.",
     "recovery": [
       "Use a narrower read mode such as grep_context or read_range.",
       "Split the task into a smaller request.",
@@ -249,7 +291,7 @@ Use the request ID to determine whether a request reached the web origin:
   },
   "diagnostics": {
     "requestId": "wr_xxxxxxx_xxxxxx",
-    "operationId": "readBuildFlowContext",
+    "operationId": "readWorkbenchContext",
     "phase": "agent_request",
     "elapsedMs": 7987,
     "deadlineMs": 8000
@@ -273,7 +315,7 @@ Use the request ID to determine whether a request reached the web origin:
   "ok": false,
   "status": "timeout",
   "error": {
-    "code": "BUILDFLOW_COMMAND_TIMEOUT",
+    "code": "WORKBENCH_COMMAND_TIMEOUT",
     "message": "BuildFlow stopped this command before the GPT action deadline.",
     "details": "type_check_web exceeded 11500ms.",
     "recovery": [

@@ -20,6 +20,14 @@ export type AgentEventType =
   | 'validation_failed'
   | 'task_committed'
   | 'task_pushed'
+  | 'packet_claimed'
+  | 'packet_started'
+  | 'packet_completed'
+  | 'packet_failed'
+  | 'packet_paused'
+  | 'packet_resumed'
+  | 'packet_cancelled'
+  | 'packet_lease_renewed'
 
 export type AgentEvent = {
   id: string

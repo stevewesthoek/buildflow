@@ -148,6 +148,12 @@ export default function Dashboard() {
     () => discoveredRepos.find(r => r.path === selectedDiscoveredRepoPath) || null,
     [discoveredRepos, selectedDiscoveredRepoPath]
   )
+  const branchGroupFor = useCallback((source: KnowledgeSource, enabledOnly = false) => {
+    const group = source.repoGroupId
+      ? sources.filter(item => item.repoGroupId === source.repoGroupId && (!enabledOnly || item.enabled))
+      : [source].filter(item => !enabledOnly || item.enabled)
+    return group.length > 0 ? group : [source]
+  }, [sources])
 
   const applyTheme = useCallback((t: Theme) => {
     const root = document.documentElement
@@ -189,7 +195,31 @@ export default function Dashboard() {
   const refreshAgentJobs = async (silent = true) => {
     try {
       const data = await fetchJson('/api/agent/jobs')
-      const jobs = Array.isArray(data.jobs) ? data.jobs as AgentDashboardJob[] : []
+      type AgentPacketSummary = {
+        packetId: string
+        runId: string
+        taskId: string
+        sourceId: string
+        status: string
+        exactPaths: string[]
+        updatedAt: string
+        completedSteps: number
+        failedStep?: number
+        rolledBack: boolean
+        validation: Array<{
+          commandKind: string
+          status: string
+          exitCode: number | null
+          durationMs: number
+        }>
+        commitHash?: string
+        errorCodes: string[]
+      }
+      const packets = Array.isArray(data.packets) ? data.packets as AgentPacketSummary[] : []
+      const jobs = (Array.isArray(data.jobs) ? data.jobs as AgentDashboardJob[] : []).map(job => ({
+        ...job,
+        packets: packets.filter(packet => packet.runId === job.id)
+      }))
       const events = Array.isArray(data.events) ? data.events as AgentRuntimeEvent[] : []
       setAgentJobs(jobs)
       if (!silent && events.length > 0) {
@@ -207,6 +237,11 @@ export default function Dashboard() {
   }
 
   const controlAgentJob = async (job: AgentDashboardJob, action: 'pause' | 'resume' | 'cancel') => {
+    if (action === 'cancel') {
+      const confirmed = window.confirm(`Cancel run ${job.id}? This stops the run and any queued or running packets.`)
+      if (!confirmed) return
+    }
+
     try {
       setBusyJobId(job.id)
       setError(null)
@@ -315,9 +350,11 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
+    const hasActiveAgentJob = agentJobs.some(j => ['queued', 'running', 'paused', 'needs_confirmation'].includes(j.status))
+    if (!hasActiveAgentJob) return
     const interval = window.setInterval(() => {
       void refreshAgentJobs(true)
-    }, agentJobs.some(j => ['queued', 'running', 'paused', 'needs_confirmation'].includes(j.status)) ? 2500 : 7000)
+    }, 2500)
     return () => window.clearInterval(interval)
   }, [agentJobs])
 
@@ -358,26 +395,42 @@ export default function Dashboard() {
   }
 
   const toggleActive = async (source: KnowledgeSource) => {
-    const next = activeSourceIds.includes(source.id)
-      ? activeSourceIds.filter(id => id !== source.id)
-      : [...activeSourceIds, source.id]
+    const branchGroup = branchGroupFor(source, true)
+    const groupIds = new Set(branchGroup.map(item => item.id))
+    const groupActive = branchGroup.some(item => activeSourceIds.includes(item.id))
+    const next = groupActive
+      ? activeSourceIds.filter(id => !groupIds.has(id))
+      : Array.from(new Set([...activeSourceIds, ...branchGroup.map(item => item.id)]))
+    if (next.length === 0) {
+      const message = 'At least one source must stay active. Activate another repo before disconnecting this one.'
+      setError(message)
+      pushActivity('Deactivate skipped', message, 'warn')
+      return
+    }
     const mode: ActiveSourcesMode = next.length > 1 ? 'multi' : 'single'
+    const detail = branchGroup.length > 1
+      ? `${source.label} ${groupActive ? 'disconnected' : 'connected'} with ${countLabel(branchGroup.length, 'branch')}.`
+      : `${source.label} ${groupActive ? 'disconnected' : 'connected'} to this conversation.`
     await mutate(
-      next.includes(source.id) ? 'Activated' : 'Deactivated',
+      groupActive ? 'Deactivated' : 'Activated',
       source,
       '/api/agent/active-sources',
       { mode, activeSourceIds: next },
-      `${source.label} ${next.includes(source.id) ? 'connected to this conversation' : 'disconnected'}.`
+      detail
     )
   }
 
   const toggleEnabled = async (source: KnowledgeSource) => {
+    const branchGroup = branchGroupFor(source)
+    const detail = branchGroup.length > 1
+      ? `${source.label} ${source.enabled ? 'disabled' : 'enabled'} with ${countLabel(branchGroup.length, 'branch')}.`
+      : `${source.label} ${source.enabled ? 'disabled' : 'enabled'}.`
     await mutate(
       source.enabled ? 'Disabled' : 'Enabled',
       source,
       '/api/agent/sources/toggle',
       { sourceId: source.id, enabled: !source.enabled },
-      `${source.label} ${source.enabled ? 'disabled' : 'enabled'}.`
+      detail
     )
   }
 
@@ -497,7 +550,9 @@ export default function Dashboard() {
               ) : (
                 <div className="divide-y divide-gray-100 dark:divide-gray-800/60">
                   {sources.map(source => {
-                    const active = activeSourceIds.includes(source.id)
+                    const branchGroup = branchGroupFor(source)
+                    const enabledBranchGroup = branchGroup.filter(item => item.enabled)
+                    const active = enabledBranchGroup.some(item => activeSourceIds.includes(item.id)) || activeSourceIds.includes(source.id)
                     const busy = busySourceId === source.id
                     const menuOpen = openMenuId === source.id
                     return (
@@ -507,6 +562,8 @@ export default function Dashboard() {
                           <div className="flex items-center gap-2">
                             <span className="truncate text-sm font-medium">{source.label}</span>
                             <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">{source.id}</span>
+                            {source.branchName && <span className="rounded bg-sky-50 px-1.5 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">{source.branchName}</span>}
+                            {branchGroup.length > 1 && <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">{countLabel(branchGroup.length, 'branch')}</span>}
                           </div>
                           <p className="mt-0.5 truncate font-mono text-[11px] text-gray-400 dark:text-gray-500">{source.path}</p>
                         </div>
@@ -525,13 +582,13 @@ export default function Dashboard() {
                             {menuOpen && (
                               <div className="absolute right-0 top-full z-30 mt-1 w-40 rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-gray-700 dark:bg-gray-900">
                                 <DropdownItem onClick={() => { setOpenMenuId(null); void toggleActive(source) }} disabled={!source.enabled && !active}>
-                                  {active ? 'Deactivate' : 'Activate'}
+                                  {active ? (branchGroup.length > 1 ? 'Deactivate all branches' : 'Deactivate') : (enabledBranchGroup.length > 1 ? 'Activate all branches' : 'Activate')}
                                 </DropdownItem>
                                 <DropdownItem onClick={() => { setOpenMenuId(null); void reindexSource(source) }} disabled={!source.enabled || source.indexStatus === 'indexing'}>
                                   Re-index
                                 </DropdownItem>
                                 <DropdownItem onClick={() => { setOpenMenuId(null); void toggleEnabled(source) }}>
-                                  {source.enabled ? 'Disable' : 'Enable'}
+                                  {source.enabled ? (branchGroup.length > 1 ? 'Disable all branches' : 'Disable') : (branchGroup.length > 1 ? 'Enable all branches' : 'Enable')}
                                 </DropdownItem>
                                 <div className="my-1 border-t border-gray-100 dark:border-gray-800" />
                                 <DropdownItem onClick={() => { setOpenMenuId(null); void removeSource(source) }} danger>
@@ -562,6 +619,7 @@ export default function Dashboard() {
                   <div key={s.id} className="rounded-md bg-gray-100 px-2.5 py-1.5 dark:bg-gray-800">
                     <span className="text-xs font-medium">{s.label}</span>
                     <span className="ml-2 font-mono text-[10px] text-gray-400">{s.id}</span>
+                    {s.branchName && <span className="ml-2 font-mono text-[10px] text-sky-500">{s.branchName}</span>}
                   </div>
                 )) : (
                   <p className="rounded-md bg-gray-100 px-2.5 py-1.5 text-xs text-gray-400 dark:bg-gray-800">Activate a source to connect.</p>
@@ -573,6 +631,7 @@ export default function Dashboard() {
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
               <p className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Agent activity</p>
               <div className="mt-2 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                <ActiveRunObservabilityPanel jobs={agentJobs} />
                 {agentJobs.map(job => (
                   <AgentJobCard key={job.id} job={job} busyJobId={busyJobId} onControl={controlAgentJob} />
                 ))}
@@ -614,7 +673,7 @@ export default function Dashboard() {
                   <option value="">{discoveryLoading ? 'Scanning...' : discoveryScanned ? 'Select a repository' : 'Click to scan'}</option>
                   {discoveredRepos.map(repo => (
                     <option key={repo.path} value={repo.path} disabled={repo.alreadyAdded}>
-                      {repo.account} / {repo.label}{repo.alreadyAdded ? ' (added)' : ''}
+                      {repo.account} / {repo.label}{repo.branchName ? ` [${repo.branchName}]` : ''}{repo.isGitWorktree ? ' · worktree' : ''}{repo.alreadyAdded ? ' (added)' : ''}
                     </option>
                   ))}
                 </select>
@@ -630,6 +689,10 @@ export default function Dashboard() {
                 <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs dark:bg-gray-800">
                   <span className="font-medium">{selectedDiscoveredRepo.label}</span>
                   <span className="ml-2 font-mono text-gray-400">{selectedDiscoveredRepo.id}</span>
+                  {selectedDiscoveredRepo.branchName && <span className="ml-2 font-mono text-sky-500">{selectedDiscoveredRepo.branchName}</span>}
+                  {selectedDiscoveredRepo.availableBranches && selectedDiscoveredRepo.availableBranches.length > 0 && (
+                    <span className="ml-2 text-gray-400">{countLabel(selectedDiscoveredRepo.availableBranches.length, 'branch')}</span>
+                  )}
                 </div>
               )}
               <div className="flex justify-end gap-2 pt-1">
@@ -678,6 +741,131 @@ function DropdownItem({ children, onClick, disabled, danger }: { children: strin
     >
       {children}
     </button>
+  )
+}
+
+function ActiveRunObservabilityPanel({ jobs }: { jobs: AgentDashboardJob[] }) {
+  type AgentPacketSummary = {
+    packetId: string
+    runId: string
+    taskId: string
+    sourceId: string
+    status: string
+    exactPaths: string[]
+    updatedAt: string
+    completedSteps: number
+    failedStep?: number
+    rolledBack: boolean
+    validation: Array<{
+      commandKind: string
+      status: string
+      exitCode: number | null
+      durationMs: number
+    }>
+    commitHash?: string
+    errorCodes: string[]
+  }
+
+  const activeJob = jobs.find(job => ['queued', 'running', 'needs_confirmation', 'paused', 'blocked'].includes(job.status)) || jobs[0]
+  if (!activeJob) {
+    return (
+      <div className="rounded-lg border border-dashed border-gray-200 px-3 py-3 text-xs text-gray-400 dark:border-gray-700 dark:text-gray-500">
+        No active run observability data.
+      </div>
+    )
+  }
+
+  const observedJob = activeJob as AgentDashboardJob & { packets?: AgentPacketSummary[] }
+  const latestPacket = observedJob.packets?.[0]
+  const progress = activeJob.totalTaskCount > 0
+    ? Math.round((activeJob.completedTaskCount / activeJob.totalTaskCount) * 100)
+    : 0
+  const blocker = activeJob.blockedReason || activeJob.confirmationReason
+  const updatedLabel = activeJob.updatedAt
+    ? new Date(activeJob.updatedAt).toLocaleString()
+    : 'Unknown'
+
+  return (
+    <section className="rounded-lg border border-gray-200 bg-white px-3 py-3 text-xs shadow-sm dark:border-gray-700 dark:bg-gray-900">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Active run</p>
+          <p className="mt-0.5 font-medium text-gray-800 dark:text-gray-100">{activeJob.status}</p>
+        </div>
+        <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+          {activeJob.completedTaskCount}/{activeJob.totalTaskCount}
+        </span>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-gray-400">Task</p>
+          <p className="mt-0.5 text-gray-700 dark:text-gray-200">
+            {activeJob.activeTask
+              ? `${activeJob.activeTask.phaseTitle}: ${activeJob.activeTask.title}`
+              : 'No active task'}
+          </p>
+        </div>
+
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-gray-400">Summary</p>
+          <p className="mt-0.5 text-gray-600 dark:text-gray-300">{activeJob.summary || activeJob.id}</p>
+        </div>
+
+        {latestPacket && (
+          <div className="rounded-md bg-gray-50 px-2.5 py-2 dark:bg-gray-800/70">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Latest packet</p>
+              <span className="font-mono text-[10px] text-gray-500">{latestPacket.status}</span>
+            </div>
+            <p className="mt-1 truncate font-mono text-[10px] text-gray-600 dark:text-gray-300">{latestPacket.packetId}</p>
+            <p className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
+              {latestPacket.completedSteps} steps{latestPacket.failedStep !== undefined ? ` · failed at ${latestPacket.failedStep}` : ''}{latestPacket.rolledBack ? ' · rolled back' : ''}
+            </p>
+            {latestPacket.validation.length > 0 && (
+              <div className="mt-1.5 space-y-1">
+                {latestPacket.validation.map(result => (
+                  <div key={`${latestPacket.packetId}-${result.commandKind}`} className="flex items-center justify-between gap-2 text-[10px]">
+                    <span className="truncate text-gray-500 dark:text-gray-400">{result.commandKind}</span>
+                    <span className={result.status === 'completed' || result.exitCode === 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}>
+                      {result.status}{result.exitCode === null ? '' : ` (${result.exitCode})`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {latestPacket.commitHash && (
+              <p className="mt-1.5 truncate font-mono text-[10px] text-emerald-600 dark:text-emerald-400">Commit {latestPacket.commitHash}</p>
+            )}
+            {latestPacket.errorCodes.length > 0 && (
+              <p className="mt-1.5 text-[10px] text-red-600 dark:text-red-400">{latestPacket.errorCodes.join(', ')}</p>
+            )}
+          </div>
+        )}
+
+        {blocker && (
+          <div>
+            <p className="text-[10px] uppercase tracking-wide text-amber-500">Blocker</p>
+            <p className="mt-0.5 text-amber-700 dark:text-amber-300">{blocker}</p>
+          </div>
+        )}
+
+        <div className="h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
+          <div className="h-full rounded-full bg-gray-700 dark:bg-gray-300" style={{ width: `${progress}%` }} />
+        </div>
+
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-gray-500 dark:text-gray-400">
+          <div>
+            <dt className="uppercase tracking-wide">Source</dt>
+            <dd className="mt-0.5 truncate font-mono text-gray-700 dark:text-gray-300">{activeJob.sourceId}</dd>
+          </div>
+          <div>
+            <dt className="uppercase tracking-wide">Updated</dt>
+            <dd className="mt-0.5 text-gray-700 dark:text-gray-300">{updatedLabel}</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
   )
 }
 

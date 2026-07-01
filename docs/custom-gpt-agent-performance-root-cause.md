@@ -46,11 +46,11 @@ Recommended task budget:
 
 BuildFlow route deadlines:
 
-- `getBuildFlowStatus`: 4s
-- `readBuildFlowContext`: 8s
-- `applyBuildFlowFileChange`: 8s
-- `commitBuildFlowChanges`: 10s
-- `runBuildFlowCommand`: 12s cap, with smaller command defaults
+- `getWorkbenchStatus`: 4s
+- `readWorkbenchContext`: 8s
+- `applyWorkbenchFileChange`: 8s
+- `commitWorkbenchChanges`: 10s
+- `runWorkbenchCommand`: 12s cap, with smaller command defaults
 
 ## What Does Not Work
 
@@ -73,7 +73,7 @@ Local AI was tested with realistic context-ranking prompts and failed the GPT-fa
 
 Decision: keep local AI out of the GPT-facing path.
 
-`readBuildFlowContext` mode `prepare_task_context` remains deterministic source-index context prep only. It returns likely files and an exact read plan without calling a local model.
+`readWorkbenchContext` mode `prepare_task_context` remains deterministic source-index context prep only. It returns likely files and an exact read plan without calling a local model.
 
 ## Current Optimizations
 
@@ -81,13 +81,15 @@ Decision: keep local AI out of the GPT-facing path.
 - Custom GPT instructions are compact, repo-assistant oriented, and action-budgeted.
 - Default read budget is compact: 4 KB per file, 5 search/list results, and at most 5 read paths.
 - `grep_context`, `read_range`, and `read_symbol` keep large-file inspection bounded.
+- `graph_context` reads cached Graphify navigation hints only and still requires exact source reads before patching.
 - Bulk reads refuse files over 100 KB and return metadata plus a focused-read suggestion instead of top-of-file fallback content.
 - File-specific `search_and_read` degrades to focused grep output instead of huge full-file context.
 - `prepare_task_context` collapses broad search/read discovery into one deterministic planning call.
 - GPT-facing routes return structured timeout or narrower-scope JSON before gateway timeout paths.
-- `commitBuildFlowChanges` collapses diff, explicit staging, and commit into one bounded action.
+- `commitWorkbenchChanges` collapses diff, explicit staging, and commit into one bounded action.
 - Push is not automatic; it runs only when the user explicitly asks.
 - Long-running job or polling routes are not exposed in the Custom GPT schema.
+- Legacy `/api/actions/agent/*` routes return a retired-action response for stale GPT schemas instead of starting or polling server-side jobs.
 
 ## Bottleneck Ranking
 

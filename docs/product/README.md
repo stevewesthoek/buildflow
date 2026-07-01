@@ -1,46 +1,121 @@
-# BuildFlow Docs
+# ProChat Workbench Product Documentation
 
-BuildFlow is a local-first planning and handoff layer for AI-native builders. It connects a Custom GPT to local repos and notes so it can inspect, read, plan, and safely write when policy allows.
+ProChat Workbench is a ChatGPT-first local development workbench. It lets a Custom GPT plan and direct substantial software work while the user’s own computer performs guarded execution against real local repositories.
 
-## Canonical product references
+The product is designed to reduce AI development cost and friction by using ChatGPT as the reasoning interface instead of requiring a separate hosted coding-agent API for ordinary workflows.
 
-- [`README.md`](../../README.md)
-- [`docs/product/public-scope.md`](./public-scope.md)
-- [`docs/product/chatgpt-first-workflow.md`](./chatgpt-first-workflow.md)
-- [`docs/product/releases/buildflow-v1.2.13-beta.md`](./releases/buildflow-v1.2.13-beta.md)
-- [`docs/product/releases/buildflow-v1.2.12-beta.md`](./releases/buildflow-v1.2.12-beta.md)
-- [`docs/product/releases/custom-gpt-actions-v1.0.md`](./releases/custom-gpt-actions-v1.0.md)
-- [`docs/CUSTOM_GPT_INSTRUCTIONS.md`](../CUSTOM_GPT_INSTRUCTIONS.md)
-- [`docs/openapi.chatgpt/README.md`](../openapi.chatgpt/README.md)
+## Canonical documentation order
 
-## Current beta scope
+1. [`philosophy.md`](./philosophy.md) — why Workbench exists and what it promises
+2. [`strategy.md`](./strategy.md) — how quick mode and goal mode should operate
+3. [`roadmap.md`](./roadmap.md) — phased delivery with reliability gates
+4. [`plans/agentic-work-packets.md`](./plans/agentic-work-packets.md) — technical implementation plan
+5. code, schema, instructions, and runtime changes
 
-BuildFlow v1.2.13-beta is focused on the free GitHub Local path. Users run BuildFlow themselves and import their own `/api/openapi` endpoint into a ChatGPT Custom GPT.
+These documents are authoritative when older documents conflict with them.
 
-BuildFlow v1.2.13-beta adds user-facing activity feedback on top of the repo-app-maintainer capability.
+## Product model
 
-That beta now covers:
+```text
+User goal in ChatGPT
+  -> ChatGPT reasons and plans
+  -> Workbench persists the run
+  -> ChatGPT compiles safe work packets
+  -> Workbench executes locally
+  -> Workbench validates and checkpoints
+  -> ChatGPT reviews evidence and continues
+```
 
-- inspect and read connected sources
-- plan and generate execution packets
-- verified writes for allowed repo-local files
-- guarded delete, move, rename, mkdir, and rmdir operations
-- confirmation-gated cleanup for protected and maintenance-sensitive paths
-- consistent dotfile and env-template handling
-- `dryRun` / `preflight` checks before writes
-- structured policy errors for blocked or confirmation-required paths
-- activity metadata that makes action progress and outcomes easier to follow
-- source metadata that exposes `writable`, `writeProfile`, and `writePolicy`
+Workbench supports two internal modes:
+
+- **Quick mode** for questions, narrow fixes, and small edits.
+- **Goal mode** for features, phases, migrations, refactors, and other substantial work.
+
+The user should describe outcomes in natural language. The Custom GPT should select the right mode and orchestration pattern automatically.
+
+## Current stable action surface
+
+The current Custom GPT exposes five stable operations:
+
+- `getWorkbenchStatus`
+- `readWorkbenchContext`
+- `applyWorkbenchFileChange`
+- `commitWorkbenchChanges`
+- `runWorkbenchCommand`
+
+These actions remain bounded and fail-fast. The new goal-mode architecture will build larger outcomes from persistent state, deterministic work packets, asynchronous local execution, and compact status retrieval rather than making one request run indefinitely.
+
+## Current capabilities
+
+- explicit source locking
+- exact reads and bounded search
+- cached Graphify navigation
+- verified repo-local writes
+- guarded move, delete, rename, mkdir, and rmdir operations
+- targeted validation and named security scans
+- explicit-path commits
+- compact activity metadata
+- branch-aware source metadata
+- protected-path and confirmation policies
+
+## Planned agentic capabilities
+
+- automatic quick-mode versus goal-mode selection
+- persistent runs and implementation plans
+- deterministic work packets
+- asynchronous packet execution
+- resume after restart or from a new conversation
+- compact packet review and automatic continuation
+- one bounded repair attempt
+- safe per-source auto-commit
+- pause, cancel, recovery, and observability
 
 ## Safety model
 
-The beta still blocks secrets, traversal, and generated/vendor output, and it keeps confirmation gates on sensitive maintenance paths such as lockfiles, GitHub workflows, Prisma migrations, and dependency changes.
+Autonomy must not weaken repository safety.
 
-## Release history
+Workbench continues to require:
 
-- [`v1.0`](./releases/custom-gpt-actions-v1.0.md) is the stable Custom GPT Actions baseline.
-- [`v1.2.13-beta`](./releases/buildflow-v1.2.13-beta.md) is the current beta maintainer-release.
+- explicit `sourceId`
+- exact source verification before writes
+- repo-relative allowed paths
+- secret and protected-path blocking
+- idempotent packet execution
+- stale-HEAD detection
+- validation before automatic commit
+- explicit changed paths only
+- no default force push
+- no default auto-push
 
-## Planned visibility work
+## Naming and compatibility
 
-- [`Dashboard activity UI / live BuildFlow activity feed`](./roadmap.md#dashboard-activity-ui--live-buildflow-activity-feed) is a future dashboard-side enhancement, not implemented yet.
+Use **ProChat Workbench** for public product language.
+
+The name **BuildFlow** may remain temporarily in compatibility identifiers such as:
+
+- the repository or source ID
+- legacy scripts and CLI aliases
+- environment variable fallbacks
+- historical release notes
+- package internals that need a staged migration
+
+New user-facing documentation, schema descriptions, errors, and features should use Workbench terminology.
+
+## Historical and superseded documents
+
+Older documents may remain as implementation evidence or release history, but they are not automatically current product guidance.
+
+In particular:
+
+- [`agent-mode.md`](./agent-mode.md) is superseded by `philosophy.md` and `strategy.md`.
+- [`agent-mode-optimization-roadmap.md`](./agent-mode-optimization-roadmap.md) is superseded by `roadmap.md`.
+- historical BuildFlow release documents retain their original names for traceability.
+
+## Supporting references
+
+- [`README.md`](../../README.md)
+- [`docs/CUSTOM_GPT_INSTRUCTIONS.md`](../CUSTOM_GPT_INSTRUCTIONS.md)
+- [`docs/openapi.chatgpt/README.md`](../openapi.chatgpt/README.md)
+- [`public-scope.md`](./public-scope.md)
+- [`chatgpt-first-workflow.md`](./chatgpt-first-workflow.md)
+- release history under [`releases/`](./releases/)

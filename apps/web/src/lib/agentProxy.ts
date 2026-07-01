@@ -36,13 +36,14 @@ type AgentProxyOptions = RequestInit & {
 }
 
 export type AgentErrorPayload = {
-  status: 'error'
-  code: 'AGENT_UNAVAILABLE' | 'AGENT_ERROR'
+  status: 'error' | 'timeout'
+  code: 'AGENT_UNAVAILABLE' | 'AGENT_ERROR' | 'AGENT_TIMEOUT'
   error: string
   message: string
   userMessage: string
   detail?: string
   retryable: boolean
+  connected?: boolean
 }
 
 const getAgentBaseUrl = () => (process.env.LOCAL_AGENT_URL || DEFAULT_AGENT_URL).replace(/\/$/, '')
@@ -95,6 +96,21 @@ export async function fetchAgentJson(pathname: string, options: AgentProxyOption
     const data = (await response.json().catch(async () => ({ error: await response.text().catch(() => '') }))) as Record<string, unknown>
     return { response, data }
   } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      return {
+        response: null,
+        data: {
+          status: 'timeout',
+          code: 'AGENT_TIMEOUT',
+          error: 'BuildFlow agent request timed out',
+          message: 'BuildFlow agent request timed out',
+          userMessage: 'The local agent is reachable but did not finish this request before the timeout.',
+          detail: toErrorDetail(err),
+          retryable: true,
+          connected: true
+        } satisfies AgentErrorPayload
+      }
+    }
     return { response: null, data: unavailablePayload(err) }
   } finally {
     clearTimeout(timeout)

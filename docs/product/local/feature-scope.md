@@ -1,10 +1,12 @@
-# BuildFlow Local feature scope
+# ProChat Workbench Local Feature Scope
 
-Current and planned BuildFlow Local features:
+Current and planned Workbench Local features:
 
 - source management
+- branch-aware grouping for configured Git checkouts and linked worktrees
 - local indexing
-- active context
+- dashboard active context
+- explicit-source Custom GPT actions
 - safe write mode
 - local dashboard
 - local activity
@@ -19,5 +21,5 @@ Current and planned BuildFlow Local features:
 - local onboarding
 - local docs and contribution flow
 
-This list is for BuildFlow Local only.
+This list is for Workbench Local only.
 It does not include paid, hosted, SaaS, Pro, managed, commercial, billing, account, team, or private roadmap items.

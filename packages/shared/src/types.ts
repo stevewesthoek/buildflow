@@ -59,6 +59,11 @@ export type KnowledgeSource = {
   path: string
   enabled: boolean
   type?: string
+  repoGroupId?: string
+  repoRoot?: string
+  branchName?: string
+  availableBranches?: string[]
+  isGitWorktree?: boolean
   active?: boolean
   indexed?: boolean
   indexStatus?: 'ready' | 'pending' | 'indexing' | 'failed' | 'disabled' | 'unknown'
@@ -76,6 +81,11 @@ export type DiscoveredRepository = {
   id: string
   account: string
   relativePath: string
+  repoGroupId?: string
+  repoRoot?: string
+  branchName?: string
+  availableBranches?: string[]
+  isGitWorktree?: boolean
   alreadyAdded?: boolean
   sourceId?: string
 }

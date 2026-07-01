@@ -1,7 +1,7 @@
 # OpenAI Custom GPT Action Limits
 
 **Document type:** Authoritative constraints reference — read before changing schema, routes, or instructions  
-**Last verified:** 2026-06-15
+**Last verified:** 2026-06-19
 **Research method:** Current official OpenAI docs for action timeout, payload, schema, authentication, Preview testing, and GPT action setup constraints
 
 > **CRITICAL FOR ALL FUTURE DEVELOPERS:** Every architecture decision in BuildFlow's Custom GPT layer is constrained by these limits. Do NOT implement features that contradict them. This document was written after discovering that server-side agent polling — which BuildFlow previously used — is fundamentally incompatible with Custom GPTs. Read the "What Does NOT Work" section carefully.
@@ -12,29 +12,29 @@
 
 | Constraint | Limit | Source |
 |---|---|---|
-| Action call timeout | **45 seconds** (hard cutoff, not configurable) | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
-| Response payload | **Less than 100,000 characters** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
-| Request payload | **Less than 100,000 characters** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
-| Endpoint summary field | **300 characters** max | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
-| Endpoint description field | **300 characters** max | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
-| Parameter description field | **700 characters** max | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
+| Action call timeout | **45 seconds** (hard cutoff, not configurable) | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
+| Response payload | **Less than 100,000 characters** | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
+| Request payload | **Less than 100,000 characters** | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
+| Endpoint summary field | **300 characters** max | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
+| Endpoint description field | **300 characters** max | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
+| Parameter description field | **700 characters** max | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
 | GPT instructions field | **BuildFlow target: under 8 KB** | local verifier |
 | Streaming responses | **Not supported** — synchronous REST only | Architecture constraint |
-| Custom request headers | **Not supported** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
-| Images/video in payload | **Not supported** | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
-| TLS requirement | TLS 1.2+ on port 443 | [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) |
+| Custom request headers | **Not supported** for arbitrary action calls; use the schema authentication mode | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
+| Images/video in payload | **Not supported** | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
+| TLS requirement | TLS 1.2+ on port 443 | [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) |
 | Apps vs Actions | A GPT can use either apps or actions, not both at the same time | [help.openai.com/en/articles/9442513-configuring-actions-in-gpts](https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts) |
 | Pro mode | Actions are not available for Pro mode | [help.openai.com/en/articles/9442513-configuring-actions-in-gpts](https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts) |
 
 ---
 
-## Official Sources Checked On 2026-06-15
+## Official Sources Checked On 2026-06-19
 
-- **Production notes on GPT Actions** — OpenAI Developers, update date not shown on page. Confirms 45-second round-trip timeout, 100,000-character request/response payload limits, TLS 1.2+ on port 443, OpenAPI description/summary/parameter description limits, text-only payloads, no custom headers, and consequential flag behavior.
-- **Configuring actions in GPTs** — OpenAI Help Center, updated 24 days ago. Confirms actions require authentication configuration plus OpenAPI schema, operation IDs identify actions, schema can be pasted/imported/started from examples, and actions should be tested in Preview.
-- **Creating and editing GPTs** — OpenAI Help Center, updated 3 days ago. Confirms GPT instructions, actions, recommended models, Preview testing, save/update/versioning, and the web-only GPT editing flow.
-- **Troubleshooting GPTs** — OpenAI Help Center, updated 11 days ago. Confirms Preview testing as the first troubleshooting path and confirms apps/actions availability and workspace-domain checks.
-- **GPTs in ChatGPT** — OpenAI Help Center, updated 12 days ago. Confirms GPTs can include instructions, knowledge, capabilities, apps, and actions, and that a GPT can use either apps or actions but not both.
+- **Production notes on GPT Actions** — OpenAI Developers, accessed 2026-06-19. Confirms 45-second round-trip timeout, 100,000-character request/response payload limits, TLS 1.2+ on port 443, OpenAPI description/summary/parameter description limits, text-only payloads, no custom headers, and consequential flag behavior.
+- **Configuring actions in GPTs** — OpenAI Help Center, accessed 2026-06-19 and marked updated 3 days earlier. Confirms actions require authentication configuration plus OpenAPI schema, operation IDs identify actions, schema can be pasted/imported/started from examples, actions should be tested in Preview, a GPT can use apps or actions but not both, and actions are not available for Pro mode.
+- **Creating and editing GPTs** — OpenAI Help Center, accessed 2026-06-19 and marked updated 20 hours earlier. Confirms GPT instructions, actions, recommended models, Preview testing, save/update/versioning, and the web-only GPT editing flow.
+- **Troubleshooting GPTs** — OpenAI Help Center, accessed 2026-06-19 and marked updated 14 days earlier. Confirms Preview testing as the first troubleshooting path and confirms apps/actions availability and workspace-domain checks.
+- **GPTs in ChatGPT** — OpenAI Help Center, accessed 2026-06-19 and marked updated 3 days earlier. Confirms GPTs can include instructions, knowledge, capabilities, apps, and actions, and that a GPT can use either apps or actions but not both.
 
 ## The Single Most Important Architectural Constraint
 
@@ -56,10 +56,10 @@ This means the correct architecture for repo work in a Custom GPT is fast, bound
 
 ```
 GPT instructions define a small assistant workflow:
-  1. Read exact context    → readBuildFlowContext
-  2. Answer or patch       → applyBuildFlowFileChange only when editing
-  3. Validate when useful  → runBuildFlowCommand for the smallest relevant check
-  4. Commit when ready     → commitBuildFlowChanges for explicit paths
+  1. Read exact context    → readWorkbenchContext
+  2. Answer or patch       → applyWorkbenchFileChange only when editing
+  3. Validate when useful  → runWorkbenchCommand for the smallest relevant check
+  4. Commit when ready     → commitWorkbenchChanges for explicit paths
   5. Stop                  → concise result, validation evidence, or resume point
 ```
 
@@ -93,23 +93,37 @@ BuildFlow previously attempted server-side agent orchestration:
 
 ---
 
-## BuildFlow Schema — Current Operations
+## Workbench Schema — Current GPT Operations
 
 **BuildFlow internal payload policy:** keep every GPT-facing request and response at or below 80,000 characters and 80,000 UTF-8 bytes unless a lower route-specific budget is documented. The internal boundary is deliberately below the OpenAI limit so action payloads remain well clear of the platform cutoff.
 
-**Total: 5 operations** (hard limit: 30)
+**Total: 5 operations** (local GPT contract; enforced by `pnpm verify:gpt-actions`)
 
 | `operationId` | Method | Endpoint | Purpose |
 |---|---|---|---|
-| `getBuildFlowStatus` | GET | `/api/actions/status` | Connection + sources |
-| `readBuildFlowContext` | POST | `/api/actions/read-context` | Read files, focused large-file context, search, list structure, or prepare task context |
-| `applyBuildFlowFileChange` | POST | `/api/actions/apply-file-change` | Write: create / overwrite / patch / append / delete / move |
-| `commitBuildFlowChanges` | POST | `/api/actions/commit-changes` | Diff + explicit stage + commit in one call |
-| `runBuildFlowCommand` | POST | `/api/actions/run-command` | Allowlisted git + validation commands |
+| `getWorkbenchStatus` | GET | `/api/actions/status` | Connection + sources |
+| `readWorkbenchContext` | POST | `/api/actions/read-context` | Read files, focused large-file context, search, list structure, Graphify navigation, or prepare task context |
+| `applyWorkbenchFileChange` | POST | `/api/actions/apply-file-change` | Write: create / overwrite / patch / append / delete / move |
+| `commitWorkbenchChanges` | POST | `/api/actions/commit-changes` | Diff + explicit stage + commit in one call |
+| `runWorkbenchCommand` | POST | `/api/actions/run-command` | Allowlisted git + validation commands |
 
 The GPT schema does not expose shared dashboard context setters. The GPT locks a `sourceId` conversationally and passes it explicitly on every repo action.
 
 All operations use `x-openai-isConsequential: false` because the backend write policy enforcement is more precise than the ChatGPT confirmation UI.
+
+The imported OpenAPI operation IDs are the Workbench names above. Some lower-level logs or timeout diagnostics may still include BuildFlow as the technical engine name or historical diagnostic labels. Treat those as internal diagnostics, not Custom GPT operation names, and do not import legacy BuildFlow action names into the GPT editor.
+
+## Source And Branch Boundary
+
+Every GPT-facing repo operation requires an explicit `sourceId`. Dashboard active context is a local UI convenience, not implicit GPT scope.
+
+Branch-aware behavior is implemented for configured Git checkouts/worktrees only:
+
+- Git metadata is detected from configured source paths.
+- Sources that share the same Git common directory receive the same `repoGroupId`.
+- Activating or enabling one configured branch checkout expands to configured sibling checkouts in that repo group.
+- Linked worktrees with `.git` files are discovered and marked as worktrees.
+- Workbench does not checkout or materialize every Git branch by itself. Create linked worktrees and add/discover them as sources when branch-parallel work is needed.
 
 ---
 
@@ -122,10 +136,10 @@ BuildFlow does not use the whole 45-second platform window. The GPT-facing web r
 | Operation | BuildFlow route deadline | Backend/process default | Notes |
 |---|---|---|
 | Status check | 4,000 ms | 1.5-3.5s subcalls | Should always be fast |
-| `readBuildFlowContext` | 8,000 ms | bounded by remaining route budget | Search/list/read defaults are capped |
-| `applyBuildFlowFileChange` | 8,000 ms | bounded by remaining route budget | Writes are guarded and verified |
-| `commitBuildFlowChanges` | 10,000 ms | 2s diff, 2.5s add, 4.5s commit | Explicit paths only |
-| `runBuildFlowCommand` | 12,000 ms | 5s fast commands, 8s slow defaults, 12s max | Slow validation should be a separate prompt |
+| `readWorkbenchContext` | 8,000 ms | bounded by remaining route budget | Search/list/read defaults are capped |
+| `applyWorkbenchFileChange` | 8,000 ms | bounded by remaining route budget | Writes are guarded and verified |
+| `commitWorkbenchChanges` | 10,000 ms | 2s diff, 2.5s add, 4.5s commit | Explicit paths only |
+| `runWorkbenchCommand` | 12,000 ms | 5s fast commands, 8s slow defaults, 12s max | Slow validation should be a separate prompt |
 
 **BuildFlow internal policy:** route deadline first, backend fetch timeout second, command process timeout third. If any layer cannot finish safely, return JSON with `status:"timeout"` or `status:"needs_narrower_scope"` and compact diagnostics.
 
@@ -157,7 +171,7 @@ When BuildFlow actions return quickly but the chat waits 20-60 seconds, the dela
 
 ## Best Practices
 
-From [platform.openai.com/docs/actions/production](https://platform.openai.com/docs/actions/production) and BuildFlow's local verifier:
+From [developers.openai.com/api/docs/actions/production](https://developers.openai.com/api/docs/actions/production) and BuildFlow's local verifier:
 
 1. Keep responses under 100K characters — return minimal structured JSON, not prose
 2. Target sub-10s response times — the 45s limit is a ceiling, not a goal

@@ -163,6 +163,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(response)
     }
 
+    if (mode === 'active_run') {
+      deadline.setPhase('active_run')
+      const data = await executeAction('/api/workbench-runs/active', {
+        sourceId: body.sourceId
+      }, auth.bearerToken, transport('active_run'))
+      const response = stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId }))
+      const sizeCheck = validateResponseSize(response)
+      if (!sizeCheck.ok) {
+        return NextResponse.json(buildActionErrorEnvelope({
+          code: 'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
+          message: 'Workbench active-run response exceeded action size budget.',
+          details: `Response was ${sizeCheck.bytes} bytes.`,
+          recovery: ['Read the persisted run handoff directly', 'Reduce stored resume details'],
+          status: 'needs_narrower_scope'
+        }))
+      }
+      return NextResponse.json(response)
+    }
+
     if (mode === 'graph_context') {
       deadline.setPhase('graph_context')
       const data = await executeAction('/api/graph-context', {

@@ -1,10 +1,10 @@
 # ProChat Workbench
 
-**ProChat Workbench lets ChatGPT work safely with your real local projects.**
+**ProChat Workbench lets ChatGPT plan and execute substantial work in your real local projects.**
 
-Connect a Custom GPT to your own computer and give it bounded access to repositories, notes, documentation, plans, and knowledge folders. It can inspect exact files, search local context, apply guarded changes, run targeted validation, and commit explicit paths without pretending to be an autonomous agent.
+Connect a Custom GPT to your own computer and use ChatGPT as the reasoning interface for local repositories, documentation, plans, notes, and knowledge folders. Workbench provides guarded local execution, persistent goals, exact context, validation, checkpoints, and explicit-path Git operations.
 
-ProChat Workbench is free, self-hosted, and local-first. It is for builders who want ChatGPT to use real project context instead of guessing from pasted snippets.
+ProChat Workbench is free, self-hosted, and local-first. It is designed to reduce the cost and friction of AI-assisted development by using the ChatGPT interface you already have instead of requiring a separate hosted coding-agent API for ordinary workflows.
 
 ```text
 Public product: ProChat Workbench
@@ -24,8 +24,8 @@ flowchart LR
   Agent --> Sources["Repos · notes · docs · skills"]
   Agent --> Writes["Verified writes"]
   Agent --> Commands["Safe commands"]
-  GPT --> Assistant["Fast Project Assistant"]
-  Assistant --> Flow["Read · answer or edit · validate when needed · stop"]
+  GPT --> Assistant["Quick mode or Goal mode"]
+  Assistant --> Flow["Plan · execute packets · validate · checkpoint · continue"]
 
   classDef dark fill:#0f172a,stroke:#2563eb,color:#f8fafc;
   classDef local fill:#ecfeff,stroke:#0891b2,color:#0f172a;
@@ -84,7 +84,7 @@ ProChat Workbench exposes a Custom GPT action schema through the BuildFlow engin
 
 Your GPT can:
 
-- check BuildFlow status
+- check Workbench status
 - list connected sources
 - lock an explicit `sourceId` for the chat
 - inspect file trees
@@ -103,6 +103,8 @@ Add repos, notes, docs, skills, or business folders as BuildFlow sources.
 BuildFlow supports:
 
 - one or multiple active sources
+- Git branch metadata for configured repositories (`branchName`, available branch count, and worktree flag)
+- branch-aware activation for configured linked Git worktrees that share the same Git common directory
 - local indexing and search
 - recursive repo discovery from a root folder
 - auto-generated source IDs and labels
@@ -110,6 +112,8 @@ BuildFlow supports:
 - manual reindexing
 - optional per-source auto-index settings
 - searchable status reporting for ChatGPT and the dashboard
+
+Branch-aware activation works on configured checkouts and worktrees. When a repo has multiple configured branch worktrees, enabling/disabling or activating one configured branch expands to the configured siblings in the same repo group. BuildFlow does not silently check out every Git branch inside one working tree; create linked Git worktrees and add/discover them as sources when you want simultaneous branch access.
 
 ### Verified file writes
 
@@ -457,16 +461,17 @@ flowchart TD
 
 ## Custom GPT actions
 
-BuildFlow exposes a focused action surface:
+ProChat Workbench exposes exactly five Custom GPT actions:
 
-- `getBuildFlowStatus`
-- `setBuildFlowActiveContext`
-- `readBuildFlowContext`
-- `applyBuildFlowFileChange`
-- `commitBuildFlowChanges`
-- `runBuildFlowCommand`
+- `getWorkbenchStatus`
+- `readWorkbenchContext`
+- `applyWorkbenchFileChange`
+- `commitWorkbenchChanges`
+- `runWorkbenchCommand`
 
-These actions let ChatGPT inspect, read, plan, write, validate, commit, and continue a bounded goal loop without pretending it has unrestricted local access.
+These actions let ChatGPT inspect, read, write, validate, commit, and continue a bounded Fast Repo Assistant flow without pretending it has unrestricted local access.
+
+There is no Custom GPT action for changing dashboard active context. The GPT locks a `sourceId` conversationally after `getWorkbenchStatus?include=sources` and passes that explicit `sourceId` on every repo action. Legacy `/api/actions/agent/*` polling routes are retired and must not be imported into the GPT schema.
 
 ## Who BuildFlow is for
 

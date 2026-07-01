@@ -1,166 +1,65 @@
-# ProChat Workbench Product Direction
+# Superseded: Previous ProChat Workbench Product Direction
 
-**Status:** Active product direction.  
-**Public product:** ProChat Workbench  
-**Technical engine and internal identifier:** BuildFlow  
-**Architecture:** ChatGPT does the reasoning and coding. The BuildFlow engine provides fast, deterministic local project tools.
+Status: superseded.
 
-## What ProChat Workbench Is
+This document previously defined ProChat Workbench as a small, bounded Fast Repo Assistant that stopped after one or two tasks and explicitly rejected agentic execution.
 
-ProChat Workbench is a local project workbench for Custom GPTs. It lets ChatGPT work with repositories, documentation, notes, and knowledge folders safely and quickly:
+That direction is no longer canonical.
 
-1. lock an explicit source
-2. prepare or read exact context
-3. apply guarded file changes when asked
-4. run targeted validation when needed
-5. commit explicit changed paths when appropriate
-6. stop with a concise result or resume point
+Use these documents instead:
 
-This is not an autonomous agent product. The Custom GPT remains the reasoning and coding layer. ProChat Workbench provides the local context, execution, safety, validation, and Git experience through the BuildFlow engine.
+1. [`philosophy.md`](./philosophy.md)
+2. [`strategy.md`](./strategy.md)
+3. [`roadmap.md`](./roadmap.md)
+4. [`plans/agentic-work-packets.md`](./plans/agentic-work-packets.md)
 
-During the public naming migration, preserve BuildFlow repository names, package scopes, scripts, source IDs, action operation names, environment variables, and API contracts.
+## What Changed
 
-## Why This Is The Only GPT Workflow
+The previous direction concluded that synchronous Custom GPT Actions required the whole product to remain non-agentic.
 
-Custom GPT Actions are synchronous external API calls. Every extra action requires ChatGPT to reason, call the endpoint, wait for a full response, parse JSON, and reason again. Long loops create slow responses, timeouts, and context drift. Actions do not provide reliable mid-call progress streaming, so the GPT must narrate before each action and summarize after each result.
-
-OpenAI's current GPT Actions production documentation lists a 45-second action request timeout. BuildFlow does not spend that whole window. The web action adapter enforces shorter GPT-facing deadlines and returns structured JSON first: status 4s, read-context 8s, apply-file-change 8s, commit-changes 10s, and run-command 12s maximum. This is a fail-fast contract, not a guarantee against Cloudflare, ChatGPT, or network outages.
-
-BuildFlow therefore optimizes for fast, bounded assistance:
+The new direction keeps the useful transport lessons but changes the architectural conclusion:
 
 ```text
-Ask → read exact context → answer or patch → targeted validation → optional commit → stop
+short bounded actions
++ persistent run state
++ deterministic work packets
++ asynchronous local execution
++ compact review checkpoints
+= stable agentic workflow
 ```
 
-The product should not present a separate agent mode, autonomous mode, polling mode, or server-owned implementation loop.
+Workbench is now intended to support phase-sized, looping, automated local development with substantially less user supervision.
 
-## Fast Defaults
+## Knowledge Preserved From The Previous Direction
 
-- Questions: read minimal context and answer. No validation. No commit.
-- Small edits: read exact files, patch, validate the smallest relevant command, report or commit.
-- Large files: use `grep_context`, `read_range`, or `read_symbol`; bulk reads refuse files over 100 KB instead of returning top-of-file fallback content.
-- Larger goals: create or update a concise plan, complete only the first small safe slice, then stop.
-- Task lists: normally complete 1 task per response; up to 2 tightly related small tasks when all paths and validations are clear.
-- Action budget: target 1-2 BuildFlow actions per response; hard stop at 3 actions unless the user explicitly asks to continue.
-- Slow or broad work: stop with the next concrete action instead of continuing to loop.
-- Read defaults: search/list limit 5, exact read `maxBytesPerFile` 4000, max 5 paths, grep context `before <= 40`, `after <= 60`, `maxMatches <= 10`, and range reads up to 250 lines.
+The following engineering conclusions remain valid:
 
-## Progress And UI Reality
+- individual GPT Action calls must stay short and fail-fast
+- action responses must remain compact JSON
+- every repo action must carry an explicit `sourceId`
+- exact reads should precede writes
+- Graphify is navigation only, not source truth
+- writes must be guarded and verified
+- validation should be targeted
+- commits must stage explicit paths only
+- secrets and protected paths must remain blocked
+- quick mode must remain stable
 
-Custom GPT Actions call external APIs and return a completed response. BuildFlow cannot stream progress into the ChatGPT UI while one action is running. The assistant must therefore explain progress before and after each action:
+## Conclusions That Are Superseded
 
-1. say what it is about to call
-2. call the smallest useful action
-3. summarize the action result or compact activity feedback
-4. decide whether another action is still inside the small action budget
+The following previous product conclusions must no longer guide implementation:
 
-If ChatGPT shows only "talking to BuildFlow" for a long time, the remedy is not a long-running worker or polling loop. The remedy is to split work into smaller user-visible action slices.
+- Workbench is not an agentic product
+- large goals should stop after the first small slice
+- every response should have a universal three-action hard limit
+- server-side execution loops are categorically out of scope
+- persistent goal mode should not be exposed to the Custom GPT
+- polling or asynchronous execution can never be part of the architecture
 
-## Custom GPT Action Architecture
+The replacement strategy does not use endless synchronous polling. It uses durable run state and short status retrieval around asynchronous local work packets.
 
-The Custom GPT surface is limited to five compact operations:
+## Historical Purpose
 
-```text
-getBuildFlowStatus         -> check connection + sources
-readBuildFlowContext       -> deterministic task context / read / search / list
-applyBuildFlowFileChange   -> create / overwrite / patch / append / delete_file / move
-commitBuildFlowChanges     -> diff + explicit stage + commit in one call
-runBuildFlowCommand        -> git status, diff, type-check, validation, optional push
-```
+This file remains only to explain why older code, tests, and documents may contain Fast Repo Assistant or anti-agentic language.
 
-These actions are the whole GPT-facing product surface. Shared dashboard context changes are not exposed to the GPT. Add new GPT actions only when they reduce action chatter through deterministic, bounded work.
-
-## Conversation Isolation
-
-Every repo action requires an explicit `sourceId`. The GPT must lock the repo at the start of the conversation and keep passing the same source ID unless the user explicitly changes it.
-
-Global active context is a dashboard convenience only. It must not be used as implicit scope for repo reads, writes, validation, or commits.
-
-## Validation Policy
-
-Validation is important, but it should not turn simple assistance into a slow loop.
-
-- Run validation after code, config, package, schema, or command-runner changes.
-- Prefer the smallest relevant validation command.
-- Do not run type checks after pure assessment or read-only questions.
-- Do not run broad test suites unless the user asked or the change requires them.
-- Treat slow validation as a stopping point with clear evidence and a next action.
-
-## Commit Policy
-
-Commit only explicit paths. Use `commitBuildFlowChanges` to collapse diff, staging, and commit into one bounded action.
-
-Push only when the user explicitly asks.
-
-## Tracked Static Asset Deletion
-
-BuildFlow may delete an already tracked static/binary asset only when the user explicitly approved that exact deletion. The delete must be `delete_file`, the file must be tracked by Git, the path must not be secret-sensitive or protected, and staging/commit must name the exact deleted path.
-
-This is repo-agnostic and applies to safe static/document asset paths such as PDFs, images, video, audio, archives, and fonts. Creation, overwrite, and modification of binary/static assets remain blocked unless a separate policy explicitly supports them.
-
-## Stop Conditions
-
-Stop and report a concise result when:
-
-1. the requested answer is complete
-2. a patch and its targeted validation are complete
-3. a write requires confirmation
-4. the same validation fails twice after repair
-5. the local stack is unavailable
-6. the next task is ambiguous, broad, slow, or larger than the task budget
-7. the user asks to stop
-
-## What Not To Build Into GPT Actions
-
-Do not add these to the Custom GPT path:
-
-- server-side autonomous coding loops
-- long-running job polling
-- local LLM calls inside action routes
-- OpenAI API, Responses API, Agents SDK, or separate model runtimes
-- broad unrestricted shell access
-- large status snapshots
-- repeated read/search loops that could be replaced by one exact read or deterministic macro-action
-
-Internal dashboard or CLI experiments must not redefine the Custom GPT product direction. The GPT-facing direction is Fast Repo Assistant only.
-
-## Timeout And Stability Policy
-
-BuildFlow cannot stream progress while a Custom GPT Action is running. The GPT must make progress visible by narrating before each action and summarizing the compact action result after each action.
-
-The user may see platform-level UI states such as "talking to BuildFlow" while ChatGPT waits for the action response. BuildFlow reduces that risk by making each action small, bounded, deterministic, and fail-fast. It does not try to solve this with background jobs, polling, or hidden agents.
-
-When an action exceeds its BuildFlow deadline, the route returns a compact error envelope with `BUILDFLOW_ACTION_DEADLINE_EXCEEDED`, elapsed time, route, phase, source/path/mode or command kind when known, and a narrower next action. When a bulk read is too broad, it returns `BUILDFLOW_NEEDS_NARROWER_SCOPE` instead of launching an expensive search/read.
-
-For large requests, the GPT must slice work:
-
-1. plan the first safe slice
-2. read only the smallest evidence needed
-3. patch one focused block when editing
-4. validate only when useful
-5. stop with the exact next action or resume prompt
-
-Default action budget per response is 1-2 BuildFlow actions, with a hard budget of 3. Larger goals continue across user-visible turns instead of one long loop.
-
-## Optimization Rule
-
-The fastest BuildFlow is not more agentic. It is fewer, smaller, clearer tool calls.
-
-Good:
-- compact task context prep
-- exact multi-file reads
-- focused large-file reads with `grep_context`, `read_range`, and `read_symbol`
-- fast-fail diagnostics before gateway timeouts
-- write policy preflight
-- targeted validation
-- commit-specific-paths action
-- compact action activity feedback
-- compact diagnostics on demand
-
-Bad:
-- autonomous-agent branding
-- polling loops
-- local AI in GPT-facing actions
-- broad unrestricted shell
-- repeated status endpoints that return large state
-- broad searches when a path, symbol, or line range is known
+Do not cite this file as the current product direction.
