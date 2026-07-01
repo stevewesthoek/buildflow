@@ -12,6 +12,7 @@ export type PersistedValidationCommandKind =
   | 'run_package_test_marker'
   | 'type_check_web'
   | 'type_check_cli'
+  | 'run_exact_command'
 
 export type WorkbenchValidationJobStatus =
   | 'queued'
@@ -32,9 +33,13 @@ export type WorkbenchValidationJobRequest = {
   runId?: string
   packetId?: string
   taskId?: string
+  executable?: SafeCommandRequest['executable']
+  args?: string[]
   nodeVersion?: '20'
+  policy?: SafeCommandRequest['policy']
   requiredBranch?: string
   protectedPaths?: string[]
+  networkAccess?: false
 }
 
 export type WorkbenchValidationJobResult = {
@@ -45,6 +50,10 @@ export type WorkbenchValidationJobResult = {
   stderr: string
   outputTruncated: boolean
   changedPaths: string[]
+  protectedPathsChanged?: string[]
+  actualBranch?: string
+  reason?: string
+  details?: unknown
   terminatedByInfrastructure: boolean
   terminationReason?: 'action_deadline' | 'job_timeout' | 'cancelled' | 'worker_failure'
   runtime?: SafeCommandResult['runtime']
@@ -86,6 +95,12 @@ export type CompactWorkbenchValidationJob = {
   packageDir?: string
   scriptName?: string
   marker?: string
+  executable?: SafeCommandRequest['executable']
+  args?: string[]
+  nodeVersion?: '20'
+  timeoutMs?: number
+  requiredBranch?: string
+  protectedPaths?: string[]
   createdAt: string
   updatedAt: string
   startedAt?: string
@@ -94,9 +109,16 @@ export type CompactWorkbenchValidationJob = {
   signal?: NodeJS.Signals | null
   durationMs?: number
   outputTruncated?: boolean
+  stdout?: string
+  stderr?: string
   stdoutTail?: string
   stderrTail?: string
   changedPaths?: string[]
+  protectedPathsChanged?: string[]
+  actualBranch?: string
+  reason?: string
+  details?: unknown
+  runtime?: SafeCommandResult['runtime']
   terminatedByInfrastructure?: boolean
   terminationReason?: WorkbenchValidationJobResult['terminationReason']
 }
@@ -109,7 +131,14 @@ type WorkbenchValidationJobStore = {
 
 export type SubmitWorkbenchValidationJobResult =
   | { ok: true; created: boolean; job: CompactWorkbenchValidationJob }
-  | { ok: false; code: 'VALIDATION_JOB_STORE_BUSY' | 'VALIDATION_JOB_IDEMPOTENCY_CONFLICT' | 'VALIDATION_JOB_INVALID'; message: string }
+  | {
+      ok: false
+      code: 'VALIDATION_JOB_STORE_BUSY' | 'VALIDATION_JOB_IDEMPOTENCY_CONFLICT' | 'VALIDATION_JOB_INVALID'
+      message: string
+      field?: string
+      reason?: string
+      allowedValues?: string[]
+    }
 
 const STORE_PATH = path.join(getConfigDir(), 'workbench-validation-jobs.json')
 const LOCK_PATH = `${STORE_PATH}.lock`
@@ -123,7 +152,8 @@ const ALLOWED_COMMAND_KINDS = new Set<PersistedValidationCommandKind>([
   'run_package_test',
   'run_package_test_marker',
   'type_check_web',
-  'type_check_cli'
+  'type_check_cli',
+  'run_exact_command'
 ])
 
 function emptyStore(): WorkbenchValidationJobStore {
@@ -210,13 +240,50 @@ function textTail(value: string | undefined): string | undefined {
   return buffer.subarray(buffer.byteLength - COMPACT_OUTPUT_TAIL_BYTES).toString('utf8')
 }
 
-function normalizeRequest(request: WorkbenchValidationJobRequest): WorkbenchValidationJobRequest | undefined {
+type NormalizeValidationJobRequestResult =
+  | { ok: true; request: WorkbenchValidationJobRequest }
+  | { ok: false; field: string; reason: string; allowedValues?: string[] }
+
+function normalizeRequest(request: WorkbenchValidationJobRequest): NormalizeValidationJobRequestResult {
   const sourceId = String(request.sourceId || '').trim()
+  if (!sourceId) return { ok: false, field: 'sourceId', reason: 'sourceId is required.' }
+
   const idempotencyKey = String(request.idempotencyKey || '').trim()
-  if (!sourceId || !idempotencyKey || idempotencyKey.length > 200) return undefined
-  if (!ALLOWED_COMMAND_KINDS.has(request.commandKind)) return undefined
-  if (request.commandKind === 'run_package_script' && !String(request.scriptName || '').trim()) return undefined
-  if (request.commandKind === 'run_package_test_marker' && !String(request.marker || '').trim()) return undefined
+  if (!idempotencyKey) return { ok: false, field: 'idempotencyKey', reason: 'idempotencyKey is required.' }
+  if (idempotencyKey.length > 200) return { ok: false, field: 'idempotencyKey', reason: 'idempotencyKey must be 200 characters or fewer.' }
+
+  if (!ALLOWED_COMMAND_KINDS.has(request.commandKind)) {
+    return {
+      ok: false,
+      field: 'commandKind',
+      reason: `Unsupported persisted validation command: ${String(request.commandKind || '')}`,
+      allowedValues: Array.from(ALLOWED_COMMAND_KINDS)
+    }
+  }
+
+  if (request.commandKind === 'run_package_script' && !String(request.scriptName || '').trim()) {
+    return { ok: false, field: 'scriptName', reason: 'scriptName is required for run_package_script.' }
+  }
+  if (request.commandKind === 'run_package_test_marker' && !String(request.marker || '').trim()) {
+    return { ok: false, field: 'marker', reason: 'marker is required for run_package_test_marker.' }
+  }
+  if (request.commandKind === 'run_exact_command') {
+    if (request.executable !== 'node' && request.executable !== 'pnpm') {
+      return { ok: false, field: 'executable', reason: 'executable is required for run_exact_command.', allowedValues: ['node', 'pnpm'] }
+    }
+    if (!Array.isArray(request.args) || request.args.length === 0) {
+      return { ok: false, field: 'args', reason: 'A non-empty exact argument array is required for run_exact_command.' }
+    }
+    if (request.args.some(item => typeof item !== 'string' || item.length === 0 || item.length > 500)) {
+      return { ok: false, field: 'args', reason: 'Every exact argument must be a non-empty string of at most 500 characters.' }
+    }
+  }
+  if (request.nodeVersion !== undefined && request.nodeVersion !== '20') {
+    return { ok: false, field: 'nodeVersion', reason: 'Only the approved Node 20 runtime is supported.', allowedValues: ['20'] }
+  }
+  if (request.networkAccess !== undefined && request.networkAccess !== false) {
+    return { ok: false, field: 'networkAccess', reason: 'Persisted validation jobs do not allow network access.', allowedValues: ['false'] }
+  }
 
   const timeoutMs = Math.max(
     MIN_TIMEOUT_MS,
@@ -224,21 +291,28 @@ function normalizeRequest(request: WorkbenchValidationJobRequest): WorkbenchVali
   )
 
   return {
-    sourceId,
-    idempotencyKey,
-    commandKind: request.commandKind,
-    packageDir: request.packageDir ? String(request.packageDir).trim() : undefined,
-    scriptName: request.scriptName ? String(request.scriptName).trim() : undefined,
-    marker: request.marker ? String(request.marker).trim() : undefined,
-    timeoutMs,
-    runId: request.runId ? String(request.runId).trim() : undefined,
-    packetId: request.packetId ? String(request.packetId).trim() : undefined,
-    taskId: request.taskId ? String(request.taskId).trim() : undefined,
-    nodeVersion: request.nodeVersion,
-    requiredBranch: request.requiredBranch ? String(request.requiredBranch).trim() : undefined,
-    protectedPaths: Array.isArray(request.protectedPaths)
-      ? Array.from(new Set(request.protectedPaths.map(item => String(item).trim()).filter(Boolean))).slice(0, 50)
-      : undefined
+    ok: true,
+    request: {
+      sourceId,
+      idempotencyKey,
+      commandKind: request.commandKind,
+      packageDir: request.packageDir ? String(request.packageDir).trim() : undefined,
+      scriptName: request.scriptName ? String(request.scriptName).trim() : undefined,
+      marker: request.marker ? String(request.marker).trim() : undefined,
+      timeoutMs,
+      runId: request.runId ? String(request.runId).trim() : undefined,
+      packetId: request.packetId ? String(request.packetId).trim() : undefined,
+      taskId: request.taskId ? String(request.taskId).trim() : undefined,
+      executable: request.executable,
+      args: Array.isArray(request.args) ? request.args.map(item => String(item)) : undefined,
+      nodeVersion: request.nodeVersion,
+      policy: request.policy ? { ...request.policy } : undefined,
+      requiredBranch: request.requiredBranch ? String(request.requiredBranch).trim() : undefined,
+      protectedPaths: Array.isArray(request.protectedPaths)
+        ? Array.from(new Set(request.protectedPaths.map(item => String(item).trim()).filter(Boolean))).slice(0, 50)
+        : undefined,
+      networkAccess: false
+    }
   }
 }
 
@@ -258,6 +332,12 @@ export function compactWorkbenchValidationJob(record: WorkbenchValidationJobReco
     packageDir: record.command.packageDir,
     scriptName: record.command.scriptName,
     marker: record.command.marker,
+    executable: record.command.executable,
+    args: record.command.args,
+    nodeVersion: record.command.nodeVersion,
+    timeoutMs: record.command.timeoutMs,
+    requiredBranch: record.command.requiredBranch,
+    protectedPaths: record.command.protectedPaths,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     startedAt: record.startedAt,
@@ -266,19 +346,34 @@ export function compactWorkbenchValidationJob(record: WorkbenchValidationJobReco
     signal: record.result?.signal,
     durationMs: record.result?.durationMs,
     outputTruncated: record.result?.outputTruncated,
+    stdout: record.result?.stdout,
+    stderr: record.result?.stderr,
     stdoutTail: textTail(record.result?.stdout),
     stderrTail: textTail(record.result?.stderr),
     changedPaths: record.result?.changedPaths.slice(0, 50),
+    protectedPathsChanged: record.result?.protectedPathsChanged?.slice(0, 50),
+    actualBranch: record.result?.actualBranch,
+    reason: record.result?.reason,
+    details: record.result?.details,
+    runtime: record.result?.runtime,
     terminatedByInfrastructure: record.result?.terminatedByInfrastructure,
     terminationReason: record.result?.terminationReason
   }
 }
 
 export function submitWorkbenchValidationJob(request: WorkbenchValidationJobRequest): SubmitWorkbenchValidationJobResult {
-  const normalized = normalizeRequest(request)
-  if (!normalized) {
-    return { ok: false, code: 'VALIDATION_JOB_INVALID', message: 'Validation job request is incomplete or not allowlisted.' }
+  const normalizedResult = normalizeRequest(request)
+  if (normalizedResult.ok === false) {
+    return {
+      ok: false,
+      code: 'VALIDATION_JOB_INVALID',
+      message: normalizedResult.reason,
+      field: normalizedResult.field,
+      reason: normalizedResult.reason,
+      allowedValues: normalizedResult.allowedValues
+    }
   }
+  const normalized = normalizedResult.request
 
   const result = withExclusiveStoreLock<SubmitWorkbenchValidationJobResult>(() => {
     const store = readStore()
@@ -382,10 +477,14 @@ export function toSafeCommandRequest(job: WorkbenchValidationJobRecord, sourceRo
     packageDir: job.command.packageDir,
     scriptName: job.command.scriptName,
     marker: job.command.marker,
+    executable: job.command.executable,
+    args: job.command.args,
     nodeVersion: job.command.nodeVersion,
+    policy: job.command.policy,
     requiredBranch: job.command.requiredBranch,
     protectedPaths: job.command.protectedPaths,
-    networkAccess: false
+    networkAccess: false,
+    persistedValidation: true
   }
 }
 
@@ -473,6 +572,10 @@ export function scheduleWorkbenchValidationJob(params: {
             stderr: result.stderr,
             outputTruncated: result.outputTruncated,
             changedPaths: result.changedPaths || [],
+            protectedPathsChanged: result.protectedPathsChanged || [],
+            actualBranch: result.actualBranch,
+            reason: result.reason,
+            details: result.details,
             terminatedByInfrastructure: false,
             terminationReason: status === 'timed_out' ? 'job_timeout' : undefined,
             runtime: result.runtime

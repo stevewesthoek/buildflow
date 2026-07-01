@@ -531,9 +531,9 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; validationJobOperation?: 'submit' | 'status'; validationJobId?: string; idempotencyKey?: string; runId?: string; packetId?: string; taskId?: string; timeoutMs?: number; paths?: string[]; packageDir?: string; scriptName?: string; marker?: string; message?: string; body?: string; remote?: string; branch?: string; patternSet?: 'forbidden_runtime_execution' | 'forbidden_secret_material' | 'forbidden_upload_network' | 'forbidden_all_high_risk'; executable?: 'node' | 'pnpm'; args?: string[]; nodeVersion?: '20'; policy?: { denyDatabaseCommands?: boolean; denyMigrationCommands?: boolean; denyDeploymentCommands?: boolean; denyNetworkCommands?: boolean }; protectedPaths?: string[]; requiredBranch?: string; networkAccess?: false; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/commands/run', async (request, reply) => {
+  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; validationJobOperation?: 'submit' | 'status'; validationJobId?: string; idempotencyKey?: string; runId?: string; packetId?: string; taskId?: string; timeoutMs?: number; validationJobTimeoutMs?: number; paths?: string[]; packageDir?: string; scriptName?: string; marker?: string; message?: string; body?: string; remote?: string; branch?: string; patternSet?: 'forbidden_runtime_execution' | 'forbidden_secret_material' | 'forbidden_upload_network' | 'forbidden_all_high_risk'; executable?: 'node' | 'pnpm'; args?: string[]; nodeVersion?: '20'; policy?: { denyDatabaseCommands?: boolean; denyMigrationCommands?: boolean; denyDeploymentCommands?: boolean; denyNetworkCommands?: boolean }; protectedPaths?: string[]; requiredBranch?: string; networkAccess?: false; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/commands/run', async (request, reply) => {
     try {
-      const { sourceId, commandKind, validationJobOperation, validationJobId, idempotencyKey, runId, packetId, taskId, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, executable, args, nodeVersion, policy, protectedPaths, requiredBranch, networkAccess, confirmedByUser, confirmationToken } = request.body
+      const { sourceId, commandKind, validationJobOperation, validationJobId, idempotencyKey, runId, packetId, taskId, timeoutMs, validationJobTimeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, executable, args, nodeVersion, policy, protectedPaths, requiredBranch, networkAccess, confirmedByUser, confirmationToken } = request.body
       if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
       const source = getSourcesSafe().find(item => item.id === sourceId)
       if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
@@ -543,17 +543,21 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         const submitted = submitWorkbenchValidationJob({
           sourceId,
           idempotencyKey: String(idempotencyKey || ''),
-          commandKind: commandKind as 'run_package_script' | 'run_package_test' | 'run_package_test_marker' | 'type_check_web' | 'type_check_cli',
+          commandKind: commandKind as 'run_package_script' | 'run_package_test' | 'run_package_test_marker' | 'type_check_web' | 'type_check_cli' | 'run_exact_command',
           packageDir,
           scriptName,
           marker,
-          timeoutMs,
+          timeoutMs: validationJobTimeoutMs,
           runId,
           packetId,
           taskId,
+          executable,
+          args,
           nodeVersion,
+          policy,
           requiredBranch,
-          protectedPaths
+          protectedPaths,
+          networkAccess
         })
         if ('code' in submitted) {
           return reply.code(submitted.code === 'VALIDATION_JOB_STORE_BUSY' ? 409 : 400).header('Cache-Control', 'no-store').send(submitted)
@@ -563,7 +567,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
               jobId: submitted.job.jobId,
               sourceId,
               sourceRoot: source.path,
-              leaseMs: Math.max(30_000, Math.min((timeoutMs || 300_000) + 60_000, 960_000))
+              leaseMs: Math.max(30_000, Math.min((submitted.job.timeoutMs || 300_000) + 60_000, 960_000))
             })
           : undefined
         return reply.header('Cache-Control', 'no-store').send({

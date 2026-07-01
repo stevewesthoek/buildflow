@@ -1147,6 +1147,7 @@ export async function dispatchWorkbenchCommand(body: Record<string, unknown>, us
     packetId: typeof body.packetId === 'string' ? body.packetId : undefined,
     taskId: typeof body.taskId === 'string' ? body.taskId : undefined,
     timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
+    validationJobTimeoutMs: typeof body.validationJobTimeoutMs === 'number' ? body.validationJobTimeoutMs : undefined,
     paths: Array.isArray(body.paths) ? body.paths : undefined,
     packageDir: typeof body.packageDir === 'string' ? body.packageDir : undefined,
     scriptName: typeof body.scriptName === 'string' ? body.scriptName : undefined,

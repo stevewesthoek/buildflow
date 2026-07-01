@@ -2,9 +2,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 async function main() {
+  const hostHome = process.env.HOME
   const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-validation-jobs-'))
+  if (!process.env.NVM_DIR && hostHome) process.env.NVM_DIR = path.join(hostHome, '.nvm')
   process.env.HOME = isolatedHome
   process.env.XDG_CONFIG_HOME = path.join(isolatedHome, '.config')
 
@@ -13,7 +16,8 @@ async function main() {
     getWorkbenchValidationJob,
     listCompactWorkbenchValidationJobs,
     scheduleWorkbenchValidationJob,
-    submitWorkbenchValidationJob
+    submitWorkbenchValidationJob,
+    toSafeCommandRequest
   } = await import('../packages/cli/src/agent/workbench-validation-jobs')
 
   const request = {
@@ -77,6 +81,21 @@ async function main() {
   assert.equal(invalid.ok, false)
   if (invalid.ok) throw new Error('Expected an invalid validation job')
   assert.equal(invalid.code, 'VALIDATION_JOB_INVALID')
+  assert.equal(invalid.field, 'scriptName')
+  assert.match(invalid.reason || '', /required for run_package_script/)
+
+  const invalidExact = submitWorkbenchValidationJob({
+    sourceId: 'source-a',
+    idempotencyKey: 'validation:test:invalid-exact',
+    commandKind: 'run_exact_command',
+    args: ['run', 'build'],
+    nodeVersion: '20'
+  })
+  assert.equal(invalidExact.ok, false)
+  if (invalidExact.ok) throw new Error('Expected an invalid exact validation job')
+  assert.equal(invalidExact.code, 'VALIDATION_JOB_INVALID')
+  assert.equal(invalidExact.field, 'executable')
+  assert.deepEqual(invalidExact.allowedValues, ['node', 'pnpm'])
 
   const workerRoot = path.join(isolatedHome, 'worker-repo')
   fs.mkdirSync(workerRoot, { recursive: true })
@@ -115,7 +134,94 @@ async function main() {
   assert(workerResult)
   assert.equal(workerResult.status, 'completed')
   assert.equal(workerResult.exitCode, 0)
+  assert(workerResult.stdout?.includes('worker-ok'))
   assert(workerResult.stdoutTail?.includes('worker-ok'))
+
+  execFileSync('git', ['init'], { cwd: workerRoot, stdio: 'ignore' })
+  execFileSync('git', ['config', 'user.email', 'validation@example.test'], { cwd: workerRoot })
+  execFileSync('git', ['config', 'user.name', 'Validation Job Test'], { cwd: workerRoot })
+  execFileSync('git', ['checkout', '-b', 'feature/validation-job'], { cwd: workerRoot, stdio: 'ignore' })
+  fs.writeFileSync(path.join(workerRoot, 'README.md'), '# Protected fixture\n', 'utf8')
+  execFileSync('git', ['add', '--', 'package.json', 'README.md'], { cwd: workerRoot })
+  execFileSync('git', ['commit', '-m', 'test: initialize exact validation fixture'], { cwd: workerRoot, stdio: 'ignore' })
+
+  const exactSubmission = submitWorkbenchValidationJob({
+    sourceId: 'worker-source',
+    idempotencyKey: 'validation:test:exact-node20',
+    commandKind: 'run_exact_command',
+    packageDir: '.',
+    executable: 'pnpm',
+    args: ['run', 'validate:worker'],
+    nodeVersion: '20',
+    requiredBranch: 'feature/validation-job',
+    protectedPaths: ['README.md'],
+    policy: {
+      denyDatabaseCommands: true,
+      denyMigrationCommands: true,
+      denyDeploymentCommands: true,
+      denyNetworkCommands: true
+    },
+    networkAccess: false
+  })
+  assert.equal(exactSubmission.ok, true)
+  if (!exactSubmission.ok) throw new Error(exactSubmission.message)
+  assert.equal(exactSubmission.job.commandKind, 'run_exact_command')
+  assert.equal(exactSubmission.job.executable, 'pnpm')
+  assert.deepEqual(exactSubmission.job.args, ['run', 'validate:worker'])
+  assert.equal(exactSubmission.job.nodeVersion, '20')
+  assert.equal(exactSubmission.job.timeoutMs, 300_000)
+  assert.equal(exactSubmission.job.requiredBranch, 'feature/validation-job')
+  assert.deepEqual(exactSubmission.job.protectedPaths, ['README.md'])
+
+  const exactRecord = getWorkbenchValidationJob(exactSubmission.job.jobId, 'worker-source')
+  assert(exactRecord)
+  const exactSafeRequest = toSafeCommandRequest(exactRecord, workerRoot)
+  assert.equal(exactSafeRequest.persistedValidation, true)
+  assert.equal(exactSafeRequest.timeoutMs, 300_000)
+  assert.equal(exactSafeRequest.executable, 'pnpm')
+  assert.deepEqual(exactSafeRequest.args, ['run', 'validate:worker'])
+
+  const exactScheduled = scheduleWorkbenchValidationJob({
+    jobId: exactSubmission.job.jobId,
+    sourceId: 'worker-source',
+    sourceRoot: workerRoot,
+    leaseMs: 360_000
+  })
+  assert.equal(exactScheduled.status, 'scheduled')
+
+  let exactResult = getCompactWorkbenchValidationJob(exactSubmission.job.jobId, 'worker-source')
+  for (let attempt = 0; attempt < 200 && (exactResult?.status === 'queued' || exactResult?.status === 'running'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 25))
+    exactResult = getCompactWorkbenchValidationJob(exactSubmission.job.jobId, 'worker-source')
+  }
+  assert(exactResult)
+  assert.equal(
+    exactResult.status,
+    'completed',
+    exactResult.stderr || exactResult.reason || JSON.stringify(exactResult.protectedPathsChanged || [])
+  )
+  assert.equal(exactResult.exitCode, 0)
+  assert.equal(exactResult.signal, null)
+  assert(exactResult.stdout?.includes('worker-ok'))
+  assert.equal(exactResult.outputTruncated, false)
+  assert.equal(exactResult.terminatedByInfrastructure, false)
+
+  const responseRouteSource = fs.readFileSync(
+    path.join(process.cwd(), 'apps/web/src/app/api/actions/run-command/route.ts'),
+    'utf8'
+  )
+  assert.match(responseRouteSource, /clean\.status === 'timed_out' && validationJobOperation === undefined/)
+  assert.match(responseRouteSource, /typeof job\?\.stdout === 'string'/)
+  assert.match(responseRouteSource, /validationJobId:/)
+  assert.match(responseRouteSource, /startedAt:/)
+  assert.match(responseRouteSource, /completedAt:/)
+
+  const openApiSource = fs.readFileSync(
+    path.join(process.cwd(), 'apps/web/src/app/api/openapi/route.ts'),
+    'utf8'
+  )
+  assert.match(openApiSource, /validationJobTimeoutMs/)
+  assert.match(openApiSource, /maximum: 900000/)
 
   fs.rmSync(isolatedHome, { recursive: true, force: true })
   console.log('validation job persistence checks passed')

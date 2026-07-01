@@ -345,3 +345,53 @@ Final focused validation:
 - output was not truncated
 
 No restart, implementation change, commit, or push was performed during this documentation update.
+
+
+
+## Persisted Exact-Build Repair and JPV Live Acceptance
+
+Completed on 2026-07-01:
+
+- repaired persisted validation status handling so stored terminal `timed_out` results are returned as job evidence instead of a new GPT transport timeout;
+- added persisted `run_exact_command` support through the existing guarded exact-command runner;
+- separated the bounded persisted job timeout (default 300 seconds, maximum 900 seconds) from the short GPT-facing HTTP timeout;
+- added structured invalid-request fields (`field`, `reason`, and `allowedValues`);
+- preserved source-scoped idempotency and stable job reuse;
+- returned complete bounded stdout/stderr, exit code, signal, lifecycle timestamps, changed paths, runtime, branch, protected-path, infrastructure-termination, and termination-reason evidence;
+- resolved Node 20 through explicit `NVM_DIR`, standard `$HOME/.nvm`, or the current Node 20 runtime;
+- resolved the pnpm shim from the approved Node 20 bin, `PNPM_HOME`, or the existing PATH while keeping Node 20 first in the child environment;
+- kept synchronous exact commands capped at 12 seconds while persisted validations use their bounded job timeout;
+- pruned mutable vendor and generated output directories from mandatory secret-path scanning while retaining `.git`, environment-file, and private-key protection;
+- reordered mandatory protected snapshots so Workbench's own Git inspection does not create false-positive `.git` changes.
+
+Focused validation evidence:
+
+- `verify:validation-jobs`: passed, including persisted exact `pnpm run` execution under Node 20, branch protection, caller-protected paths, complete output, structured invalid fields, and a 300-second default persisted timeout;
+- CLI `tsc --noEmit`: passed within `verify:validation-jobs`;
+- `verify:command-runner`: passed, including generated `node_modules` output without mandatory-protection false positives;
+- `verify:gpt-actions`: passed with exactly five public operations;
+- web `tsc --noEmit`: passed;
+- detached fresh restart `restart-1782916817972-fb0cc512`: completed with exit code `0` and signal `null`.
+
+Live cross-repository acceptance evidence:
+
+- source: `prochattools-jpv-bootcamp`;
+- required branch: `feature/course-branding-and-preview`;
+- validation job: `validation-63917bce-b5ca-4c23-9fa6-4cf5278de441`;
+- exact command: `pnpm run build`;
+- runtime: Node `v20.20.2`, pnpm `10.33.0`;
+- observed status: `running` → `completed` using the same job ID;
+- exit code: `0`;
+- duration: `13,554ms`, proving execution continued beyond the GPT action deadline;
+- output was complete and not truncated;
+- actual branch matched the required branch;
+- caller-protected `.graphifyignore` and handoff document were unchanged;
+- no infrastructure termination occurred.
+
+The validated JPV implementation was then committed as `49197e4 fix: repair staging migration path and member authentication` and pushed only to `origin/feature/course-branding-and-preview`.
+
+BuildFlow isolation status:
+
+- the persisted-validation repair hunks were isolated from unrelated `close_run` work before staging;
+- all focused validation and security review completed against the isolated repair state;
+- the repair is intended for one dedicated local commit with no push authorization.

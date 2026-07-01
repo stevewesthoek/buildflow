@@ -99,6 +99,7 @@ export type SafeCommandRequest = {
   protectedPaths?: string[]
   requiredBranch?: string
   networkAccess?: false
+  persistedValidation?: boolean
   confirmedByUser?: boolean
   confirmationToken?: string
 }
@@ -699,8 +700,11 @@ function exactValidateArgs(sourceRoot: string, cwd: string, args: unknown): stri
 
 function exactResolveNode20(): { nodeExecutable: string; binDir: string; nodeVersion: string; nodeMajorVersion: number } {
   const candidates: string[] = []
-  const nvmDir = process.env.NVM_DIR
-  if (nvmDir) {
+  const nvmDirs = Array.from(new Set([
+    process.env.NVM_DIR,
+    process.env.HOME ? path.join(process.env.HOME, '.nvm') : undefined
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0)))
+  for (const nvmDir of nvmDirs) {
     const versionsDir = path.join(nvmDir, 'versions', 'node')
     if (fs.existsSync(versionsDir)) {
       for (const entry of fs.readdirSync(versionsDir).filter(name => /^v20\./.test(name)).sort().reverse()) {
@@ -767,12 +771,21 @@ function exactChangedPaths(before: Map<string, string>, after: Map<string, strin
 
 const EXACT_PROTECTED_SCAN_LIMIT = 150_000
 const EXACT_PROTECTED_EXTENSIONS = new Set(['.pem', '.key', '.p12', '.pfx'])
+const EXACT_PROTECTED_SCAN_PRUNED_DIRS = new Set([
+  'node_modules',
+  '.next',
+  '.turbo',
+  'dist',
+  'build',
+  'coverage',
+  'out'
+])
 
 function exactIsProtectedFile(relativePath: string): boolean {
   const normalized = normalizeRepoRelativePath(relativePath)
   const parts = normalized.split('/')
   const basename = path.basename(normalized)
-  return parts.includes('.git') || parts.includes('node_modules') || basename === '.env' || /^\.env\./.test(basename) || EXACT_PROTECTED_EXTENSIONS.has(path.extname(basename).toLowerCase())
+  return parts.includes('.git') || basename === '.env' || /^\.env\./.test(basename) || EXACT_PROTECTED_EXTENSIONS.has(path.extname(basename).toLowerCase())
 }
 
 function exactProtectedFilesystemSnapshot(sourceRoot: string): Map<string, string> {
@@ -789,6 +802,7 @@ function exactProtectedFilesystemSnapshot(sourceRoot: string): Map<string, strin
       snapshot.set(normalized, `${stat.mode}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'dir' : 'file'}`)
     }
     if (!stat.isDirectory() || stat.isSymbolicLink()) return
+    if (normalized && EXACT_PROTECTED_SCAN_PRUNED_DIRS.has(path.basename(normalized))) return
     for (const entry of fs.readdirSync(absolutePath, { withFileTypes: true })) {
       const childAbsolute = path.join(absolutePath, entry.name)
       const childRelative = normalized ? `${normalized}/${entry.name}` : entry.name
@@ -837,12 +851,13 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
   exactAssertPolicy(scriptCommand, request.policy)
   const protectedPaths = (request.protectedPaths || []).map(item => assertSafeRepoPath(item, 'protectedPath'))
   const protectedBefore = new Map(protectedPaths.map(item => [item, exactPathHash(sourceRoot, item)]))
-  const mandatoryProtectedBefore = exactProtectedFilesystemSnapshot(sourceRoot)
   const before = exactGitSnapshot(sourceRoot)
+  const mandatoryProtectedBefore = exactProtectedFilesystemSnapshot(sourceRoot)
   const pnpmName = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
   const pnpmCandidates = [
     path.join(runtime.binDir, pnpmName),
-    process.env.PNPM_HOME ? path.join(process.env.PNPM_HOME, pnpmName) : undefined
+    process.env.PNPM_HOME ? path.join(process.env.PNPM_HOME, pnpmName) : undefined,
+    ...(process.env.PATH || '').split(path.delimiter).filter(Boolean).map(entry => path.join(entry, pnpmName))
   ].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0)
   const executablePath = request.executable === 'node'
     ? runtime.nodeExecutable
@@ -850,7 +865,8 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
   if (!executablePath) throw new Error(`Unable to resolve ${request.executable} in the Node 20 environment`)
   const startedAt = Date.now()
   const outputState = { bytes: 0, truncated: false }
-  const timeoutMs = Math.min(12_000, Math.max(1_000, request.timeoutMs || 8_000))
+  const timeoutCeiling = request.persistedValidation ? MAX_TIMEOUT_MS : 12_000
+  const timeoutMs = Math.min(timeoutCeiling, Math.max(1_000, request.timeoutMs || 8_000))
   const result = await new Promise<SafeCommandResult>((resolve, reject) => {
     const child = spawn(executablePath, args, { cwd, shell: false, detached: process.platform !== 'win32', env: exactMinimalEnv(runtime.binDir) })
     let stdout = ''
@@ -887,9 +903,10 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
   if (request.executable === 'pnpm') {
     try { result.runtime = { ...result.runtime, pnpmVersion: execFileSync(executablePath, ['--version'], { cwd, env: exactMinimalEnv(runtime.binDir), encoding: 'utf8', timeout: 2_000 }).trim() } } catch { /* retain command evidence */ }
   }
+  const mandatoryProtectedAfter = exactProtectedFilesystemSnapshot(sourceRoot)
   result.changedPaths = exactChangedPaths(before, exactGitSnapshot(sourceRoot))
   const callerProtectedChanges = protectedPaths.filter(item => protectedBefore.get(item) !== exactPathHash(sourceRoot, item))
-  const mandatoryProtectedChanges = exactProtectedChanges(mandatoryProtectedBefore, exactProtectedFilesystemSnapshot(sourceRoot))
+  const mandatoryProtectedChanges = exactProtectedChanges(mandatoryProtectedBefore, mandatoryProtectedAfter)
   result.protectedPathsChanged = [...new Set([...callerProtectedChanges, ...mandatoryProtectedChanges])].sort()
   if (result.protectedPathsChanged.length > 0) {
     result.status = 'blocked'

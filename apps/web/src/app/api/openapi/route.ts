@@ -250,6 +250,7 @@ const openapi = {
                   },
                   validationJobOperation: { type: 'string', enum: ['submit', 'status'], description: 'Submit an allowlisted persisted validation job or check an existing job without resubmitting it.' },
                   validationJobId: { type: 'string', description: 'Stable persisted validation job ID returned by submit and reused for status checks.' },
+                  validationJobTimeoutMs: { type: 'integer', minimum: 1000, maximum: 900000, description: 'Bounded persisted validation runtime. This is independent from the short GPT-facing HTTP timeout.' },
                   idempotencyKey: { type: 'string', maxLength: 200, description: 'Stable submission key. Reusing it returns the same job; conflicting commands are rejected.' },
                   runId: { type: 'string', description: 'Optional persistent Workbench run linked to the validation job.' },
                   packetId: { type: 'string', description: 'Optional Workbench packet linked to the validation job.' },

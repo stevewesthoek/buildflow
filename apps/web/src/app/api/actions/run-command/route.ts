@@ -47,6 +47,9 @@ export async function POST(request: NextRequest) {
     deadline.setPhase('parse_body')
     const body = await request.json()
     const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''
+    const validationJobOperation = body.validationJobOperation === 'submit' || body.validationJobOperation === 'status'
+      ? body.validationJobOperation
+      : undefined
     const timeoutMs = Math.min(commandTimeoutMs(commandKind, body.timeoutMs), deadline.transportTimeoutMs(11_500))
     deadline.addDiagnostics({
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
@@ -65,7 +68,7 @@ export async function POST(request: NextRequest) {
     })
     const clean = stripBloat(data) as Record<string, unknown>
 
-    if (clean.status === 'timed_out') {
+    if (clean.status === 'timed_out' && validationJobOperation === undefined) {
       return NextResponse.json({
         ok: false,
         connected: true,
@@ -117,10 +120,14 @@ export async function POST(request: NextRequest) {
       : typeof job?.exitCode === 'number' ? job.exitCode : null
     const resolvedStdout = typeof clean.stdout === 'string'
       ? clean.stdout
-      : typeof job?.stdoutTail === 'string' ? job.stdoutTail : undefined
+      : typeof job?.stdout === 'string'
+        ? job.stdout
+        : typeof job?.stdoutTail === 'string' ? job.stdoutTail : undefined
     const resolvedStderr = typeof clean.stderr === 'string'
       ? clean.stderr
-      : typeof job?.stderrTail === 'string' ? job.stderrTail : ''
+      : typeof job?.stderr === 'string'
+        ? job.stderr
+        : typeof job?.stderrTail === 'string' ? job.stderrTail : ''
     const resolvedOutputTruncated = typeof clean.outputTruncated === 'boolean'
       ? clean.outputTruncated
       : typeof job?.outputTruncated === 'boolean' ? job.outputTruncated : undefined
@@ -129,16 +136,27 @@ export async function POST(request: NextRequest) {
       ok: clean.status === 'completed' && resolvedExitCode === 0,
       status: clean.status,
       commandKind,
+      validationJobOperation,
+      validationJobId: typeof job?.jobId === 'string' ? job.jobId : undefined,
+      createdAt: job?.createdAt,
+      updatedAt: job?.updatedAt,
+      startedAt: job?.startedAt,
+      completedAt: job?.completedAt,
       stdout: resolvedStdout,
       stderr: resolvedStderr,
       exitCode: resolvedExitCode,
+      signal: clean.signal ?? job?.signal ?? null,
       durationMs: clean.durationMs ?? job?.durationMs,
       outputTruncated: resolvedOutputTruncated,
       changedPaths: clean.changedPaths ?? job?.changedPaths,
+      runtime: clean.runtime ?? job?.runtime,
+      requiredBranch: clean.requiredBranch ?? job?.requiredBranch,
+      actualBranch: clean.actualBranch ?? job?.actualBranch,
+      protectedPathsChanged: clean.protectedPathsChanged ?? job?.protectedPathsChanged,
       terminatedByInfrastructure: clean.terminatedByInfrastructure ?? job?.terminatedByInfrastructure,
       terminationReason: clean.terminationReason ?? job?.terminationReason ?? null,
       activity: clean.activity
-    })
+    }, { headers: { 'Cache-Control': 'no-store' } })
   }).catch((err) => {
     const { error, status } = unwrapActionError(err, 'run-command error')
     return NextResponse.json(error && typeof error === 'object' ? error : buildActionErrorEnvelope({

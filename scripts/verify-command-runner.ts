@@ -103,6 +103,7 @@ write('package.json', JSON.stringify({
     valid: 'node -e "console.log(process.version)"',
     redact: 'node -e "console.log(\'DATABASE_URL=postgres://user:password@example.test/db\')"',
     mutate: 'node -e "require(\'fs\').writeFileSync(\'protected.txt\', \'changed\')"',
+    generatevendor: 'node -e "require(\'fs\').mkdirSync(\'node_modules/generated\', { recursive: true }); require(\'fs\').writeFileSync(\'node_modules/generated/output.txt\', \'generated\')"',
     timeout: 'node -e "setInterval(() => {}, 1000)"',
     database: 'payload migrate',
     migration: 'prisma migrate deploy',
@@ -145,8 +146,13 @@ await expectReject('exact command cannot access sibling repository', () => runSa
 fs.rmSync(siblingRoot, { recursive: true, force: true })
 
 let node20Available = process.version.startsWith('v20.')
-if (!node20Available && process.env.NVM_DIR) {
-  const versions = path.join(process.env.NVM_DIR, 'versions', 'node')
+const nvmDirs = Array.from(new Set([
+  process.env.NVM_DIR,
+  process.env.HOME ? path.join(process.env.HOME, '.nvm') : undefined
+].filter((value): value is string => typeof value === 'string' && value.length > 0)))
+for (const nvmDir of nvmDirs) {
+  if (node20Available) break
+  const versions = path.join(nvmDir, 'versions', 'node')
   node20Available = fs.existsSync(versions) && fs.readdirSync(versions).some(name => /^v20\./.test(name))
 }
 if (node20Available) {
@@ -162,6 +168,11 @@ if (node20Available) {
   result = await runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['valid'] })
   assert.equal(result.status, 'completed')
   assert.equal((result.details as { resolvedScriptName?: string } | undefined)?.resolvedScriptName, 'valid')
+
+  result = await runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['generatevendor'] })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.protectedPathsChanged?.length, 0)
+  assert(fs.existsSync(path.join(root, 'node_modules/generated/output.txt')))
 
   result = await runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['redact'] })
   assert.equal(result.status, 'completed')
@@ -226,7 +237,10 @@ for (const token of ['git_add_paths', 'git_commit', 'git_push', 'validate_json_f
 }
 
 const runCommandRoute = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/actions/run-command/route.ts'), 'utf8')
-assert(runCommandRoute.includes("if (clean.status === 'timed_out')"), 'run-command route missing timed_out normalization')
+assert(
+  runCommandRoute.includes("if (clean.status === 'timed_out' && validationJobOperation === undefined)"),
+  'run-command route must normalize only synchronous timed_out results'
+)
 assert(runCommandRoute.includes("status: 'timeout'"), 'run-command route missing timeout status')
 for (const token of ['sourceId', 'executable', 'args', 'packageDir', 'requiredBranch', 'actualBranch', 'runtime', 'changedPaths', 'protectedPathsChanged', 'riskLevel', 'requiresConfirmation', 'signal', 'durationMs', 'outputTruncated', 'stdout', 'stderr', 'exitCode']) {
   assert(runCommandRoute.includes(`${token}:`), `run-command timeout response missing ${token}`)
