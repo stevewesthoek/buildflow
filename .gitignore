@@ -14,6 +14,7 @@ coverage/
 *.tsbuildinfo
 pnpm-lock.yaml
 node-compile-cache/
+graphify-out/
 
 # Commit pnpm lockfile for reproducible Docker/GitHub Actions builds
 !pnpm-lock.yaml
