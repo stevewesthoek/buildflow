@@ -196,6 +196,15 @@ if (node20Available) {
   assert.equal(result.outputTruncated, true)
   assert.equal(result.reason, 'output_limit_exceeded')
 
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:os')"] })
+  assert.equal(result.status, 'failed')
+  assert.match(result.stderr, /module node:os is not allowlisted/)
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "console.log(JSON.stringify({platform:process.platform,arch:process.arch}))"] })
+  assert.equal(result.status, 'completed')
+  assert(result.stdout.includes(process.platform))
+  assert(result.stdout.includes(process.arch))
+
   result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:child_process')"] })
   assert.equal(result.status, 'failed')
   assert.match(result.stderr, /module node:child_process is not allowlisted/)

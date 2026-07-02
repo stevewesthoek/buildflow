@@ -712,7 +712,6 @@ function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSo
   const realFsp = require('node:fs/promises');
   const path = require('node:path');
   const url = require('node:url');
-  const os = require('node:os');
   const realProcess = require('node:process');
   const ROOT = ${JSON.stringify(rootReal)};
   const CWD = ${JSON.stringify(cwdReal)};
@@ -831,7 +830,6 @@ function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSo
     if (id === 'fs/promises') return safePromises;
     if (id === 'path') return path;
     if (id === 'url') return url;
-    if (id === 'os') return os;
     if (id === 'process') return safeProcess;
     fail('module ' + moduleId + ' is not allowlisted');
   };
