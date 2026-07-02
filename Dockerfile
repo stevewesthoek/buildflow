@@ -14,8 +14,8 @@ COPY packages/shared ./packages/shared
 
 RUN npm install -g pnpm && pnpm install --frozen-lockfile
 
-WORKDIR /app/packages/bridge
-RUN pnpm build
+RUN pnpm --dir packages/shared build
+RUN pnpm --dir packages/bridge build
 
 # Build stage 2: web
 FROM node:20-alpine AS web-builder
