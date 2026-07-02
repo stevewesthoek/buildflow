@@ -127,7 +127,7 @@ const exactBase = {
   policy: { denyDatabaseCommands: true, denyMigrationCommands: true, denyDeploymentCommands: true, denyNetworkCommands: true }
 }
 
-await expectReject('exact command rejects shell metacharacters', () => runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', 'ok; bad'] }))
+await expectReject('inline Node rejects source over 12000 characters', () => runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', 'x'.repeat(12_001)] }))
 await expectReject('exact command rejects absolute escape', () => runSafeCommand({ ...exactBase, executable: 'node', args: [path.resolve(root, '..', 'outside.js')] }))
 await expectReject('exact command rejects traversal', () => runSafeCommand({ ...exactBase, executable: 'node', args: ['../outside.js'] }))
 await expectReject('exact command rejects nonexistent script', () => runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['missing-script'] }))
@@ -164,6 +164,61 @@ if (node20Available) {
   result = await runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['--version'] })
   assert.equal(result.status, 'completed')
   assert(result.runtime?.pnpmVersion)
+
+  write('scan/one.txt', 'deprecated-package\n')
+  write('scan/nested/two.md', 'safe\ndeprecated-package\n')
+  write('node_modules/example-cli/index.js', "#!/usr/bin/env node\nif (process.argv.includes('--help')) console.log('example-cli help')\n")
+  fs.chmodSync(path.join(root, 'node_modules/example-cli/index.js'), 0o755)
+  fs.mkdirSync(path.join(root, 'node_modules/.bin'), { recursive: true })
+  fs.symlinkSync('../example-cli/index.js', path.join(root, 'node_modules/.bin/example-cli'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "const pkg=JSON.parse(require('node:fs').readFileSync('package.json','utf8')); console.log(pkg.scripts.valid)"] })
+  assert.equal(result.status, 'completed')
+  assert(result.stdout.includes('process.version'))
+
+  const recursiveSearchSource = "const fs=require('node:fs'); const path=require('node:path'); const hits=[]; const walk=dir=>{ for(const entry of fs.readdirSync(dir,{withFileTypes:true})){ const file=path.join(dir,entry.name); if(entry.isDirectory()) walk(file); else if(fs.readFileSync(file,'utf8').includes('deprecated-package')) hits.push(file); } }; walk('scan'); console.log(JSON.stringify(hits));"
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', recursiveSearchSource] })
+  assert.equal(result.status, 'completed')
+  assert(result.stdout.includes('scan/one.txt'))
+  assert(result.stdout.includes('scan/nested/two.md'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "const name='Workbench'; console.log(`hello ${name}`)"] })
+  assert.equal(result.status, 'completed')
+  assert(result.stdout.includes('hello Workbench'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "const value='deprecated-package'; console.log(/deprecated-[a-z]+/.test(value))"] })
+  assert.equal(result.status, 'completed')
+  assert(result.stdout.includes('true'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "const fs=require('node:fs'); const target=fs.realpathSync('node_modules/.bin/example-cli'); const mode=fs.statSync('node_modules/.bin/example-cli').mode; console.log(JSON.stringify({target,mode}))"] })
+  assert.equal(result.status, 'completed')
+  assert(result.stdout.includes('example-cli/index.js'))
+  assert.match(result.stdout, /\"mode\":\d+/)
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "const {spawnSync}=require('node:child_process'); const child=spawnSync('node_modules/.bin/example-cli',['--help'],{encoding:'utf8',shell:false}); if(child.status!==0) throw new Error(child.stderr); console.log(child.stdout.trim())"] })
+  assert.equal(result.status, 'completed')
+  assert(result.stdout.includes('example-cli help'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:fs').readFileSync('../outside.txt','utf8')"] })
+  assert.equal(result.status, 'failed')
+  assert(result.stderr.includes('path traversal'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:https')"] })
+  assert.equal(result.status, 'failed')
+  assert(result.stderr.includes('not allowlisted'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:child_process').spawnSync('sh',['-c','echo bad'],{encoding:'utf8',shell:false})"] })
+  assert.equal(result.status, 'failed')
+  assert(result.stderr.includes('blocked'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:child_process').spawnSync('npm',['install'],{encoding:'utf8',shell:false})"] })
+  assert.equal(result.status, 'failed')
+  assert(result.stderr.includes('blocked'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:fs').writeFileSync('protected.txt','changed')"] })
+  assert.equal(result.status, 'failed')
+  assert(result.stderr.includes('not allowed'))
+  assert.equal(fs.readFileSync(path.join(root, 'protected.txt'), 'utf8'), 'original\n')
 
   result = await runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['valid'] })
   assert.equal(result.status, 'completed')

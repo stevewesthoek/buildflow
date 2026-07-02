@@ -682,8 +682,232 @@ function exactRealpathWithin(sourceRoot: string, candidate: string, label: strin
   return candidateReal
 }
 
+const INLINE_NODE_MAX_SOURCE_CHARS = 12_000
+const INLINE_NODE_MAX_FILES = 5_000
+const INLINE_NODE_MAX_FILE_BYTES = 1_000_000
+const INLINE_NODE_MAX_TOTAL_BYTES = 20_000_000
+
+function validateInlineNodeSource(source: string): void {
+  if (source.length > INLINE_NODE_MAX_SOURCE_CHARS) throw new Error(`inline Node source exceeds ${INLINE_NODE_MAX_SOURCE_CHARS} characters`)
+  const blocked: Array<[RegExp, string]> = [
+    [/\bimport\s*(?:\(|[^('"`])|\bexport\s+/m, 'dynamic or static imports are not allowed'],
+    [/\b(?:eval|Function)\s*\(/, 'dynamic code generation is not allowed'],
+    [/\bprocess\s*\.\s*(?:binding|dlopen|env)\b/, 'unsafe process access is not allowed'],
+    [/\b(?:constructor|__proto__|prototype)\b/, 'prototype or constructor access is not allowed'],
+    [/\brequire\s*\(\s*[^'"`]/, 'require must use a literal module name'],
+    [/\brequire\s*\(\s*`[^`]*\$\{/, 'interpolated module names are not allowed']
+  ]
+  for (const [pattern, reason] of blocked) if (pattern.test(source)) throw new Error(`inline Node source rejected: ${reason}`)
+}
+
+function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSource: string): string {
+  validateInlineNodeSource(userSource)
+  const rootReal = fs.realpathSync(sourceRoot)
+  const cwdReal = exactRealpathWithin(rootReal, cwd, 'packageDir')
+  return String.raw`
+'use strict';
+(async () => {
+  const vm = require('node:vm');
+  const realFs = require('node:fs');
+  const realFsp = require('node:fs/promises');
+  const path = require('node:path');
+  const url = require('node:url');
+  const os = require('node:os');
+  const realProcess = require('node:process');
+  const childProcess = require('node:child_process');
+  const ROOT = ${JSON.stringify(rootReal)};
+  const CWD = ${JSON.stringify(cwdReal)};
+  const USER_SOURCE = ${JSON.stringify(userSource)};
+  const MAX_FILES = ${INLINE_NODE_MAX_FILES};
+  const MAX_FILE_BYTES = ${INLINE_NODE_MAX_FILE_BYTES};
+  const MAX_TOTAL_BYTES = ${INLINE_NODE_MAX_TOTAL_BYTES};
+  let scannedFiles = 0;
+  let totalBytes = 0;
+
+  const fail = message => { throw new Error('inline validation blocked: ' + message); };
+  const withinRoot = candidate => candidate === ROOT || candidate.startsWith(ROOT + path.sep);
+  const inputText = value => {
+    if (typeof value === 'string') return value;
+    if (Buffer.isBuffer(value)) return value.toString('utf8');
+    if (value instanceof URL && value.protocol === 'file:') return url.fileURLToPath(value);
+    fail('filesystem paths must be strings, Buffers, or file URLs');
+  };
+  const classify = value => {
+    const raw = inputText(value);
+    if (raw.includes('\0')) fail('NUL paths are not allowed');
+    if (path.isAbsolute(raw)) fail('absolute paths are not allowed');
+    const normalized = path.normalize(raw || '.');
+    if (normalized === '..' || normalized.startsWith('..' + path.sep)) fail('path traversal outside the repository is not allowed');
+    const target = path.resolve(ROOT, normalized);
+    if (!withinRoot(target)) fail('path escaped the repository root');
+    const relative = path.relative(ROOT, target);
+    const parts = relative.split(path.sep).filter(Boolean);
+    const base = path.basename(relative).toLowerCase();
+    if (parts.includes('.git')) fail('.git access is not allowed');
+    if (base === '.env' || base.startsWith('.env.') || ['.npmrc', '.yarnrc', '.yarnrc.yml', 'id_rsa', 'id_ed25519'].includes(base) || /\.(?:pem|key|p12|pfx)$/i.test(base)) fail('secret or private-key paths are not allowed');
+    return { target, relative, parts };
+  };
+  const existing = (value, options = {}) => {
+    const info = classify(value);
+    if (options.directoryScan && info.parts[0] === 'node_modules') fail('recursive node_modules scans are not allowed');
+    const real = realFs.realpathSync(info.target);
+    if (!withinRoot(real)) fail('symlink resolves outside the repository root');
+    return { ...info, real };
+  };
+  const countEntries = entries => {
+    scannedFiles += entries.length;
+    if (scannedFiles > MAX_FILES) fail('file scan limit exceeded');
+    return entries;
+  };
+  const accountRead = info => {
+    const stat = realFs.statSync(info.real);
+    if (!stat.isFile()) fail('readFile requires a regular file');
+    if (stat.size > MAX_FILE_BYTES) fail('per-file read limit exceeded');
+    totalBytes += stat.size;
+    if (totalBytes > MAX_TOTAL_BYTES) fail('total read limit exceeded');
+  };
+  const safeReadFileSync = (value, options) => {
+    const info = existing(value);
+    accountRead(info);
+    return realFs.readFileSync(info.real, options);
+  };
+  const safeReaddirSync = (value, options) => {
+    const info = existing(value, { directoryScan: true });
+    return countEntries(realFs.readdirSync(info.real, options));
+  };
+  const safeStatSync = value => realFs.statSync(existing(value).real);
+  const safeLstatSync = value => realFs.lstatSync(classify(value).target);
+  const safeRealpathSync = value => existing(value).real;
+  const safeReadlinkSync = (value, options) => {
+    existing(value);
+    return realFs.readlinkSync(classify(value).target, options);
+  };
+  const safeExistsSync = value => {
+    try { existing(value); return true; } catch { return false; }
+  };
+  const safeAccessSync = (value, mode) => realFs.accessSync(existing(value).real, mode);
+  const safePromises = Object.freeze({
+    readFile: async (value, options) => safeReadFileSync(value, options),
+    readdir: async (value, options) => safeReaddirSync(value, options),
+    stat: async value => safeStatSync(value),
+    lstat: async value => safeLstatSync(value),
+    realpath: async value => safeRealpathSync(value),
+    readlink: async (value, options) => safeReadlinkSync(value, options),
+    access: async (value, mode) => safeAccessSync(value, mode)
+  });
+  const safeFs = new Proxy(Object.freeze({
+    constants: realFs.constants,
+    promises: safePromises,
+    readFileSync: safeReadFileSync,
+    readdirSync: safeReaddirSync,
+    statSync: safeStatSync,
+    lstatSync: safeLstatSync,
+    realpathSync: safeRealpathSync,
+    readlinkSync: safeReadlinkSync,
+    existsSync: safeExistsSync,
+    accessSync: safeAccessSync
+  }), {
+    get(target, property) {
+      if (property in target) return target[property];
+      fail('filesystem API ' + String(property) + ' is not allowed in read-only validation mode');
+    }
+  });
+
+  const blockedExecutables = new Set(['sh','bash','zsh','fish','cmd','cmd.exe','powershell','powershell.exe','pwsh','npm','npm.cmd','pnpm','pnpm.cmd','yarn','yarn.cmd','npx','npx.cmd','curl','wget','nc','netcat','ssh','scp','rsync','docker','kubectl','psql','mysql','sqlite3','mongosh','redis-cli']);
+  const gitReadOnly = new Set(['status','diff','log','show','rev-parse','branch','ls-files','remote']);
+  const shellSyntax = /[;&|<>\x60]|\$\(/;
+  const resolveExecutable = (executable, args) => {
+    if (typeof executable !== 'string' || !executable) fail('child executable must be a non-empty string');
+    if (shellSyntax.test(executable)) fail('child executable contains shell syntax');
+    const base = path.basename(executable).toLowerCase();
+    if (blockedExecutables.has(base)) fail('child executable is blocked');
+    if (executable === 'git') {
+      if (!gitReadOnly.has(args[0] || '')) fail('git subcommand is not allowlisted for read-only validation');
+      return 'git';
+    }
+    const info = existing(executable);
+    const expectedPrefix = 'node_modules' + path.sep + '.bin' + path.sep;
+    if (!info.relative.startsWith(expectedPrefix) || info.relative.slice(expectedPrefix.length).includes(path.sep)) fail('child executable must be an exact repository-local node_modules/.bin path');
+    if (!args.every(arg => ['--help','-h','--version','-v'].includes(arg))) fail('repository-local binaries are limited to help or version arguments');
+    return info.target;
+  };
+  const validateChild = (executable, args, options) => {
+    if (!Array.isArray(args) || !args.every(arg => typeof arg === 'string')) fail('child arguments must be a string array');
+    if (args.some(arg => shellSyntax.test(arg))) fail('child arguments contain shell syntax');
+    if (!options || options.shell !== false) fail('child_process requires shell: false');
+    if (options.cwd !== undefined && path.resolve(ROOT, options.cwd) !== ROOT) fail('child cwd must remain the repository root');
+    const resolved = resolveExecutable(executable, args);
+    return { resolved, options: { encoding: options.encoding || 'utf8', shell: false, cwd: ROOT, timeout: Math.min(Number(options.timeout) || 10_000, 10_000), maxBuffer: 100_000, env: { PATH: realProcess.env.PATH || '', CI: '1', NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0' } } };
+  };
+  const safeChildProcess = Object.freeze({
+    spawnSync(executable, args, options) {
+      const checked = validateChild(executable, args, options);
+      return childProcess.spawnSync(checked.resolved, args, checked.options);
+    },
+    execFileSync(executable, args, options) {
+      const checked = validateChild(executable, args, options);
+      return childProcess.execFileSync(checked.resolved, args, checked.options);
+    }
+  });
+  const safeProcess = Object.freeze({
+    argv: Object.freeze(['node', '<inline-validation>']),
+    arch: realProcess.arch,
+    platform: realProcess.platform,
+    version: realProcess.version,
+    versions: Object.freeze({ ...realProcess.versions }),
+    env: Object.freeze({}),
+    cwd: () => CWD,
+    stdout: Object.freeze({ write: chunk => realProcess.stdout.write(String(chunk)) }),
+    stderr: Object.freeze({ write: chunk => realProcess.stderr.write(String(chunk)) })
+  });
+  const safeRequire = moduleId => {
+    if (typeof moduleId !== 'string') fail('module name must be a string');
+    const id = moduleId.startsWith('node:') ? moduleId.slice(5) : moduleId;
+    if (id === 'fs') return safeFs;
+    if (id === 'fs/promises') return safePromises;
+    if (id === 'path') return path;
+    if (id === 'url') return url;
+    if (id === 'os') return os;
+    if (id === 'process') return safeProcess;
+    if (id === 'child_process') return safeChildProcess;
+    fail('module ' + moduleId + ' is not allowlisted');
+  };
+  const sandbox = Object.create(null);
+  Object.assign(sandbox, {
+    console,
+    Buffer,
+    URL,
+    URLSearchParams,
+    TextEncoder,
+    TextDecoder,
+    require: safeRequire,
+    process: safeProcess,
+    __dirname: ROOT,
+    __filename: path.join(ROOT, '<inline-validation>'),
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval
+  });
+  sandbox.global = sandbox;
+  sandbox.globalThis = sandbox;
+  const context = vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });
+  const script = new vm.Script(USER_SOURCE, { filename: '<inline-validation>' });
+  const value = script.runInContext(context, { timeout: 11_500, breakOnSigint: true });
+  if (value && typeof value.then === 'function') await value;
+})().catch(error => {
+  console.error(error && error.stack ? error.stack : String(error));
+  process.exitCode = 1;
+});
+`
+}
+
 function exactValidateArgs(sourceRoot: string, cwd: string, args: unknown): string[] {
   if (!Array.isArray(args)) throw new Error('args must be an array')
+  if (args.length > 0 && args[0] === '-e') {
+    if (args.length !== 2 || typeof args[1] !== 'string') throw new Error('inline Node validation requires args ["-e", JavaScriptSource]')
+    return ['--experimental-permission', `--allow-fs-read=${sourceRoot}`, '--allow-child-process', '--disable-proto=throw', '-e', buildInlineNodeValidationSource(sourceRoot, cwd, args[1])]
+  }
   return args.map((value, index) => {
     if (typeof value !== 'string') throw new Error(`args[${index}] must be a string`)
     if (/\0|[\r\n]|;|&&|\|\||\||>|<|`|\$\(/.test(value)) throw new Error(`args[${index}] contains prohibited shell syntax`)
