@@ -714,7 +714,6 @@ function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSo
   const url = require('node:url');
   const os = require('node:os');
   const realProcess = require('node:process');
-  const childProcess = require('node:child_process');
   const ROOT = ${JSON.stringify(rootReal)};
   const CWD = ${JSON.stringify(cwdReal)};
   const USER_SOURCE = ${JSON.stringify(userSource)};
@@ -772,6 +771,7 @@ function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSo
     return realFs.readFileSync(info.real, options);
   };
   const safeReaddirSync = (value, options) => {
+    if (options && typeof options === 'object' && options.recursive === true) fail('recursive readdir is not allowed; walk directories explicitly so limits and exclusions are enforced');
     const info = existing(value, { directoryScan: true });
     return countEntries(realFs.readdirSync(info.real, options));
   };
@@ -813,42 +813,6 @@ function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSo
     }
   });
 
-  const blockedExecutables = new Set(['sh','bash','zsh','fish','cmd','cmd.exe','powershell','powershell.exe','pwsh','npm','npm.cmd','pnpm','pnpm.cmd','yarn','yarn.cmd','npx','npx.cmd','curl','wget','nc','netcat','ssh','scp','rsync','docker','kubectl','psql','mysql','sqlite3','mongosh','redis-cli']);
-  const gitReadOnly = new Set(['status','diff','log','show','rev-parse','branch','ls-files','remote']);
-  const shellSyntax = /[;&|<>\x60]|\$\(/;
-  const resolveExecutable = (executable, args) => {
-    if (typeof executable !== 'string' || !executable) fail('child executable must be a non-empty string');
-    if (shellSyntax.test(executable)) fail('child executable contains shell syntax');
-    const base = path.basename(executable).toLowerCase();
-    if (blockedExecutables.has(base)) fail('child executable is blocked');
-    if (executable === 'git') {
-      if (!gitReadOnly.has(args[0] || '')) fail('git subcommand is not allowlisted for read-only validation');
-      return 'git';
-    }
-    const info = existing(executable);
-    const expectedPrefix = 'node_modules' + path.sep + '.bin' + path.sep;
-    if (!info.relative.startsWith(expectedPrefix) || info.relative.slice(expectedPrefix.length).includes(path.sep)) fail('child executable must be an exact repository-local node_modules/.bin path');
-    if (!args.every(arg => ['--help','-h','--version','-v'].includes(arg))) fail('repository-local binaries are limited to help or version arguments');
-    return info.target;
-  };
-  const validateChild = (executable, args, options) => {
-    if (!Array.isArray(args) || !args.every(arg => typeof arg === 'string')) fail('child arguments must be a string array');
-    if (args.some(arg => shellSyntax.test(arg))) fail('child arguments contain shell syntax');
-    if (!options || options.shell !== false) fail('child_process requires shell: false');
-    if (options.cwd !== undefined && path.resolve(ROOT, options.cwd) !== ROOT) fail('child cwd must remain the repository root');
-    const resolved = resolveExecutable(executable, args);
-    return { resolved, options: { encoding: options.encoding || 'utf8', shell: false, cwd: ROOT, timeout: Math.min(Number(options.timeout) || 10_000, 10_000), maxBuffer: 100_000, env: { PATH: realProcess.env.PATH || '', CI: '1', NO_COLOR: '1', GIT_TERMINAL_PROMPT: '0' } } };
-  };
-  const safeChildProcess = Object.freeze({
-    spawnSync(executable, args, options) {
-      const checked = validateChild(executable, args, options);
-      return childProcess.spawnSync(checked.resolved, args, checked.options);
-    },
-    execFileSync(executable, args, options) {
-      const checked = validateChild(executable, args, options);
-      return childProcess.execFileSync(checked.resolved, args, checked.options);
-    }
-  });
   const safeProcess = Object.freeze({
     argv: Object.freeze(['node', '<inline-validation>']),
     arch: realProcess.arch,
@@ -869,7 +833,6 @@ function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSo
     if (id === 'url') return url;
     if (id === 'os') return os;
     if (id === 'process') return safeProcess;
-    if (id === 'child_process') return safeChildProcess;
     fail('module ' + moduleId + ' is not allowlisted');
   };
   const sandbox = Object.create(null);
@@ -906,7 +869,7 @@ function exactValidateArgs(sourceRoot: string, cwd: string, args: unknown): stri
   if (!Array.isArray(args)) throw new Error('args must be an array')
   if (args.length > 0 && args[0] === '-e') {
     if (args.length !== 2 || typeof args[1] !== 'string') throw new Error('inline Node validation requires args ["-e", JavaScriptSource]')
-    return ['--experimental-permission', `--allow-fs-read=${sourceRoot}`, '--allow-child-process', '--disable-proto=throw', '-e', buildInlineNodeValidationSource(sourceRoot, cwd, args[1])]
+    return ['--experimental-permission', `--allow-fs-read=${sourceRoot}`, '--disable-proto=throw', '-e', buildInlineNodeValidationSource(sourceRoot, cwd, args[1])]
   }
   return args.map((value, index) => {
     if (typeof value !== 'string') throw new Error(`args[${index}] must be a string`)

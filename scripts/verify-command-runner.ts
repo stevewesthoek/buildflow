@@ -176,6 +176,18 @@ if (node20Available) {
   assert.equal(result.status, 'completed')
   assert(result.stdout.includes('process.version'))
 
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:child_process')"] })
+  assert.equal(result.status, 'failed')
+  assert.match(result.stderr, /module node:child_process is not allowlisted/)
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:fs').readdirSync('.', { recursive: true })"] })
+  assert.equal(result.status, 'failed')
+  assert.match(result.stderr, /recursive readdir is not allowed/)
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:fs\/promises').readdir('.', { recursive: true })"] })
+  assert.equal(result.status, 'failed')
+  assert.match(result.stderr, /recursive readdir is not allowed/)
+
   const recursiveSearchSource = "const fs=require('node:fs'); const path=require('node:path'); const hits=[]; const walk=dir=>{ for(const entry of fs.readdirSync(dir,{withFileTypes:true})){ const file=path.join(dir,entry.name); if(entry.isDirectory()) walk(file); else if(fs.readFileSync(file,'utf8').includes('deprecated-package')) hits.push(file); } }; walk('scan'); console.log(JSON.stringify(hits));"
   result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', recursiveSearchSource] })
   assert.equal(result.status, 'completed')
@@ -194,10 +206,6 @@ if (node20Available) {
   assert.equal(result.status, 'completed')
   assert(result.stdout.includes('example-cli/index.js'))
   assert.match(result.stdout, /\"mode\":\d+/)
-
-  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "const {spawnSync}=require('node:child_process'); const child=spawnSync('node_modules/.bin/example-cli',['--help'],{encoding:'utf8',shell:false}); if(child.status!==0) throw new Error(child.stderr); console.log(child.stdout.trim())"] })
-  assert.equal(result.status, 'completed')
-  assert(result.stdout.includes('example-cli help'))
 
   result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:fs').readFileSync('../outside.txt','utf8')"] })
   assert.equal(result.status, 'failed')
