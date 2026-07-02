@@ -176,6 +176,26 @@ if (node20Available) {
   assert.equal(result.status, 'completed')
   assert(result.stdout.includes('process.version'))
 
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "console.log('small-output')"] })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.outputTruncated, false)
+  assert(result.stdout.includes('small-output'))
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "process.stdout.write('x'.repeat(70_000))"] })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.outputTruncated, true)
+  assert.equal(result.reason, 'output_limit_exceeded')
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "process.stderr.write('x'.repeat(70_000))"] })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.outputTruncated, true)
+  assert.equal(result.reason, 'output_limit_exceeded')
+
+  result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "process.stdout.write('x'.repeat(35_000)); process.stderr.write('y'.repeat(35_000))"] })
+  assert.equal(result.status, 'failed')
+  assert.equal(result.outputTruncated, true)
+  assert.equal(result.reason, 'output_limit_exceeded')
+
   result = await runSafeCommand({ ...exactBase, executable: 'node', args: ['-e', "require('node:child_process')"] })
   assert.equal(result.status, 'failed')
   assert.match(result.stderr, /module node:child_process is not allowlisted/)

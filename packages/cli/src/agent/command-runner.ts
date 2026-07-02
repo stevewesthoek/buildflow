@@ -1052,6 +1052,7 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
   if (!executablePath) throw new Error(`Unable to resolve ${request.executable} in the Node 20 environment`)
   const startedAt = Date.now()
   const outputState = { bytes: 0, truncated: false }
+  const inlineNode = request.executable === 'node' && Array.isArray(request.args) && request.args[0] === '-e'
   const timeoutCeiling = request.persistedValidation ? MAX_TIMEOUT_MS : 12_000
   const timeoutMs = Math.min(timeoutCeiling, Math.max(1_000, request.timeoutMs || 8_000))
   const result = await new Promise<SafeCommandResult>((resolve, reject) => {
@@ -1059,6 +1060,7 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let outputLimitExceeded = false
     let killTimer: NodeJS.Timeout | undefined
     const signalProcess = (signal: NodeJS.Signals) => {
       if (child.pid && process.platform !== 'win32') {
@@ -1071,14 +1073,28 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
       signalProcess('SIGTERM')
       killTimer = setTimeout(() => signalProcess('SIGKILL'), 500)
     }, timeoutMs)
-    child.stdout.on('data', chunk => { stdout = appendLimited(stdout, Buffer.from(chunk), outputState) })
-    child.stderr.on('data', chunk => { stderr = appendLimited(stderr, Buffer.from(chunk), outputState) })
+    const terminateForOutputLimit = () => {
+      if (!inlineNode || !outputState.truncated || outputLimitExceeded) return
+      outputLimitExceeded = true
+      clearTimeout(timer)
+      signalProcess('SIGTERM')
+      killTimer = setTimeout(() => signalProcess('SIGKILL'), 500)
+    }
+    child.stdout.on('data', chunk => {
+      stdout = appendLimited(stdout, Buffer.from(chunk), outputState)
+      terminateForOutputLimit()
+    })
+    child.stderr.on('data', chunk => {
+      stderr = appendLimited(stderr, Buffer.from(chunk), outputState)
+      terminateForOutputLimit()
+    })
     child.on('error', error => { clearTimeout(timer); if (killTimer) clearTimeout(killTimer); reject(error) })
     child.on('close', (exitCode, signal) => {
       clearTimeout(timer)
       if (killTimer) clearTimeout(killTimer)
       resolve({
-        status: timedOut ? 'timed_out' : exitCode === 0 ? 'completed' : 'failed', commandKind: request.commandKind,
+        status: outputLimitExceeded ? 'failed' : timedOut ? 'timed_out' : exitCode === 0 ? 'completed' : 'failed', commandKind: request.commandKind,
+        reason: outputLimitExceeded ? 'output_limit_exceeded' : undefined,
         command: [request.executable!, ...args], cwd, executable: request.executable, args, packageDir: request.packageDir || '.',
         requiredBranch: request.requiredBranch, actualBranch, runtime: { requestedNodeVersion: request.nodeVersion, nodeExecutable: runtime.nodeExecutable, nodeVersion: runtime.nodeVersion, nodeMajorVersion: runtime.nodeMajorVersion },
         exitCode, signal, stdout, stderr, outputTruncated: outputState.truncated, durationMs: Date.now() - startedAt,
