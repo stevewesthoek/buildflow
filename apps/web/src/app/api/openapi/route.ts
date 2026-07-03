@@ -103,15 +103,17 @@ const openapi = {
                   sourceId: { type: 'string' },
                   changeType: {
                     type: 'string',
-                    enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move', 'create_run', 'resume_run', 'close_run', 'packet_preflight', 'packet_plan', 'packet_execute'],
-                    description: 'File operations, run controls including close_run, packet preflight/planning, or lease-guarded packet_execute with rollback.'
+                    enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move', 'create_run', 'resume_run', 'close_run', 'packet_preflight', 'packet_claim', 'packet_plan', 'packet_execute'],
+                    description: 'File operations, run controls, packet preflight/claim/planning, or lease-guarded packet execution with rollback.'
                   },
                   path: { type: 'string', description: 'Repo-relative path for file operations.' },
                   goal: { type: 'string', maxLength: 3000, description: 'Goal for create_run.' },
-                  runId: { type: 'string', description: 'Run ID for resume_run or close_run; otherwise resume_run uses the source active run.' },
+                  runId: { type: 'string', description: 'Run ID for resume_run, close_run, or packet_claim; otherwise resume_run uses the source active run.' },
                   summary: { type: 'string', maxLength: 1000, description: 'Required completion summary for close_run.' },
-                  packetId: { type: 'string', description: 'Reserved running packet ID for packet_plan.' },
-                  leaseToken: { type: 'string', description: 'Current execution lease token required for packet_plan.' },
+                  packetId: { type: 'string', description: 'Reserved packet ID for packet_claim, packet_plan, or packet_execute.' },
+                  workerId: { type: 'string', minLength: 1, maxLength: 160, description: 'Optional stable claimant identity for packet_claim; Workbench derives an authenticated fallback when omitted.' },
+                  leaseMs: { type: 'integer', minimum: 5000, maximum: 300000, description: 'Optional packet_claim lease duration in milliseconds.' },
+                  leaseToken: { type: 'string', description: 'Current execution lease token required for packet_plan and packet_execute.' },
                   documentationPath: { type: 'string', description: 'Optional repo-relative handoff path for create_run.' },
                   maxIterations: { type: 'integer', minimum: 1, maximum: 40, description: 'Maximum bounded run iterations.' },
                   autoCommit: { type: 'boolean', description: 'Whether validated run work may auto-commit when policy allows.' },

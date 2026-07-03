@@ -31,6 +31,27 @@ export type WorkbenchPacketRecord = {
   claimAttempt: number
 }
 
+export function compactWorkbenchPacketLeaseRecord(record: WorkbenchPacketRecord, includeLeaseToken = false) {
+  return {
+    packet: {
+      packetId: record.packet.packetId,
+      runId: record.packet.runId,
+      sourceId: record.packet.sourceId,
+      taskId: record.packet.taskId
+    },
+    status: record.status,
+    exactPaths: record.exactPaths,
+    reservedAt: record.reservedAt,
+    updatedAt: record.updatedAt,
+    startedAt: record.startedAt,
+    claimAttempt: record.claimAttempt,
+    leaseOwner: record.leaseOwner,
+    leaseToken: includeLeaseToken ? record.leaseToken : undefined,
+    leaseAcquiredAt: record.leaseAcquiredAt,
+    leaseExpiresAt: record.leaseExpiresAt
+  }
+}
+
 type WorkbenchPacketStore = {
   version: typeof WORKBENCH_PACKET_STORE_VERSION
   updatedAt: string
@@ -240,15 +261,45 @@ export function claimNextWorkbenchPacket(params: {
 
   const locked = withExclusiveStoreLock<PacketClaimResult>(() => {
     const store = readStore()
-    const index = store.packets.findIndex(record =>
-      record.status === 'queued'
-      && (!params.packetId || record.packet.packetId === params.packetId)
+    const now = new Date()
+    const matchesScope = (record: WorkbenchPacketRecord) =>
+      (!params.packetId || record.packet.packetId === params.packetId)
       && (!params.sourceId || record.packet.sourceId === params.sourceId)
       && (!params.runId || record.packet.runId === params.runId)
-    )
-    if (index < 0) return { ok: false, code: 'PACKET_NOT_FOUND', message: 'no queued packet matched this claim' }
 
-    const now = new Date()
+    let index = -1
+    if (params.packetId) {
+      index = store.packets.findIndex(matchesScope)
+      if (index < 0) return { ok: false, code: 'PACKET_NOT_FOUND', message: 'packet not found for this claim scope' }
+      const current = store.packets[index]
+      if (current.status === 'running') {
+        const leaseExpiresAt = Date.parse(current.leaseExpiresAt || '')
+        const leaseActive = Boolean(current.leaseToken) && Number.isFinite(leaseExpiresAt) && leaseExpiresAt > now.getTime()
+        if (leaseActive && current.leaseOwner === workerId) {
+          return { ok: true, claimed: false, record: current }
+        }
+        if (leaseActive) {
+          return { ok: false, code: 'PACKET_NOT_QUEUED', message: 'packet is already leased by another worker' }
+        }
+        store.packets[index] = {
+          ...clearLease(current),
+          status: 'queued',
+          updatedAt: now.toISOString()
+        }
+      } else if (current.status !== 'queued') {
+        return { ok: false, code: 'PACKET_NOT_QUEUED', message: `packet is ${current.status}` }
+      }
+    } else {
+      const retryIndex = store.packets.findIndex(record => {
+        if (!matchesScope(record) || record.status !== 'running' || record.leaseOwner !== workerId || !record.leaseToken) return false
+        const leaseExpiresAt = Date.parse(record.leaseExpiresAt || '')
+        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > now.getTime()
+      })
+      if (retryIndex >= 0) return { ok: true, claimed: false, record: store.packets[retryIndex] }
+      index = store.packets.findIndex(record => record.status === 'queued' && matchesScope(record))
+      if (index < 0) return { ok: false, code: 'PACKET_NOT_FOUND', message: 'no queued packet matched this claim' }
+    }
+
     const leaseMs = boundedLeaseMs(params.leaseMs)
     const current = store.packets[index]
     const record: WorkbenchPacketRecord = {
@@ -338,11 +389,14 @@ export function recoverStaleWorkbenchPacketLeases(nowMs = Date.now()): { recover
       const expiresAt = record.leaseExpiresAt ? Date.parse(record.leaseExpiresAt) : Number.NaN
       if (record.status !== 'running' || !Number.isFinite(expiresAt) || expiresAt > nowMs) return record
       packetIds.push(record.packet.packetId)
+      const cancellationRequested = record.controlRequested === 'cancel'
       return clearLease({
         ...record,
-        status: 'queued',
+        status: cancellationRequested ? 'cancelled' : 'queued',
         updatedAt: now,
-        failureReason: 'Recovered stale execution lease after timeout or restart.'
+        cancelledAt: cancellationRequested ? now : record.cancelledAt,
+        failureReason: cancellationRequested ? undefined : 'Recovered stale execution lease after timeout or restart.',
+        controlRequested: undefined
       })
     })
     if (packetIds.length > 0) persistStore(store)

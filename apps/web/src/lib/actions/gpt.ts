@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout, type ActionTransportOptions } from './transport'
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
@@ -1412,6 +1413,36 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       requiresConfirmation: false,
       verified: accepted,
       nextStep: accepted ? 'Review the accepted exact paths before packet execution.' : 'Repair the packet errors and preflight again.'
+    }))
+  }
+
+  if (changeType === 'packet_claim') {
+    const explicitWorkerId = typeof body.workerId === 'string' ? body.workerId.trim() : ''
+    const fallbackWorkerId = `gpt-${createHash('sha256')
+      .update(`${userToken || ''}|${body.sourceId || ''}|${body.runId || ''}|${body.packetId || ''}`)
+      .digest('hex')
+      .slice(0, 32)}`
+    const result = await executeAction('/api/workbench-packets/claim', {
+      workerId: explicitWorkerId || fallbackWorkerId,
+      packetId: body.packetId,
+      sourceId: body.sourceId,
+      runId: body.runId,
+      leaseMs: typeof body.leaseMs === 'number' ? body.leaseMs : undefined
+    }, userToken, transportOptions)
+    const claimed = (result as { claimed?: boolean }).claimed === true
+    const record = (result as { record?: { packet?: { packetId?: string; runId?: string }; leaseOwner?: string; leaseExpiresAt?: string; claimAttempt?: number } }).record
+    return withActivity(result as Record<string, unknown>, makeActivity({
+      operationId: 'applyWorkbenchFileChange',
+      phase: claimed ? 'planning' : 'blocked',
+      actionLabel: claimed ? 'Claimed Workbench packet lease' : 'Rejected Workbench packet claim',
+      userMessage: claimed
+        ? `Workbench claimed packet ${record?.packet?.packetId || 'unknown'} with lease owner ${record?.leaseOwner || 'unknown'} expiring at ${record?.leaseExpiresAt || 'unknown'}.`
+        : 'Workbench rejected the packet claim.',
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      riskLevel: 'medium',
+      requiresConfirmation: false,
+      verified: claimed,
+      nextStep: claimed ? 'Use the returned lease token for packet_plan and packet_execute.' : 'Inspect the rejection code and retry or repair the packet.'
     }))
   }
 

@@ -3,6 +3,7 @@ import { checkActionAuth } from '@/lib/actionAuth'
 import { dispatchWorkbenchCommand, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
+import { dispatchAfterExactStaging, type StagedSetGuardInput } from '@/lib/actions/staged-set-guard'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -61,14 +62,25 @@ export async function POST(request: NextRequest) {
     if ((add as { exitCode?: number }).exitCode !== 0) {
       return NextResponse.json({ ok: false, step: 'add', add, diagnostics: deadline.diagnostics({ phase: 'git_add_paths_failed', sourceId, paths }) })
     }
-
-    // Step 3: commit with provided message
-    deadline.setPhase('git_commit')
-    const commit = await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_commit', message, confirmedByUser, confirmationToken, timeoutMs: 4500 }, auth.bearerToken, {
-      signal: deadline.signal,
-      timeoutMs: deadline.transportTimeoutMs(5000),
-      diagnostics: deadline.diagnostics({ phase: 'git_commit', sourceId, paths })
-    }) as Record<string, unknown>
+    const guardedCommit = await dispatchAfterExactStaging(add as StagedSetGuardInput, async () => {
+      // Step 3: commit with provided message
+      deadline.setPhase('git_commit')
+      return await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_commit', paths, message, confirmedByUser, confirmationToken, timeoutMs: 4500 }, auth.bearerToken, {
+        signal: deadline.signal,
+        timeoutMs: deadline.transportTimeoutMs(5000),
+        diagnostics: deadline.diagnostics({ phase: 'git_commit', sourceId, paths })
+      }) as Record<string, unknown>
+    })
+    if (!guardedCommit.pass) {
+      return NextResponse.json({
+        ok: false,
+        step: 'add',
+        reason: guardedCommit.reason,
+        add,
+        diagnostics: deadline.diagnostics({ phase: 'staged_path_set_mismatch', sourceId, paths })
+      })
+    }
+    const commit = guardedCommit.result
     const committed = (commit as { exitCode?: number }).exitCode === 0
 
     return NextResponse.json({

@@ -4,6 +4,7 @@ import { dispatchWorkbenchFileChange, unwrapActionError } from '@/lib/actions/gp
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { getSafeActionHttpStatus } from '@/lib/actions/http-status'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
+import { requiresVerifiedFileWrite } from '@/lib/actions/file-change-verification'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -56,7 +57,7 @@ export async function POST(request: NextRequest) {
       }), { status, headers: { 'Cache-Control': 'no-store' } })
     }
 
-    if (!isDryRun && (data as { verified?: unknown }).verified !== true) {
+    if (requiresVerifiedFileWrite(body.changeType, isDryRun) && (data as { verified?: unknown }).verified !== true) {
       return NextResponse.json(buildActionErrorEnvelope({
         code: 'BUILDFLOW_STATUS_ERROR',
         message: 'Write was not verified'

@@ -1,7 +1,8 @@
-# Contributing to BuildFlow Local
+# Contributing to ProChat Workbench Local
 
-BuildFlow Local is the public GitHub beta priority.
-Please keep contributions focused on the free local-first path unless something directly blocks that beta.
+ProChat Workbench Local is the public GitHub priority. Keep contributions focused on the free, self-hosted, local-first product defined in `docs/product/public-scope.md`.
+
+The public snapshot is licensed under `AGPL-3.0-only`. ProChat also offers separate commercial or OEM licenses, so accepted external code must be contributed under terms that preserve ProChat's ability to distribute it under both licensing paths.
 
 ## Good contribution areas
 
@@ -23,11 +24,26 @@ Please keep contributions focused on the free local-first path unless something 
 - Do not include bearer tokens, env values, or raw app JSON in issues or pull requests.
 - Redact any local configuration details before sharing logs or screenshots.
 
+## Contributor rights and pull requests
+
+Issues, discussions, bug reports, and design feedback do not require a contributor agreement.
+
+Before ProChat merges an external code or documentation contribution, the contributor must accept contributor terms approved by ProChat that grant the rights needed to:
+
+- include the contribution in the AGPL-licensed public snapshot;
+- reproduce, modify, distribute, sublicense, and relicense the contribution as part of ProChat Workbench;
+- offer the contribution under separate commercial or OEM licenses;
+- exercise an appropriate patent license for patent claims necessarily infringed by the contribution.
+
+Until a reviewed contributor-agreement workflow is enabled, external pull requests may be discussed and reviewed but must not be merged. This protects contributors, public users, and the approved dual-distribution model.
+
 ## Before opening a pull request
 
-- Describe the Local beta problem or improvement clearly.
-- Mention any verification you ran.
+- Describe the Workbench Local problem or improvement clearly.
+- Confirm that the change contains no private roadmap, customer, credential, or infrastructure material.
+- Mention the validation you ran.
 - Keep the change small and focused when possible.
+- Be prepared to complete the contributor-rights process before merge.
 
 ## How to add a new ChatGPT action
 

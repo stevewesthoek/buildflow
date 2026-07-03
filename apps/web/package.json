@@ -1,6 +1,8 @@
 {
   "name": "workbench-web",
   "version": "1.2.13-beta",
+  "private": true,
+  "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "prisma generate && next dev -H 127.0.0.1 -p ${PORT:-3054}",
     "build": "prisma generate && next build",

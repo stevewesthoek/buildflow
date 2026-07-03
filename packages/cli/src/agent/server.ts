@@ -28,7 +28,7 @@ import { executeWorkbenchPacket } from './workbench-packet-executor'
 import { recoverWorkbenchExecutionJournals } from './workbench-execution-journal'
 import { getWorkbenchPacketResult } from './workbench-packet-results'
 import { drainQueuedWorkbenchPackets, scheduleWorkbenchPacket } from './workbench-packet-coordinator'
-import { claimNextWorkbenchPacket, controlWorkbenchPacketsForRun, getWorkbenchPacketRecord, listWorkbenchPacketRecords, recoverInterruptedWorkbenchPacket, recoverStaleWorkbenchPacketLeases, releaseWorkbenchPacketLease, renewWorkbenchPacketLease, reserveWorkbenchPacket } from './workbench-packet-store'
+import { claimNextWorkbenchPacket, compactWorkbenchPacketLeaseRecord, controlWorkbenchPacketsForRun, getWorkbenchPacketRecord, listWorkbenchPacketRecords, recoverInterruptedWorkbenchPacket, recoverStaleWorkbenchPacketLeases, releaseWorkbenchPacketLease, renewWorkbenchPacketLease, reserveWorkbenchPacket } from './workbench-packet-store'
 import { getBuildSha, getBuildTimestamp } from '@workbench/shared'
 
 let cliVersion = '1.2.13-beta'
@@ -872,13 +872,13 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     })
   })
 
-  fastify.post<{ Body: { workerId: string; sourceId?: string; runId?: string; leaseMs?: number } }>('/api/workbench-packets/claim', async (request, reply) => {
+  fastify.post<{ Body: { workerId: string; packetId?: string; sourceId?: string; runId?: string; leaseMs?: number } }>('/api/workbench-packets/claim', async (request, reply) => {
     const result = claimNextWorkbenchPacket(request.body || { workerId: '' })
     return reply
       .code(result.ok === true ? 200 : result.code === 'PACKET_STORE_BUSY' ? 503 : 409)
       .header('Cache-Control', 'no-store')
       .send(result.ok
-        ? { status: 'running', claimed: result.claimed, record: result.record, writesPerformed: false }
+        ? { status: 'running', claimed: result.claimed, record: compactWorkbenchPacketLeaseRecord(result.record, true), writesPerformed: false }
         : { status: 'rejected', ...result, writesPerformed: false })
   })
 
@@ -910,7 +910,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       .code(result.ok === true ? 200 : result.code === 'PACKET_STORE_BUSY' ? 503 : 409)
       .header('Cache-Control', 'no-store')
       .send(result.ok
-        ? { status: 'running', renewed: true, record: result.record, writesPerformed: false }
+        ? { status: 'running', renewed: true, record: compactWorkbenchPacketLeaseRecord(result.record, true), writesPerformed: false }
         : { status: 'rejected', ...result, writesPerformed: false })
   })
 
@@ -920,7 +920,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       .code(result.ok === true ? 200 : result.code === 'PACKET_STORE_BUSY' ? 503 : 409)
       .header('Cache-Control', 'no-store')
       .send(result.ok
-        ? { status: result.record.status, released: true, record: result.record, writesPerformed: false }
+        ? { status: result.record.status, released: true, record: compactWorkbenchPacketLeaseRecord(result.record), writesPerformed: false }
         : { status: 'rejected', ...result, writesPerformed: false })
   })
 

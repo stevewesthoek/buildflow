@@ -507,39 +507,45 @@ Useful docs:
 
 ## Roadmap ideas
 
-BuildFlow is moving toward a more complete ChatGPT-first local repo workspace.
+ProChat Workbench Local is moving toward a more complete ChatGPT-first local repository workspace.
 
-Areas worth exploring:
+Public areas worth exploring include:
 
-- richer activity history
-- better dashboard progress views
-- clearer handoff and resume persistence
-- more repo-agnostic command recipes
-- safer deployment command profiles
-- better diff previews
-- improved setup for non-technical users
-- reusable skill packages
-- managed onboarding for people who do not want to self-host
+- richer activity history;
+- better dashboard progress views;
+- clearer handoff and resume persistence;
+- more repository-agnostic command recipes;
+- safer local command profiles;
+- better diff previews;
+- improved setup for non-technical users;
+- reusable local skill packages.
 
-Open an issue if you have a workflow BuildFlow should support.
+Open an issue if you have a local-first workflow Workbench should support.
+
+## Licensing
+
+The generated public Workbench Local repository is licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See [`LICENSE`](LICENSE).
+
+A separate commercial or OEM license may be available for organizations that need proprietary embedding, redistribution, or modified hosted use. See [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md). ProChat trademarks are governed separately by [`TRADEMARKS.md`](TRADEMARKS.md).
+
+The private engineering repository is the authoritative source. Public releases are deterministic, reviewed snapshots generated from exact private commits. Managed services, private modules, customer operations, and internal commercial material are not part of the public snapshot.
+
+The dashboard includes a source-code link. Operators of modified network-accessible versions must provide the corresponding source required by the AGPL.
 
 ## Contributing
 
-BuildFlow is free, self-hosted, and open-source.
+ProChat Workbench Local is free, self-hosted, and open source.
 
-If it helps you build with ChatGPT and local repos:
-
-- star the repo
-- fork it
-- try it on a real project
-- share feedback
-- open issues
-- request features
-- discuss use cases
-- show what you build
+- Star or fork the public repository.
+- Try it on a repository you control.
+- Share feedback, issues, and feature requests.
+- Do not include secrets, private logs, or customer data.
+- Review [`CONTRIBUTING.md`](CONTRIBUTING.md) before submitting code.
 
 ```text
-github.com/stevewesthoek/buildflow
+github.com/prochattools/prochat-workbench
 ```
 
-BuildFlow is still early, but it is already useful. The best way to improve it is to use it on real work and tell the project where the workflow still feels slow, risky, or magical in the wrong way.
+External code contributions require contributor terms that preserve ProChat's ability to distribute accepted work under both AGPL and separate commercial licenses. Issues and design feedback do not require a contributor agreement.
+
+Workbench is still early, but it is already useful. The best way to improve it is to use it on real work and explain where the workflow still feels slow, risky, or magical in the wrong way.

@@ -497,6 +497,16 @@ function ensureWorkbenchRunModel() {
   ]) {
     assert(serverText.includes(endpoint), `Local server must expose ${endpoint}`)
   }
+  assert(changeTypes.includes('packet_claim'), 'OpenAPI schema must expose packet_claim')
+  assert(applySchema?.properties?.workerId, 'OpenAPI schema must include workerId for packet_claim')
+  assert(applySchema?.properties?.leaseMs, 'OpenAPI schema must include leaseMs for packet_claim')
+  assert(applySchema?.properties?.leaseMs?.minimum === 5000, 'packet_claim leaseMs minimum must match the packet store')
+  assert(applySchema?.properties?.leaseMs?.maximum === 300000, 'packet_claim leaseMs maximum must match the packet store')
+  const gptActionText = fs.readFileSync(path.join(ROOT, 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
+  assert(gptActionText.includes("changeType === 'packet_claim'"), 'GPT action dispatcher must handle packet_claim')
+  assert(gptActionText.includes("'/api/workbench-packets/claim'"), 'GPT action dispatcher must reach the packet claim endpoint')
+  assert(gptActionText.includes("createHash('sha256')"), 'GPT packet claims must derive a stable authenticated fallback workerId')
+  assert(gptActionText.includes('explicitWorkerId || fallbackWorkerId'), 'GPT packet claims must use the fallback when workerId is omitted')
   assert(serverText.includes('const recoveredPacketLeases = recoverStaleWorkbenchPacketLeases()'), 'Server startup must recover stale packet leases')
   assert(serverText.includes('writesPerformed: false'), 'Packet lease controls must not execute file writes')
 

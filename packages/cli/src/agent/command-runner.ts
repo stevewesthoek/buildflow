@@ -215,6 +215,7 @@ function assertSafeRepoPath(input: string, label: string): string {
   if (path.isAbsolute(input) || input.startsWith('/')) throw new Error(`${label} must be source-relative`)
   const normalized = normalizeRepoPath(input)
   if (!normalized || normalized === '.' || normalized === '-A' || normalized === '--all') throw new Error(`${label} must be an explicit source-relative path`)
+  if (/[\0\r\n\t]/.test(normalized)) throw new Error(`${label} must not contain control characters`)
   if (normalized.startsWith('-')) throw new Error(`${label} must not be an option`)
   if (normalized.split('/').includes('..')) throw new Error(`${label} must not contain path traversal`)
   const basename = path.basename(normalized)
@@ -241,13 +242,134 @@ function assertWriteAllowed(sourceId: string, sourceRoot: string, relativePath: 
   throw new Error(`${relativePath} is blocked by write policy: ${blocked.error.code}`)
 }
 
-function isTrackedDeletionInWorktree(sourceRoot: string, relativePath: string): boolean {
+function gitLiteralEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_LITERAL_PATHSPECS: '1' }
+}
+
+function isStagedDeletion(sourceRoot: string, relativePath: string): boolean {
+  if (fs.existsSync(path.resolve(sourceRoot, relativePath))) return false
   try {
-    const output = execFileSync('git', ['ls-files', '--deleted', '--', relativePath], { cwd: sourceRoot, encoding: 'utf8' }).trim()
-    return output.split('\n').map(item => normalizeRepoRelativePath(item)).includes(relativePath)
+    const staged = execFileSync('git', ['diff', '--cached', '--name-only', '--diff-filter=D', '--', relativePath], { cwd: sourceRoot, encoding: 'utf8', env: gitLiteralEnv() }).trim()
+    return staged.split('\n').map(item => normalizeRepoRelativePath(item)).includes(relativePath)
   } catch {
     return false
   }
+}
+
+function isTrackedDeletionInWorktree(sourceRoot: string, relativePath: string): boolean {
+  try {
+    const unstaged = execFileSync('git', ['ls-files', '--deleted', '--', relativePath], { cwd: sourceRoot, encoding: 'utf8', env: gitLiteralEnv() }).trim()
+    if (unstaged.split('\n').map(item => normalizeRepoRelativePath(item)).includes(relativePath)) return true
+  } catch { /* fall through to cached deletion check */ }
+
+  return isStagedDeletion(sourceRoot, relativePath)
+}
+
+function isTrackedInIndexOrHead(sourceRoot: string, relativePath: string): boolean {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', relativePath], { cwd: sourceRoot, stdio: 'pipe', env: gitLiteralEnv() })
+    return true
+  } catch {
+    try {
+      const output = execFileSync('git', ['ls-tree', '-z', 'HEAD', '--', relativePath], { cwd: sourceRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: gitLiteralEnv() })
+      return output.length > 0
+    } catch {
+      return false
+    }
+  }
+}
+
+function isWithinRealSourceRoot(sourceRootReal: string, candidateReal: string): boolean {
+  return candidateReal === sourceRootReal || candidateReal.startsWith(`${sourceRootReal}${path.sep}`)
+}
+
+function assertGitFilesystemPathAllowed(sourceRoot: string, relativePath: string, allowMissingTrackedDeletion: boolean): void {
+  const sourceRootReal = fs.realpathSync(sourceRoot)
+  const fullPath = path.resolve(sourceRootReal, relativePath)
+  if (!isWithinRealSourceRoot(sourceRootReal, fullPath)) throw new Error(`${relativePath} is blocked by Git path policy: PATH_NOT_ALLOWED`)
+
+  let existingAncestor = fullPath
+  while (!fs.existsSync(existingAncestor)) {
+    const parent = path.dirname(existingAncestor)
+    if (parent === existingAncestor) break
+    existingAncestor = parent
+  }
+  const ancestorReal = fs.realpathSync(existingAncestor)
+  if (!isWithinRealSourceRoot(sourceRootReal, ancestorReal)) throw new Error(`${relativePath} resolves through a symlink outside the source root: PATH_NOT_ALLOWED`)
+
+  if (!fs.existsSync(fullPath)) {
+    if (allowMissingTrackedDeletion) return
+    throw new Error(`${relativePath} must be an existing file or a tracked deletion: PATH_NOT_ALLOWED`)
+  }
+
+  const stat = fs.statSync(fs.realpathSync(fullPath))
+  const targetReal = fs.realpathSync(fullPath)
+  if (!isWithinRealSourceRoot(sourceRootReal, targetReal)) throw new Error(`${relativePath} resolves through a symlink outside the source root: PATH_NOT_ALLOWED`)
+  if (!stat.isFile()) throw new Error(`${relativePath} must be an explicit file path: PATH_NOT_ALLOWED`)
+}
+
+function resolveExtensionlessBlobId(sourceRoot: string, relativePath: string): string | undefined {
+  try {
+    const indexEntry = execFileSync('git', ['ls-files', '--stage', '--', relativePath], { cwd: sourceRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: gitLiteralEnv() })
+    const match = indexEntry.match(/^\d+\s+([0-9a-f]{40,64})\s+0\t/)
+    if (match) return match[1]
+  } catch { /* not in index */ }
+  try {
+    const treeEntry = execFileSync('git', ['ls-tree', '-z', 'HEAD', '--', relativePath], { cwd: sourceRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: gitLiteralEnv() })
+    const match = treeEntry.match(/^\d+\s+blob\s+([0-9a-f]{40,64})\t/)
+    if (match) return match[1]
+  } catch { /* not in HEAD tree */ }
+  return undefined
+}
+
+const EXTENSIONLESS_MAX_VALIDATE_BYTES = 1_000_000
+
+function assertExtensionlessGitTextPath(sourceRoot: string, relativePath: string): void {
+  if (path.extname(relativePath)) return
+
+  let sample: Buffer
+  const fullPath = path.resolve(sourceRoot, relativePath)
+  if (fs.existsSync(fullPath)) {
+    const targetReal = fs.realpathSync(fullPath)
+    const size = fs.statSync(targetReal).size
+    if (!Number.isSafeInteger(size) || size < 0 || size > EXTENSIONLESS_MAX_VALIDATE_BYTES) throw new Error(`Extensionless tracked file is too large to validate safely: ${relativePath}`)
+    const descriptor = fs.openSync(targetReal, 'r')
+    try {
+      const buffer = Buffer.alloc(8_192)
+      const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, 0)
+      sample = buffer.subarray(0, bytesRead)
+    } finally {
+      fs.closeSync(descriptor)
+    }
+  } else {
+    const blobId = resolveExtensionlessBlobId(sourceRoot, relativePath)
+    if (!blobId) throw new Error(`Extensionless deleted file has no recoverable blob: ${relativePath}`)
+    const sizeText = execFileSync('git', ['cat-file', '-s', blobId], { cwd: sourceRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    const size = Number(sizeText)
+    if (!Number.isSafeInteger(size) || size < 0 || size > EXTENSIONLESS_MAX_VALIDATE_BYTES) throw new Error(`Extensionless tracked file is too large to validate safely: ${relativePath}`)
+    const blob = execFileSync('git', ['cat-file', 'blob', blobId], { cwd: sourceRoot, maxBuffer: Math.max(1_024, size + 1), stdio: ['ignore', 'pipe', 'pipe'] })
+    sample = blob.subarray(0, 8_192)
+  }
+
+  if (sample.includes(0)) throw new Error(`Binary path is blocked: ${relativePath}`)
+}
+
+function assertGitWriteAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string, changeType: 'patch' | 'delete_file'): void {
+  const validation = validateWriteTarget({
+    sourceId: request.sourceId,
+    sourceRoot,
+    requestedPath: relativePath,
+    changeType,
+    confirmedByUser: request.confirmedByUser,
+    confirmationToken: request.confirmationToken
+  })
+  if (validation.ok === true) return
+  const blocked = validation as Extract<typeof validation, { ok: false }>
+  if (blocked.error.code === 'REQUIRES_EXPLICIT_CONFIRMATION') {
+    throw new Error(`${relativePath} requires explicit confirmation: ${blocked.error.code}`)
+  }
+  if (blocked.error.code === 'PATH_NOT_ALLOWED' && !path.extname(relativePath) && isTrackedInIndexOrHead(sourceRoot, relativePath)) return
+  throw new Error(`${relativePath} is blocked by write policy: ${blocked.error.code}`)
 }
 
 function getStagedPathStatuses(sourceRoot: string): Array<{ status: string; path: string }> {
@@ -263,25 +385,29 @@ function getStagedPathStatuses(sourceRoot: string): Array<{ status: string; path
 }
 
 function assertStagePathAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string): void {
-  if (isTrackedDeletionInWorktree(sourceRoot, relativePath)) {
-    assertWriteAllowed(request.sourceId, sourceRoot, relativePath, 'delete_file', request.confirmedByUser, request.confirmationToken)
+  const trackedDeletion = isTrackedDeletionInWorktree(sourceRoot, relativePath)
+  assertGitFilesystemPathAllowed(sourceRoot, relativePath, trackedDeletion)
+  if (trackedDeletion) {
+    assertExtensionlessGitTextPath(sourceRoot, relativePath)
+    assertGitWriteAllowed(request, sourceRoot, relativePath, 'delete_file')
     return
   }
-  if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
-    throw new Error(`Binary path is blocked: ${relativePath}`)
-  }
-  assertWriteAllowed(request.sourceId, sourceRoot, relativePath, 'patch', request.confirmedByUser, request.confirmationToken)
+  if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error(`Binary path is blocked: ${relativePath}`)
+  assertExtensionlessGitTextPath(sourceRoot, relativePath)
+  assertGitWriteAllowed(request, sourceRoot, relativePath, 'patch')
 }
 
 function assertCommitPathAllowed(request: SafeCommandRequest, sourceRoot: string, item: { status: string; path: string }): void {
-  if (item.status.startsWith('D')) {
-    assertWriteAllowed(request.sourceId, sourceRoot, item.path, 'delete_file', request.confirmedByUser, request.confirmationToken)
+  const deletion = item.status.startsWith('D')
+  assertGitFilesystemPathAllowed(sourceRoot, item.path, deletion && isTrackedInIndexOrHead(sourceRoot, item.path))
+  if (deletion) {
+    assertExtensionlessGitTextPath(sourceRoot, item.path)
+    assertGitWriteAllowed(request, sourceRoot, item.path, 'delete_file')
     return
   }
-  if (BINARY_EXTENSIONS.has(path.extname(item.path).toLowerCase())) {
-    throw new Error(`Binary path is blocked: ${item.path}`)
-  }
-  assertWriteAllowed(request.sourceId, sourceRoot, item.path, 'patch', request.confirmedByUser, request.confirmationToken)
+  if (BINARY_EXTENSIONS.has(path.extname(item.path).toLowerCase())) throw new Error(`Binary path is blocked: ${item.path}`)
+  assertExtensionlessGitTextPath(sourceRoot, item.path)
+  assertGitWriteAllowed(request, sourceRoot, item.path, 'patch')
 }
 
 function commandConfirmationToken(request: SafeCommandRequest, reason: string): string {
@@ -343,7 +469,8 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
         CI: '1',
         NO_COLOR: '1',
         GH_PROMPT_DISABLED: '1',
-        GIT_TERMINAL_PROMPT: '0'
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_LITERAL_PATHSPECS: '1'
       }
     })
 
@@ -415,15 +542,32 @@ async function runAndAppendGitLog(request: SafeCommandRequest, command: string[]
 function assertExplicitPaths(paths?: string[], options: { allowBinaryPaths?: boolean } = {}): string[] {
   if (!Array.isArray(paths) || paths.length === 0) throw new Error('paths must be a non-empty explicit file list')
   if (paths.some(item => item === '.' || item === '-A' || item === '--all')) throw new Error('paths must not include git add shortcuts')
-  return paths.map(item => {
+  const normalizedPaths = paths.map(item => {
     const normalized = assertSafeRepoPath(item, 'path')
     if (options.allowBinaryPaths !== true) assertTextFilePath(normalized)
     return normalized
   })
+  return [...new Set(normalizedPaths)]
 }
 
 function getStagedPaths(sourceRoot: string): string[] {
   return getStagedPathStatuses(sourceRoot).map(item => item.path)
+}
+
+function buildExactStagingEvidence(requestedPaths: string[], stagedStatuses: Array<{ status: string; path: string }>) {
+  const stagedPaths = stagedStatuses.map(item => item.path)
+  const requestedSet = new Set(requestedPaths)
+  const stagedSet = new Set(stagedPaths)
+  const unrelatedStagedPaths = stagedPaths.filter(item => !requestedSet.has(item))
+  const missingStagedPaths = requestedPaths.filter(item => !stagedSet.has(item))
+  return {
+    requestedPaths,
+    stagedPaths,
+    stagedStatuses,
+    unrelatedStagedPaths,
+    missingStagedPaths,
+    exactMatch: unrelatedStagedPaths.length === 0 && missingStagedPaths.length === 0 && stagedPaths.length === requestedPaths.length
+  }
 }
 
 function assertNoSecretLikeText(text: string, label: string): void {
@@ -1133,13 +1277,37 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
   if (request.commandKind === 'git_add_paths') {
     const paths = assertExplicitPaths(request.paths, { allowBinaryPaths: true })
     for (const relPath of paths) assertStagePathAllowed(request, sourceRoot, relPath)
-    return runProcess(request, ['git', 'add', '--', ...paths], sourceRoot)
+    const pathsToStage = paths.filter(relPath => !isStagedDeletion(sourceRoot, relPath))
+    const result = pathsToStage.length > 0
+      ? await runProcess(request, ['git', 'add', '--', ...pathsToStage], sourceRoot)
+      : structuredLocalResult(request, 'completed', ['git', 'add', '--'], '')
+    if (result.status !== 'completed') return result
+    const evidence = buildExactStagingEvidence(paths, getStagedPathStatuses(sourceRoot))
+    return { ...result, details: evidence }
   }
 
   if (request.commandKind === 'git_commit') {
+    const requestedPaths = request.paths === undefined
+      ? undefined
+      : assertExplicitPaths(request.paths, { allowBinaryPaths: true })
     const stagedStatuses = getStagedPathStatuses(sourceRoot)
     const staged = stagedStatuses.map(item => item.path)
     if (staged.length === 0) throw new Error('git_commit requires staged changes')
+    if (requestedPaths) {
+      const evidence = buildExactStagingEvidence(requestedPaths, stagedStatuses)
+      if (!evidence.exactMatch) {
+        const mismatch = structuredLocalResult(
+          request,
+          'failed',
+          ['git', 'commit'],
+          evidence,
+          'The complete staged path set does not exactly match the requested paths.',
+          1
+        )
+        mismatch.reason = 'staged_path_set_mismatch'
+        return mismatch
+      }
+    }
     for (const item of stagedStatuses) assertCommitPathAllowed(request, sourceRoot, item)
     const message = typeof request.message === 'string' ? request.message.trim() : ''
     const body = typeof request.body === 'string' ? request.body.trim() : ''

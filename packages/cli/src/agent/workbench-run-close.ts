@@ -3,6 +3,7 @@ import {
   updateAgentJob,
   type AgentJob,
 } from './agent-jobs'
+import { controlWorkbenchPacketsForRun } from './workbench-packet-store'
 
 export function closeWorkbenchRun(params: {
   sourceId: string
@@ -24,6 +25,12 @@ export function closeWorkbenchRun(params: {
   if (['completed', 'failed', 'cancelled'].includes(run.status)) {
     throw new Error(`Workbench run is already terminal: ${run.status}`)
   }
+
+  controlWorkbenchPacketsForRun({
+    runId: run.id,
+    action: 'cancel',
+    reason: `Run closed: ${summary}`
+  })
 
   return updateAgentJob(run.id, {
     status: 'completed',

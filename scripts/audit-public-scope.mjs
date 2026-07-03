@@ -4,9 +4,29 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 const ROOT = process.cwd()
-const SEARCH_ROOTS = ['README.md', 'CONTRIBUTING.md', 'DESIGN.md', 'docs', 'apps', 'packages', 'scripts']
-const IGNORED_DIRS = new Set(['node_modules', '.next', 'dist', 'build', 'coverage', '.git', '.turbo', '.cache'])
+const PRIVATE_ALLOWLIST_PATH = path.join(ROOT, 'packages/public-export/config/allowlist.json')
+const SEARCH_ROOTS = [
+  'README.md',
+  'CONTRIBUTING.md',
+  'DESIGN.md',
+  'COMMERCIAL-LICENSING.md',
+  'TRADEMARKS.md',
+  'SECURITY.md',
+  'package.json',
+  'docs',
+  'apps',
+  'packages',
+  'scripts'
+]
+const IGNORED_DIRS = new Set(['node_modules', '.next', 'dist', 'build', 'out', 'coverage', '.git', '.turbo', '.cache', 'graphify-out', 'node-compile-cache'])
 const ALLOWED_FILES = new Set([
+  path.normalize('README.md'),
+  path.normalize('CONTRIBUTING.md'),
+  path.normalize('COMMERCIAL-LICENSING.md'),
+  path.normalize('docs/product/README.md'),
+  path.normalize('public/docs/product/README.md'),
+  path.normalize('TRADEMARKS.md'),
+  path.normalize('SECURITY.md'),
   path.normalize('docs/product/public-scope.md'),
   path.normalize('docs/product/local/feature-scope.md'),
   path.normalize('docs/product/beta-release-gate.md'),
@@ -20,9 +40,22 @@ const RULES = makeRules()
 
 const FILE_EXTENSIONS = new Set(['.md', '.js', '.mjs', '.ts', '.tsx', '.sh', '.json', '.yaml', '.yml'])
 
+async function getSearchRoots() {
+  try {
+    const allowlist = JSON.parse(await fs.readFile(PRIVATE_ALLOWLIST_PATH, 'utf8'))
+    if (allowlist?.schemaVersion === 1 && Array.isArray(allowlist.entries)) {
+      return [...new Set(allowlist.entries.map(entry => String(entry.source || '').trim()).filter(Boolean))]
+    }
+  } catch {
+    // Generated public snapshots intentionally do not include private export controls.
+  }
+  return SEARCH_ROOTS
+}
+
 async function main() {
   const findings = []
-  for (const root of SEARCH_ROOTS) {
+  const searchRoots = await getSearchRoots()
+  for (const root of searchRoots) {
     await walk(path.join(ROOT, root), findings)
   }
 

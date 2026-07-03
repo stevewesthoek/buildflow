@@ -22,7 +22,179 @@ const expectReject = async (label: string, fn: () => Promise<unknown>) => {
   assert.equal(rejected, true, label)
 }
 
+async function verifyExtensionlessGitPaths() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-extensionless-git-'))
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-extensionless-outside-'))
+  const git = (args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe', encoding: 'utf8' })
+  const put = (rel: string, content: string) => {
+    const full = path.join(repo, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, content)
+  }
+  const cachedPaths = () => git(['diff', '--cached', '--name-only']).trim().split('\n').filter(Boolean).sort()
+  const extensionlessPaths = Array.from({ length: 10 }, (_, index) => `docs/example/channel/scripts/${String(index + 1).padStart(3, '0')}`)
+  const requestedPaths = [
+    'docs/example/README.md',
+    'docs/example/channel/README.md',
+    ...extensionlessPaths
+  ]
+  const modifiedExtensionless = [extensionlessPaths[0], extensionlessPaths[1], extensionlessPaths[3], extensionlessPaths[4], extensionlessPaths[8]]
+  const deletedExtensionless = [extensionlessPaths[2], extensionlessPaths[5], extensionlessPaths[6], extensionlessPaths[7], extensionlessPaths[9]]
+  const binaryExtensionless = 'docs/example/channel/scripts/binary'
+  const commandBase = { sourceId: 'extensionless-test', sourceRoot: repo }
+
+  try {
+    git(['init'])
+    git(['config', 'user.email', 'buildflow@example.test'])
+    git(['config', 'user.name', 'BuildFlow Test'])
+    put(requestedPaths[0], '# Initial channel\n')
+    put(requestedPaths[1], '# Initial scripts\n')
+    extensionlessPaths.forEach((rel, index) => put(rel, `initial ${index + 1}\n`))
+    put('LICENSE', 'initial license\n')
+    fs.writeFileSync(path.join(repo, binaryExtensionless), Buffer.from([0, 1, 2, 3]))
+    put('notes/unrelated.md', 'initial unrelated\n')
+    git(['add', '--', ...requestedPaths, 'LICENSE', binaryExtensionless, 'notes/unrelated.md'])
+    git(['commit', '-m', 'test: seed extensionless fixtures'])
+
+    put('LICENSE', 'updated license\n')
+    await expectReject('git_add_paths requires confirmation for LICENSE', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'] }))
+    await expectReject('git_add_paths rejects an invalid LICENSE confirmation token', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'], confirmationToken: 'confirm:invalid' }))
+    assert.deepEqual(cachedPaths(), [])
+    let result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'], confirmedByUser: true })
+    assert.equal(result.status, 'completed')
+    await expectReject('git_commit requires confirmation for LICENSE', () => runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license' }))
+    await expectReject('git_commit rejects an invalid LICENSE confirmation token', () => runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license', confirmationToken: 'confirm:invalid' }))
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license', confirmedByUser: true })
+    assert.equal(result.status, 'completed')
+
+    fs.rmSync(path.join(repo, binaryExtensionless))
+    await expectReject('git_add_paths rejects a deleted extensionless binary even with confirmation', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: [binaryExtensionless], confirmedByUser: true }))
+    assert.deepEqual(cachedPaths(), [])
+    git(['checkout', '--', binaryExtensionless])
+
+    put(requestedPaths[0], '# Updated channel\n')
+    put(requestedPaths[1], '# Updated scripts\n')
+    modifiedExtensionless.forEach((rel, index) => put(rel, `modified ${index + 1}\n`))
+    deletedExtensionless.forEach(rel => fs.rmSync(path.join(repo, rel)))
+    put('notes/unrelated.md', 'changed but unstaged\n')
+    put('kanban.md', 'untracked and unrelated\n')
+
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: requestedPaths })
+    assert.equal(result.status, 'completed')
+    const exactDetails = result.details as {
+      requestedPaths: string[]
+      stagedPaths: string[]
+      stagedStatuses: Array<{ status: string; path: string }>
+      unrelatedStagedPaths: string[]
+      missingStagedPaths: string[]
+      exactMatch: boolean
+    }
+    assert.equal(exactDetails.exactMatch, true)
+    assert.deepEqual([...exactDetails.requestedPaths].sort(), [...requestedPaths].sort())
+    assert.deepEqual([...exactDetails.stagedPaths].sort(), [...requestedPaths].sort())
+    assert.deepEqual(exactDetails.unrelatedStagedPaths, [])
+    assert.deepEqual(exactDetails.missingStagedPaths, [])
+    assert.deepEqual(cachedPaths(), [...requestedPaths].sort())
+    for (const rel of deletedExtensionless) {
+      assert(exactDetails.stagedStatuses.some(item => item.path === rel && item.status.startsWith('D')), `${rel} must be staged as deleted`)
+    }
+    assert(!cachedPaths().includes('notes/unrelated.md'))
+    assert(!cachedPaths().includes('kanban.md'))
+
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: requestedPaths })
+    assert.equal(result.status, 'completed')
+    assert.equal((result.details as { exactMatch?: boolean }).exactMatch, true)
+    assert.deepEqual(cachedPaths(), [...requestedPaths].sort())
+
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: requestedPaths, message: 'test: commit exact extensionless set' })
+    assert.equal(result.status, 'completed')
+    const committedPaths = git(['show', '--pretty=format:', '--name-only', 'HEAD']).trim().split('\n').filter(Boolean).sort()
+    assert.deepEqual(committedPaths, [...requestedPaths].sort())
+    const unrelatedStatus = git(['status', '--short', '--', 'notes/unrelated.md', 'kanban.md'])
+    assert(unrelatedStatus.includes('notes/unrelated.md'))
+    assert(unrelatedStatus.includes('kanban.md'))
+
+    put('scripts/untracked-command', 'untracked extensionless text\n')
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['scripts/untracked-command', 'scripts/untracked-command'] })
+    assert.equal(result.status, 'completed')
+    const dedupedDetails = result.details as { exactMatch?: boolean; requestedPaths?: string[] }
+    assert.equal(dedupedDetails.exactMatch, true)
+    assert.deepEqual(dedupedDetails.requestedPaths, ['scripts/untracked-command'])
+    git(['reset', '--', 'scripts/untracked-command'])
+    fs.rmSync(path.join(repo, 'scripts/untracked-command'))
+
+    const disallowedUntracked = 'wiki/example/channel/scripts/untracked'
+    put(disallowedUntracked, 'outside ordinary write roots\n')
+    await expectReject('git_add_paths rejects untracked extensionless files outside ordinary write roots', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: [disallowedUntracked] }))
+    fs.rmSync(path.join(repo, disallowedUntracked))
+
+    fs.mkdirSync(path.join(repo, 'scripts/directory'), { recursive: true })
+    await expectReject('git_add_paths rejects explicit directories', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['scripts/directory'] }))
+    fs.rmSync(path.join(repo, 'scripts/directory'), { recursive: true })
+
+    fs.writeFileSync(path.join(repo, 'scripts/oversized-command'), Buffer.alloc(1_000_001, 65))
+    await expectReject('git_add_paths rejects oversized extensionless files consistently', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['scripts/oversized-command'] }))
+    fs.rmSync(path.join(repo, 'scripts/oversized-command'))
+    await expectReject('git_add_paths rejects control characters in paths', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['scripts/bad\nname'] }))
+
+    if (process.platform !== 'win32') {
+      put('scripts/*', 'literal wildcard filename\n')
+      put('scripts/pathspec-neighbor', 'must remain untracked\n')
+      result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['scripts/*'] })
+      assert.equal(result.status, 'completed')
+      const literalDetails = result.details as { exactMatch?: boolean; stagedPaths?: string[] }
+      assert.equal(literalDetails.exactMatch, true)
+      assert.deepEqual(literalDetails.stagedPaths, ['scripts/*'])
+      assert(!cachedPaths().includes('scripts/pathspec-neighbor'))
+      git(['reset', '--', 'scripts/*'])
+      fs.rmSync(path.join(repo, 'scripts/*'))
+      fs.rmSync(path.join(repo, 'scripts/pathspec-neighbor'))
+    }
+
+    put(extensionlessPaths[0], 'valid change before atomic rejection\n')
+    const cachedBeforeRejectedRequest = cachedPaths()
+    await expectReject('git_add_paths rejects an atomic set containing .git/config', () => runSafeCommand({
+      ...commandBase,
+      commandKind: 'git_add_paths',
+      paths: [extensionlessPaths[0], '.git/config']
+    }))
+    assert.deepEqual(cachedPaths(), cachedBeforeRejectedRequest)
+    await expectReject('git_add_paths rejects traversal for extensionless paths', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['../outside-file'] }))
+    await expectReject('git_add_paths rejects absolute extensionless paths', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: [path.join(repo, extensionlessPaths[0])] }))
+    await expectReject('git_add_paths rejects prohibited .git/config', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['.git/config'] }))
+
+    if (process.platform !== 'win32') {
+      const outsideFile = path.join(outside, 'outside-file')
+      fs.writeFileSync(outsideFile, 'outside\n')
+      const symlinkPath = path.join(repo, 'scripts', 'escape')
+      fs.mkdirSync(path.dirname(symlinkPath), { recursive: true })
+      fs.symlinkSync(outsideFile, symlinkPath)
+      await expectReject('git_add_paths rejects symlink escapes', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['scripts/escape'] }))
+      fs.rmSync(symlinkPath)
+    }
+
+    put('notes/unrelated.md', 'pre-staged unrelated change\n')
+    git(['add', '--', 'notes/unrelated.md'])
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: [extensionlessPaths[0]] })
+    assert.equal(result.status, 'completed')
+    assert.equal((result.details as { exactMatch?: boolean }).exactMatch, false)
+    assert((result.details as { unrelatedStagedPaths: string[] }).unrelatedStagedPaths.includes('notes/unrelated.md'))
+
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: [extensionlessPaths[0]], message: 'test: must not commit mismatched set' })
+    assert.equal(result.status, 'failed')
+    assert.equal(result.reason, 'staged_path_set_mismatch')
+    const mismatchDetails = result.details as { exactMatch: boolean; unrelatedStagedPaths: string[] }
+    assert.equal(mismatchDetails.exactMatch, false)
+    assert(mismatchDetails.unrelatedStagedPaths.includes('notes/unrelated.md'))
+    assert.equal(git(['log', '-1', '--pretty=%s']).trim(), 'test: commit exact extensionless set')
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true })
+    fs.rmSync(outside, { recursive: true, force: true })
+  }
+}
+
 async function main() {
+await verifyExtensionlessGitPaths()
 run('git', ['init'])
 run('git', ['config', 'user.email', 'buildflow@example.test'])
 run('git', ['config', 'user.name', 'BuildFlow Test'])

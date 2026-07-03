@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Moon, RefreshCw, Sun } from 'lucide-react'
+import { Code2, Moon, RefreshCw, Sun } from 'lucide-react'
 
 import { getAgentHealthLabel } from '../helpers'
 import { DashboardIconButton } from './ui/DashboardIconButton'
@@ -24,6 +24,8 @@ export function DashboardTopBar({
   onRefresh,
   children
 }: DashboardTopBarProps) {
+  const sourceUrl = process.env.NEXT_PUBLIC_WORKBENCH_SOURCE_URL || 'https://github.com/prochattools/prochat-workbench'
+
   return (
     <div className="shrink-0 border-b border-bf-border/80 bg-bf-surface/96 backdrop-blur supports-[backdrop-filter]:bg-bf-surface/92 dark:border-slate-800/80 dark:bg-slate-950/96">
       <div className="flex h-11 items-center justify-between gap-3 px-4 lg:px-5">
@@ -44,6 +46,16 @@ export function DashboardTopBar({
 
         <div className="flex items-center gap-1.5">
           {children}
+          <a
+            href={sourceUrl}
+            target="_blank"
+            rel="noreferrer"
+            aria-label="View corresponding source code"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-bf-border/80 px-2.5 text-[11px] font-medium text-bf-muted transition hover:bg-bf-subtle hover:text-bf-text dark:border-slate-800 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100"
+          >
+            <Code2 className="h-3.5 w-3.5" strokeWidth={1.8} />
+            <span className="hidden sm:inline">Source</span>
+          </a>
           <DashboardIconButton
             type="button"
             onClick={onRefresh}
