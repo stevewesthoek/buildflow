@@ -2,7 +2,7 @@
 
 ProChat Workbench Local is the public GitHub priority. Keep contributions focused on the free, self-hosted, local-first product defined in `docs/product/public-scope.md`.
 
-The public snapshot is licensed under `AGPL-3.0-only`. ProChat also offers separate commercial or OEM licenses, so accepted external code must be contributed under terms that preserve ProChat's ability to distribute it under both licensing paths.
+The public snapshot is licensed under `AGPL-3.0-only` as the ProChat Workbench Local product-specific exception recorded in Mind. Separate commercial or OEM licensing may be requested, but public documentation does not grant commercial or OEM rights. Accepted external code must be contributed under terms that preserve ProChat's ability to distribute it under the public AGPL snapshot and any separate written commercial/OEM agreements.
 
 ## Good contribution areas
 

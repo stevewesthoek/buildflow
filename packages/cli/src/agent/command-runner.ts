@@ -163,10 +163,14 @@ const SAFE_SCRIPT_NAME = /^[A-Za-z0-9:_-]+$/
 const SAFE_MARKER = /^[A-Za-z0-9 _:\-()|]+$/
 const SAFE_REMOTE = /^[A-Za-z0-9._-]+$/
 const SAFE_BRANCH = /^[A-Za-z0-9._/-]+$/
-const BLOCKED_PATH_PARTS = new Set(['.git', 'node_modules', '.next', 'dist', 'build', 'coverage', 'generated', 'runtime', 'logs', '.cache', '.turbo', '.vercel', '.npm', '.yarn', '.pnpm-store'])
+const BLOCKED_PATH_PARTS = new Set(['.git', 'node_modules', 'vendor', '.next', 'dist', 'build', 'coverage', 'generated', 'runtime', 'logs', '.cache', '.turbo', '.vercel', '.npm', '.yarn', '.pnpm-store'])
 const ENV_TEMPLATE_FILES = new Set(['.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'])
 const BLOCKED_FILENAMES = new Set(['.env'])
 const BINARY_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.zip', '.gz', '.tar', '.tgz', '.mp4', '.mov', '.avi', '.woff', '.woff2', '.ttf', '.otf'])
+const STATIC_STAGE_EXTENSIONS = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.tiff', '.avif', '.mp4', '.mov', '.avi', '.webm', '.mkv', '.mp3', '.wav', '.ogg', '.m4a', '.flac', '.woff', '.woff2', '.ttf', '.otf', '.eot', '.zip', '.gz', '.tar', '.tgz'])
+const TEXT_LIKE_STATIC_STAGE_EXTENSIONS = new Set(['.svg'])
+const STATIC_STAGE_ROOT_PATTERNS = ['public/**', 'assets/**', 'static/**', 'docs/assets/**', 'docs/images/**', 'docs/media/**']
+const STATIC_STAGE_MAX_BYTES = 5000000
 
 const SECURITY_PATTERNS: Record<Exclude<SecurityPatternSet, 'forbidden_all_high_risk'>, Array<{ name: string; pattern: RegExp }>> = {
   forbidden_runtime_execution: [
@@ -231,7 +235,82 @@ function resolveSafePath(sourceRoot: string, relativePath: string): string {
 }
 
 function assertTextFilePath(relativePath: string): void {
-  if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error(`Binary path is blocked: ${relativePath}`)
+  if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error('Binary path is blocked: ' + relativePath)
+}
+
+function escapeForCommandGlob(value: string): string {
+  const specialChars = '\\^.*+?()[]{}|' + String.fromCharCode(36)
+  return value.split('').map(char => specialChars.includes(char) ? '\\' + char : char).join('')
+}
+
+function matchesCommandGlob(pattern: string, value: string): boolean {
+  const escapedChars = escapeForCommandGlob(pattern)
+  const escaped = escapedChars.split('\\*\\*').join('::DOUBLESTAR::').split('\\*').join('[^/]*').split('::DOUBLESTAR::').join('.*')
+  return new RegExp('^' + escaped + String.fromCharCode(36), 'i').test(value)
+}
+
+function isStaticStageRootPath(relativePath: string): boolean {
+  return STATIC_STAGE_ROOT_PATTERNS.some(pattern => matchesCommandGlob(pattern, relativePath))
+}
+
+function isStaticStagePath(relativePath: string): boolean {
+  const ext = path.extname(relativePath).toLowerCase()
+  return STATIC_STAGE_EXTENSIONS.has(ext) && isStaticStageRootPath(relativePath)
+}
+
+function isTextLikeStaticStagePath(relativePath: string): boolean {
+  return TEXT_LIKE_STATIC_STAGE_EXTENSIONS.has(path.extname(relativePath).toLowerCase())
+}
+
+function hasTrackedIndexEntry(sourceRoot: string, relativePath: string): boolean {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', relativePath], { cwd: sourceRoot, stdio: 'ignore', env: gitLiteralEnv() })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function assertStaticStageApproved(request: SafeCommandRequest, relativePath: string): void {
+  if (hasCommandConfirmation(request, 'stage_existing_static_asset')) return
+  throw new Error(relativePath + ' requires explicit confirmation: stage_existing_static_asset')
+}
+
+function staticAssetMetadata(sourceRoot: string, relativePath: string): { path: string; bytes: number; sha256: string; textLike: boolean; validation: string } {
+  const fullPath = path.resolve(sourceRoot, relativePath)
+  const stat = fs.statSync(fs.realpathSync(fullPath))
+  if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > STATIC_STAGE_MAX_BYTES) throw new Error('Static asset is too large to stage safely: ' + relativePath)
+  const buffer = fs.readFileSync(fullPath)
+  const textLike = isTextLikeStaticStagePath(relativePath)
+  if (textLike) {
+    const text = buffer.toString('utf8')
+    if (text.includes('\u0000')) throw new Error('Text-like static asset contains binary content: ' + relativePath)
+    assertNoSecretLikeText(text, relativePath)
+  }
+  return {
+    path: relativePath,
+    bytes: stat.size,
+    sha256: createHash('sha256').update(buffer).digest('hex'),
+    textLike,
+    validation: textLike ? 'text_secret_scan_passed' : 'binary_content_scan_not_applicable_path_size_hash_checked'
+  }
+}
+
+function assertStaticStageAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string, status?: string): void {
+  if (!isStaticStagePath(relativePath)) throw new Error('Static asset type or root is unsupported: ' + relativePath)
+  assertStaticStageApproved(request, relativePath)
+  const trackedInIndex = hasTrackedIndexEntry(sourceRoot, relativePath)
+  const stagedAddition = Boolean(status && status.startsWith('A'))
+  const untrackedExisting = !trackedInIndex && fs.existsSync(path.resolve(sourceRoot, relativePath))
+  const textLike = isTextLikeStaticStagePath(relativePath)
+  if (!untrackedExisting && !stagedAddition && !textLike) throw new Error('Static asset modification is blocked: ' + relativePath)
+  staticAssetMetadata(sourceRoot, relativePath)
+}
+
+function buildStaticAssetMetadata(sourceRoot: string, paths: string[]): Array<{ path: string; bytes: number; sha256: string; textLike: boolean; validation: string }> {
+  return paths
+    .filter(relativePath => isStaticStagePath(relativePath) && fs.existsSync(path.resolve(sourceRoot, relativePath)))
+    .map(relativePath => staticAssetMetadata(sourceRoot, relativePath))
 }
 
 function assertWriteAllowed(sourceId: string, sourceRoot: string, relativePath: string, changeType: 'patch' | 'delete_file' = 'patch', confirmedByUser?: boolean, confirmationToken?: string): { needsConfirmation: boolean; reason?: string } {
@@ -392,7 +471,12 @@ function assertStagePathAllowed(request: SafeCommandRequest, sourceRoot: string,
     assertGitWriteAllowed(request, sourceRoot, relativePath, 'delete_file')
     return
   }
-  if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error(`Binary path is blocked: ${relativePath}`)
+  if (isStaticStagePath(relativePath)) {
+    assertStaticStageAllowed(request, sourceRoot, relativePath)
+    return
+  }
+  if (isStaticStageRootPath(relativePath)) throw new Error('Static asset type or root is unsupported: ' + relativePath)
+  if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error('Binary path is blocked: ' + relativePath)
   assertExtensionlessGitTextPath(sourceRoot, relativePath)
   assertGitWriteAllowed(request, sourceRoot, relativePath, 'patch')
 }
@@ -405,7 +489,12 @@ function assertCommitPathAllowed(request: SafeCommandRequest, sourceRoot: string
     assertGitWriteAllowed(request, sourceRoot, item.path, 'delete_file')
     return
   }
-  if (BINARY_EXTENSIONS.has(path.extname(item.path).toLowerCase())) throw new Error(`Binary path is blocked: ${item.path}`)
+  if (isStaticStagePath(item.path)) {
+    assertStaticStageAllowed(request, sourceRoot, item.path, item.status)
+    return
+  }
+  if (isStaticStageRootPath(item.path)) throw new Error('Static asset type or root is unsupported: ' + item.path)
+  if (BINARY_EXTENSIONS.has(path.extname(item.path).toLowerCase())) throw new Error('Binary path is blocked: ' + item.path)
   assertExtensionlessGitTextPath(sourceRoot, item.path)
   assertGitWriteAllowed(request, sourceRoot, item.path, 'patch')
 }
@@ -568,6 +657,94 @@ function buildExactStagingEvidence(requestedPaths: string[], stagedStatuses: Arr
     missingStagedPaths,
     exactMatch: unrelatedStagedPaths.length === 0 && missingStagedPaths.length === 0 && stagedPaths.length === requestedPaths.length
   }
+}
+
+type ExpandedPathScope = { input: string; directory: string; files: string[] }
+
+function hasPathGlob(value: string): boolean {
+  return value.includes('*')
+}
+
+function assertSupportedPathGlob(input: string): { directory: string; pattern: string } {
+  if (input.includes('**')) throw new Error('Only directory scopes ending in /** may use **: ' + input)
+  const normalized = assertSafeRepoPath(input, 'path scope')
+  const lastSlash = normalized.lastIndexOf('/')
+  if (lastSlash <= 0) throw new Error('Path glob is too broad: ' + input)
+  const directory = normalized.slice(0, lastSlash)
+  const pattern = normalized.slice(lastSlash + 1)
+  if (!pattern || pattern === '*' || !pattern.includes('*')) throw new Error('Path glob must target explicit files: ' + input)
+  if (directory.split('/').filter(Boolean).length < 2) throw new Error('Path glob directory is too broad: ' + input)
+  return { directory, pattern: normalized }
+}
+
+function walkRepoFiles(root: string, directory: string): string[] {
+  const fullDirectory = path.resolve(root, directory)
+  if (!fs.existsSync(fullDirectory)) return []
+  const stat = fs.statSync(fs.realpathSync(fullDirectory))
+  if (!stat.isDirectory()) throw new Error('Directory scope must point to a directory: ' + directory)
+  const out: string[] = []
+  const visit = (current: string) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const fullPath = path.join(current, entry.name)
+      const relPath = normalizeRepoRelativePath(path.relative(root, fullPath))
+      if (relPath.split('/').some(part => BLOCKED_PATH_PARTS.has(part))) continue
+      if (entry.isDirectory()) visit(fullPath)
+      else if (entry.isFile()) out.push(relPath)
+    }
+  }
+  visit(fullDirectory)
+  return out
+}
+
+function changedGitPathsUnder(sourceRoot: string, directory: string): string[] {
+  try {
+    const output = execFileSync('git', ['status', '--porcelain=v1', '-z', '-uall', '--', directory], { cwd: sourceRoot, encoding: 'utf8', env: gitLiteralEnv() })
+    const tokens = output.split('\u0000').filter(Boolean)
+    const paths: string[] = []
+    for (let index = 0; index < tokens.length; index += 1) {
+      const statusEntry = tokens[index]
+      const status = statusEntry.slice(0, 2)
+      const relPath = normalizeRepoRelativePath(statusEntry.slice(3))
+      if (status.startsWith('R') || status.startsWith('C')) {
+        const renamedPath = normalizeRepoRelativePath(tokens[index + 1] || relPath)
+        if (renamedPath) paths.push(renamedPath)
+        index += 1
+      } else if (relPath) {
+        paths.push(relPath)
+      }
+    }
+    return paths
+  } catch {
+    return []
+  }
+}
+
+function expandApprovedPathScopes(sourceRoot: string, requestedPaths: string[]): { paths: string[]; expandedPathScopes: ExpandedPathScope[] } {
+  const expandedPathScopes: ExpandedPathScope[] = []
+  const expanded = requestedPaths.flatMap(item => {
+    if (item.endsWith('/**')) {
+      const directory = item.slice(0, -3).replace(/\/+$/, '')
+      const segments = directory.split('/').filter(Boolean)
+      if (segments.length < 2) throw new Error('Directory scope is too broad: ' + item)
+      const normalizedDirectory = assertSafeRepoPath(directory, 'directory scope')
+      const files = [...new Set(changedGitPathsUnder(sourceRoot, normalizedDirectory))].sort()
+      if (files.length === 0) throw new Error('Directory scope did not expand to any files: ' + item)
+      expandedPathScopes.push({ input: item, directory: normalizedDirectory, files })
+      return files
+    }
+
+    if (hasPathGlob(item)) {
+      if (fs.existsSync(path.resolve(sourceRoot, item))) return [item]
+      const { directory, pattern } = assertSupportedPathGlob(item)
+      const files = [...new Set(changedGitPathsUnder(sourceRoot, directory).filter(candidate => matchesCommandGlob(pattern, candidate)))].sort()
+      if (files.length === 0) throw new Error('Path glob did not expand to any files: ' + item)
+      expandedPathScopes.push({ input: item, directory, files })
+      return files
+    }
+
+    return [item]
+  })
+  return { paths: [...new Set(expanded)], expandedPathScopes }
 }
 
 function assertNoSecretLikeText(text: string, label: string): void {
@@ -1275,7 +1452,9 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
   if (request.commandKind === 'security_scan_paths') return scanSecurityPaths(request)
 
   if (request.commandKind === 'git_add_paths') {
-    const paths = assertExplicitPaths(request.paths, { allowBinaryPaths: true })
+    const requestedInputPaths = assertExplicitPaths(request.paths, { allowBinaryPaths: true })
+    const expansion = expandApprovedPathScopes(sourceRoot, requestedInputPaths)
+    const paths = expansion.paths
     for (const relPath of paths) assertStagePathAllowed(request, sourceRoot, relPath)
     const pathsToStage = paths.filter(relPath => !isStagedDeletion(sourceRoot, relPath))
     const result = pathsToStage.length > 0
@@ -1283,13 +1462,24 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
       : structuredLocalResult(request, 'completed', ['git', 'add', '--'], '')
     if (result.status !== 'completed') return result
     const evidence = buildExactStagingEvidence(paths, getStagedPathStatuses(sourceRoot))
-    return { ...result, details: evidence }
+    return {
+      ...result,
+      details: {
+        ...evidence,
+        requestedInputPaths,
+        expandedPathScopes: expansion.expandedPathScopes,
+        staticAssets: buildStaticAssetMetadata(sourceRoot, paths)
+      }
+    }
   }
 
   if (request.commandKind === 'git_commit') {
-    const requestedPaths = request.paths === undefined
+    const requestedInputPaths = request.paths === undefined
       ? undefined
       : assertExplicitPaths(request.paths, { allowBinaryPaths: true })
+    const requestedPaths = requestedInputPaths === undefined
+      ? undefined
+      : expandApprovedPathScopes(sourceRoot, requestedInputPaths).paths
     const stagedStatuses = getStagedPathStatuses(sourceRoot)
     const staged = stagedStatuses.map(item => item.path)
     if (staged.length === 0) throw new Error('git_commit requires staged changes')

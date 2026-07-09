@@ -1,8 +1,12 @@
 # Commercial and OEM Licensing
 
-ProChat Workbench Local is available under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See `LICENSE` for the complete terms.
+ProChat Workbench Local is available under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`) in the generated public source snapshot.
 
-Organizations that cannot or do not want to use Workbench under the AGPL may request a separate commercial or OEM license from ProChat. A commercial agreement may cover use cases such as:
+See `LICENSE` for the complete AGPL terms.
+
+This exception applies only to ProChat Workbench Local public snapshot files. It does not apply to ProChat Memory, ProChat Memory for QA, future products, managed services, private modules, customer operations, or internal commercial systems.
+
+Organizations that cannot or do not want to use Workbench under the AGPL may request a separate commercial or OEM license from ProChat. Public documentation does not grant commercial or OEM rights. A commercial agreement may cover use cases such as:
 
 - embedding Workbench in proprietary products;
 - distributing modified versions without AGPL source-disclosure obligations;

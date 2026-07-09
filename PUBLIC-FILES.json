@@ -1,21 +1,21 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "d2d0a0de2d99eee8487aabad842ff406fb2c0a70",
+  "sourceCommit": "7493d7016b1a828ed8bd09ad99c382c5be0a536a",
   "files": [
     {
       "path": ".gitignore",
-      "bytes": 263,
-      "sha256": "6e628d0b54072f7fd5b0656c952efe484e092803c1ac2ed59617aef72dd5cf03"
+      "bytes": 272,
+      "sha256": "0e398a49513955c5d929e9bdaeabc943e92a6ec2b42c6c1a9774c6d02c82358e"
     },
     {
       "path": "COMMERCIAL-LICENSING.md",
-      "bytes": 1688,
-      "sha256": "e0351a8f87490538f3f33e5798921d75df7f4a992c093a316c1e0ee5b73108e6"
+      "bytes": 2040,
+      "sha256": "87d2e2234e58d55aacc1e34fb8ce50ab2183bd25ab2a191faf2ee8680441954e"
     },
     {
       "path": "CONTRIBUTING.md",
-      "bytes": 6695,
-      "sha256": "0094ea1d3776727f3718086931cb6fa56c65be6c329c5f7237e79b6a8a34e2c6"
+      "bytes": 6886,
+      "sha256": "3bce512f43915716338af6396054b60c24b9360f1b7b8a13538a0bf46722be69"
     },
     {
       "path": "DESIGN.md",
@@ -40,12 +40,12 @@
     {
       "path": "PUBLIC-SOURCE.json",
       "bytes": 322,
-      "sha256": "69aed581cb3ae4854ee20d9246468ae61993bcefd7d59e7705a4507e19588345"
+      "sha256": "a5d02dd58269a2ca4321a4a46b50e2759980953851b40279657d7de784100b8f"
     },
     {
       "path": "README.md",
-      "bytes": 22425,
-      "sha256": "2e516b8d38ecaf1a94ff30ad32abf6f339279a66f6bedd5941d115f49a31977c"
+      "bytes": 23220,
+      "sha256": "dd87564c6328c3966de13a18c052a51bca68c03d196bec881bdb5b0000b5438f"
     },
     {
       "path": "SECURITY.md",
@@ -54,8 +54,8 @@
     },
     {
       "path": "TRADEMARKS.md",
-      "bytes": 1112,
-      "sha256": "8864911f40c3786c1450de4874f4b11d875835bd0399b7f81756b627c0f2a99c"
+      "bytes": 1216,
+      "sha256": "5431ecc3b201f5b01b6868918aaa2a5b14a3586d57651f134f0fe92c4ccf6133"
     },
     {
       "path": "apps/web/next.config.js",
@@ -144,8 +144,8 @@
     },
     {
       "path": "apps/web/src/app/api/actions/commit-changes/route.ts",
-      "bytes": 5937,
-      "sha256": "1bb3fe02bea3d6537684070e90b9a2de1f66e4e22242c2345503e1709eea3722"
+      "bytes": 5992,
+      "sha256": "fb7f2b0c56e0eb5f08fbec5780c088d0133b55378d8db00e0b7049e06d18ab48"
     },
     {
       "path": "apps/web/src/app/api/actions/context/active/route.ts",
@@ -409,8 +409,8 @@
     },
     {
       "path": "apps/web/src/app/dashboard/components/DashboardTopBar.tsx",
-      "bytes": 3527,
-      "sha256": "2cce607efed298df860d1ca834f539e1261b69304efcb1e89b69abde0b67479b"
+      "bytes": 3519,
+      "sha256": "4ac9bf52d3bfba118cdb79b3f6b7506cf381b3094f63de67a30b844b726e5be9"
     },
     {
       "path": "apps/web/src/app/dashboard/components/ExecutionFlowPreview.tsx",
@@ -654,8 +654,8 @@
     },
     {
       "path": "buildflow-orchestrator.sh",
-      "bytes": 14703,
-      "sha256": "e5bda3d75f7d7d70ac76c3a429760c4f142c0f96cff05bc7cd503ad655f87b1a"
+      "bytes": 399,
+      "sha256": "cd33480122eed296d3ca2622c25078a321637287a9d111b39517ce1c78e0d3eb"
     },
     {
       "path": "docker-compose.yml",
@@ -704,8 +704,8 @@
     },
     {
       "path": "package.json",
-      "bytes": 2826,
-      "sha256": "f7e74e9c1eac1927c0f133532b83d52d05276a4e709580fe902ddd4cfb000abf"
+      "bytes": 2805,
+      "sha256": "0c1e8a623076fc150ea2786defaa10d9e0bda2a7cbebefb132c858ebc53394fe"
     },
     {
       "path": "packages/bridge/device-client.js",
@@ -809,8 +809,8 @@
     },
     {
       "path": "packages/cli/src/agent/command-runner.ts",
-      "bytes": 63941,
-      "sha256": "9f0ce9127990271c920f277c8df433d8f48f8f56ede3be924c37e7b91f70fbb2"
+      "bytes": 73359,
+      "sha256": "9803331b66cec926fc9e353867e97ae7c1e63dd402bab8dd7d23e1cff7e1067d"
     },
     {
       "path": "packages/cli/src/agent/config.ts",
@@ -1124,8 +1124,23 @@
     },
     {
       "path": "scripts/buildflow-local-stack.sh",
-      "bytes": 17157,
-      "sha256": "9ac08ec49b85f0245e74cbbdb8da75416ad9670b5371c88d520d5f4cb99bb1a3"
+      "bytes": 694,
+      "sha256": "005738853c5bcb1d9841771dc55c4d7032df9e8152cff8e6c200ce1bedb69a1d"
+    },
+    {
+      "path": "scripts/dev/restart-local.sh",
+      "bytes": 122,
+      "sha256": "c0c78fdb532257eff5110f03f54a99321a80231bd0016fdcafa599eae377d008"
+    },
+    {
+      "path": "scripts/dev/start-local.sh",
+      "bytes": 120,
+      "sha256": "a95c1024e2287d75f473f1ed3150a0ec205ecc1d855dc27ac33c5a88492e6f05"
+    },
+    {
+      "path": "scripts/dev/stop-local.sh",
+      "bytes": 119,
+      "sha256": "995273625bc952c50a4dbaa46db3165dca6b71cc28b228bf8866bdb1590fdbf4"
     },
     {
       "path": "scripts/diagnose-performance.ts",
@@ -1174,8 +1189,8 @@
     },
     {
       "path": "scripts/verify-command-runner.ts",
-      "bytes": 32885,
-      "sha256": "38cea7bde055937eff7a7447586d39f3e096cdc1d6ae9224b33eac2bda599903"
+      "bytes": 43059,
+      "sha256": "cbfd20c6ab375acb05fda50233b80a24125cb4f016371fd6a9de4054ae4642a7"
     },
     {
       "path": "scripts/verify-custom-gpt-actions.mjs",
@@ -1214,8 +1229,13 @@
     },
     {
       "path": "scripts/verify-write-policy.ts",
-      "bytes": 20631,
-      "sha256": "8a14d38f1dfa42e830d49a4a3868d98b617f66fe162c347f2d781ae49af32414"
+      "bytes": 21833,
+      "sha256": "d7c922d12a19f2ef0d9b5da05d66c524b367d21182f6dc00d30926eaf4b4e264"
+    },
+    {
+      "path": "scripts/workbench-local-stack.sh",
+      "bytes": 5904,
+      "sha256": "48ae25687d2dc3e38c714a191790ee49d5dd3ab24857d7f20ff5a82748aff783"
     },
     {
       "path": "tsconfig.base.json",

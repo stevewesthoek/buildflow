@@ -88,6 +88,7 @@ export async function POST(request: NextRequest) {
       diffStat: (diff as { stdout?: string }).stdout,
       commitMessage: message,
       committed,
+      staging: (add as { details?: unknown }).details,
       stdout: (commit as { stdout?: string }).stdout,
       stderr: committed ? undefined : (commit as { stderr?: string }).stderr,
       activity: {

@@ -13,4 +13,4 @@ Written permission is required for uses such as:
 - registering confusingly similar product, company, package, or domain names;
 - OEM or white-label distribution under ProChat branding.
 
-Separate commercial or OEM agreements may grant additional trademark rights.
+Separate written commercial or OEM agreements may grant additional trademark rights. Public documentation does not grant commercial, OEM, white-label, or expanded trademark rights.

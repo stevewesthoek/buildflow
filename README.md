@@ -1,17 +1,17 @@
 # ProChat Workbench
 
-**ProChat Workbench lets ChatGPT plan and execute substantial work in your real local projects.**
+**ProChat Workbench lets ChatGPT work safely with your real local projects.**
 
-Connect a Custom GPT to your own computer and use ChatGPT as the reasoning interface for local repositories, documentation, plans, notes, and knowledge folders. Workbench provides guarded local execution, persistent goals, exact context, validation, checkpoints, and explicit-path Git operations.
+Connect a Custom GPT to your own computer and use ChatGPT as the reasoning interface for local repositories, documentation, plans, notes, and knowledge folders. Workbench provides exact source context, guarded file operations, bounded local execution, validation, checkpoints, and explicit-path Git workflows.
 
-ProChat Workbench is free, self-hosted, and local-first. It is designed to reduce the cost and friction of AI-assisted development by using the ChatGPT interface you already have instead of requiring a separate hosted coding-agent API for ordinary workflows.
+ProChat Workbench is free, self-hosted, and local-first. It is designed for developers, QA engineers, technical consultants, and documentation-heavy teams who want AI assistance without moving project knowledge into a hosted coding-agent platform.
 
 ```text
-Public product: ProChat Workbench
-Technical engine and internal identifier: BuildFlow
+Public product name: ProChat Workbench
+Technical compatibility name: BuildFlow
 ```
 
-BuildFlow repository names, package scopes, scripts, source IDs, and internal API routes remain technical compatibility identifiers. The canonical public GPT action operation IDs use Workbench names, and the retired BuildFlow hostname is no longer a public compatibility dependency.
+Use **ProChat Workbench** in public documentation, GitHub descriptions, CV links, interviews, and beta onboarding. The BuildFlow name remains only where older package names, scripts, config paths, source IDs, or API compatibility surfaces still require it.
 
 If this project helps you, please **star it, fork it, try it on a real repo, open issues, request features, and share what you build with it.**
 
@@ -42,9 +42,9 @@ AI coding tools are powerful, but they often work in the wrong place.
 
 A remote model may not see your local repo. A browser chat may not be able to run your local tests. A CLI agent may have strong execution but weak long-term planning context. Copying files back and forth wastes time and breaks flow.
 
-ProChat Workbench bridges that gap through the BuildFlow engine.
+ProChat Workbench bridges that gap with a local web app, local agent, and relay.
 
-It keeps ChatGPT as the main interface while your own machine remains the source of truth. Your Custom GPT can ask BuildFlow for exact repo context, read the files it needs, write verified changes back to disk, run allowlisted validation commands, and keep a progress trail.
+It keeps ChatGPT as the main interface while your own machine remains the source of truth. Your Custom GPT can ask Workbench for exact repo context, read the files it needs, write verified changes back to disk, run allowlisted validation commands, and keep a progress trail.
 
 The result is a ChatGPT-first workflow for real local projects.
 
@@ -80,7 +80,7 @@ That means you can brainstorm, inspect, plan, edit, validate, and iterate on rea
 
 ### ChatGPT-first local repo access
 
-ProChat Workbench exposes a Custom GPT action schema through the BuildFlow engine so ChatGPT can talk to your Workbench endpoint.
+ProChat Workbench exposes a Custom GPT action schema so ChatGPT can talk to your local Workbench endpoint.
 
 Your GPT can:
 
@@ -98,9 +98,9 @@ Your GPT can:
 
 ### Local source management
 
-Add repos, notes, docs, skills, or business folders as BuildFlow sources.
+Add repos, notes, docs, skills, or business folders as Workbench sources.
 
-BuildFlow supports:
+Workbench supports:
 
 - one or multiple active sources
 - Git branch metadata for configured repositories (`branchName`, available branch count, and worktree flag)
@@ -113,11 +113,11 @@ BuildFlow supports:
 - optional per-source auto-index settings
 - searchable status reporting for ChatGPT and the dashboard
 
-Branch-aware activation works on configured checkouts and worktrees. When a repo has multiple configured branch worktrees, enabling/disabling or activating one configured branch expands to the configured siblings in the same repo group. BuildFlow does not silently check out every Git branch inside one working tree; create linked Git worktrees and add/discover them as sources when you want simultaneous branch access.
+Branch-aware activation works on configured checkouts and worktrees. When a repo has multiple configured branch worktrees, enabling/disabling or activating one configured branch expands to the configured siblings in the same repo group. Workbench does not silently check out every Git branch inside one working tree; create linked Git worktrees and add/discover them as sources when you want simultaneous branch access.
 
 ### Verified file writes
 
-BuildFlow can write files, but it does not blindly mutate your machine.
+Workbench can write files, but it does not blindly mutate your machine.
 
 It supports:
 
@@ -137,11 +137,11 @@ It supports:
 
 The current repo-maintainer profile is intentionally practical for fast repo-assistant work. It can edit normal app code, tests, docs, scripts, package manifests, framework config, Docker files, Prisma files, migrations, and source-controlled project assets without stopping for every routine change.
 
-A write is not considered successful unless BuildFlow verifies it on disk.
+A write is not considered successful unless Workbench verifies it on disk.
 
 ### Safe command runner
 
-BuildFlow can run repo-local commands through a strict allowlist.
+Workbench can run repo-local commands through a strict allowlist.
 
 Supported command families include:
 
@@ -154,15 +154,15 @@ Supported command families include:
 - safe package scripts by name, including scripts from the repo root
 - marker-based test runs where supported
 - named security scans
-- BuildFlow verification scripts
+- Workbench verification scripts
 
-BuildFlow does **not** expose arbitrary shell execution. More command capability should be added as named, source-relative command kinds instead of unrestricted terminal access.
+Workbench does **not** expose arbitrary shell execution. More command capability should be added as named, source-relative command kinds instead of unrestricted terminal access.
 
 ### Fast Repo Assistant workflow
 
-BuildFlow has one Custom GPT workflow: fast repo assistance.
+Workbench has one Custom GPT workflow: fast repo assistance.
 
-ChatGPT does the reasoning and coding. BuildFlow provides exact local context, guarded file writes, targeted validation, and explicit Git operations. It does not run a separate autonomous agent loop.
+ChatGPT does the reasoning and coding. Workbench provides exact local context, guarded file writes, targeted validation, and explicit Git operations. It does not run a separate autonomous agent loop.
 
 Use this default flow:
 
@@ -177,13 +177,13 @@ Recommended task budget:
 ```text
 Default: 1 task per response
 Clear small batch: up to 2 tightly related tasks
-Hard action budget: 3 BuildFlow actions per response, preferably 1-2
+Hard action budget: 3 Workbench actions per response, preferably 1-2
 Push: only when explicitly requested
 ```
 
 This keeps ChatGPT powerful while avoiding the main latency failure mode: long chains of model reasoning plus action calls.
 
-BuildFlow should not move open-ended planning, coding, review, or repair into a server-side state machine. For speed, BuildFlow should only batch deterministic mechanical work when it reduces action chatter, such as exact multi-file reads, write preflight, targeted validation, compact diagnostics, and commit-specific-paths operations.
+Workbench should not move open-ended planning, coding, review, or repair into a server-side state machine. For speed, Workbench should only batch deterministic mechanical work when it reduces action chatter, such as exact multi-file reads, write preflight, targeted validation, compact diagnostics, and commit-specific-paths operations.
 
 ### Persistent resume and handoff
 
@@ -194,14 +194,14 @@ The Custom GPT should update the handoff after each meaningful chunk with comple
 That means a later conversation can say:
 
 ```text
-Resume BuildFlow work on source <sourceId> from the progress document.
+Resume Workbench work on source <sourceId> from the progress document.
 ```
 
-BuildFlow can then read the handoff document, verify source scope and git status, and continue from the next unchecked task.
+Workbench can then read the handoff document, verify source scope and git status, and continue from the next unchecked task.
 
 ### OpenAI Custom GPT interface limits
 
-BuildFlow cannot directly rename ChatGPT’s native conversation titles, batch names, or input placeholder. Those UI elements are controlled by OpenAI’s ChatGPT interface, not by the BuildFlow action schema.
+Workbench cannot directly rename ChatGPT’s native conversation titles, batch names, or input placeholder. Those UI elements are controlled by OpenAI’s ChatGPT interface, not by the Workbench action schema.
 
 The practical workaround is to use one source per conversation, start prompts with the source name, and rely on persistent repo-local handoff documents. If your ChatGPT client supports manually renaming a conversation, rename it to the repo or goal.
 
@@ -210,7 +210,7 @@ The practical workaround is to use one source per conversation, start prompts wi
 Use this pattern for serious work:
 
 ```text
-Use BuildFlow on source <sourceId>.
+Use Workbench on source <sourceId>.
 
 Goal:
 <describe the feature, fix, refactor, or app you want built>
@@ -232,20 +232,20 @@ Commit only explicit paths. Push only if I explicitly ask.
 ### Example: build a feature
 
 ```text
-Use BuildFlow on source tradebot.
+Use Workbench on source tradebot.
 
 Goal:
 Implement the missing failing endpoint fixes and make the API test suite pass.
 
 Inspect the repo, make a concise implementation plan, complete the first safe slice, run targeted validation, and stop with the next concrete action.
 
-Do not ask for intermediate approval unless BuildFlow requires confirmation. Commit explicit validated paths when appropriate.
+Do not ask for intermediate approval unless Workbench requires confirmation. Commit explicit validated paths when appropriate.
 ```
 
 ### Example: build a module
 
 ```text
-Use BuildFlow on source my-app.
+Use Workbench on source my-app.
 
 Goal:
 Build a complete project intake module with pages, API routes, validation, tests, and documentation.
@@ -256,7 +256,7 @@ Use repo-local conventions. Inspect before writing. Complete the first safe slic
 ### Example: refactor safely
 
 ```text
-Use BuildFlow on source prochat.
+Use Workbench on source prochat.
 
 Goal:
 Refactor the account settings flow into a cleaner service/module structure without changing external behavior.
@@ -267,18 +267,18 @@ Document the current structure and risks, plan the refactor, complete the first 
 ### Example: improve a knowledge repo
 
 ```text
-Use BuildFlow on source brain.
+Use Workbench on source brain.
 
 Goal:
 Clean up my AI skills folder, improve naming consistency, add README files where useful, and create an index of the most important skills.
 
-Complete a bounded batch, but stop if BuildFlow blocks access to private or secret folders.
+Complete a bounded batch, but stop if Workbench blocks access to private or secret folders.
 ```
 
 ### Example: prepare a commit
 
 ```text
-Use BuildFlow on source buildflow.
+Use Workbench on source buildflow.
 
 Goal:
 Improve the dashboard source picker onboarding flow.
@@ -286,9 +286,9 @@ Improve the dashboard source picker onboarding flow.
 Validate the change, commit it with a clear message, and stop before pushing unless I ask.
 ```
 
-## What BuildFlow can do today
+## What ProChat Workbench can do today
 
-BuildFlow Local currently includes:
+ProChat Workbench currently includes:
 
 - local dashboard on `http://127.0.0.1:3054/dashboard`
 - local agent on `http://127.0.0.1:3052`
@@ -318,7 +318,7 @@ BuildFlow Local currently includes:
 
 ## Safety, benefits, and risks
 
-BuildFlow is powerful because it connects ChatGPT to your local workspace. That also means it needs clear boundaries.
+Workbench is powerful because it connects ChatGPT to your local workspace. That also means it needs clear boundaries.
 
 ### Benefits
 
@@ -343,7 +343,7 @@ BuildFlow is powerful because it connects ChatGPT to your local workspace. That 
 
 ### Important limitations
 
-BuildFlow does not silently edit real `.env` files, expose secrets, run arbitrary shell commands, force-push, or deploy with unrestricted terminal access.
+Workbench does not silently edit real `.env` files, expose secrets, run arbitrary shell commands, force-push, or deploy with unrestricted terminal access.
 
 Routine app work is intentionally less interrupted now: package manifests, framework config, Docker files, scripts, migrations, and source-controlled assets can be edited under the repo-maintainer policy. The hard boundary is secrets, generated/runtime output, unsafe paths, and irreversible operations.
 
@@ -367,12 +367,14 @@ The goal is not to give a Custom GPT unlimited machine control. The goal is to g
 
 ## Quick start
 
-BuildFlow Local runs on your machine.
+ProChat Workbench runs on your machine.
 
 ```bash
 pnpm install
 pnpm local:restart
 ```
+
+`pnpm local:restart` delegates to `scripts/workbench-local-stack.sh`, which stops only Workbench-owned services, frees ports `3052`, `3053`, and `3054`, starts the agent, relay, and web app, and verifies unified health before reporting success.
 
 Then open:
 
@@ -393,7 +395,7 @@ The dashboard guides you through setup:
 
 ## Connect a Custom GPT
 
-In the Custom GPT editor, import the BuildFlow action schema from your own endpoint.
+In the Custom GPT editor, import the Workbench action schema from your own endpoint.
 
 Use one of these:
 
@@ -431,7 +433,7 @@ Read the README and suggest improvements.
 For implementation work, be explicit:
 
 ```text
-Use BuildFlow on source <sourceId>. Complete up to 3 small tasks, validate and commit each one, then stop with the next task.
+Use Workbench on source <sourceId>. Complete up to 3 small tasks, validate and commit each one, then stop with the next task.
 ```
 
 For protected work, add boundaries:
@@ -473,9 +475,9 @@ These actions let ChatGPT inspect, read, write, validate, commit, and continue a
 
 There is no Custom GPT action for changing dashboard active context. The GPT locks a `sourceId` conversationally after `getWorkbenchStatus?include=sources` and passes that explicit `sourceId` on every repo action. Legacy `/api/actions/agent/*` polling routes are retired and must not be imported into the GPT schema.
 
-## Who BuildFlow is for
+## Who ProChat Workbench is for
 
-BuildFlow is for:
+ProChat Workbench is for:
 
 - indie hackers building apps with ChatGPT
 - developers who want local-first AI workflows
@@ -485,9 +487,9 @@ BuildFlow is for:
 - builders who want the planning quality of ChatGPT with the grounding of local files
 - anyone who wants to reduce copy-paste between chat, repo, docs, and terminal
 
-## What BuildFlow is not
+## What ProChat Workbench is not
 
-BuildFlow Local is not a hosted backend, not an unrestricted terminal bridge, and not a replacement for reviewing your own code.
+ProChat Workbench is not a hosted backend, not an unrestricted terminal bridge, and not a replacement for reviewing your own code.
 
 It is the local context, safety, and execution layer between ChatGPT and your workspace.
 
@@ -500,7 +502,7 @@ Useful docs:
 - [`docs/product/README.md`](docs/product/README.md) — product index
 - [`docs/product/agent-mode.md`](docs/product/agent-mode.md) — Bounded Sequential Mode
 - [`docs/product/chatgpt-first-workflow.md`](docs/product/chatgpt-first-workflow.md) — ChatGPT-first strategy
-- [`docs/product/public-scope.md`](docs/product/public-scope.md) — public BuildFlow Local scope
+- [`docs/product/public-scope.md`](docs/product/public-scope.md) — public Workbench scope
 - [`docs/product/local/feature-scope.md`](docs/product/local/feature-scope.md) — Local feature scope
 - [`docs/openapi.chatgpt/README.md`](docs/openapi.chatgpt/README.md) — Custom GPT action import guide
 - [`docs/CUSTOM_GPT_INSTRUCTIONS.md`](docs/CUSTOM_GPT_INSTRUCTIONS.md) — GPT instructions
@@ -524,11 +526,13 @@ Open an issue if you have a local-first workflow Workbench should support.
 
 ## Licensing
 
-The generated public Workbench Local repository is licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). See [`LICENSE`](LICENSE).
+The generated public Workbench Local repository is licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`) as the Workbench Local product-specific exception recorded in Mind. See [`LICENSE`](LICENSE).
 
-A separate commercial or OEM license may be available for organizations that need proprietary embedding, redistribution, or modified hosted use. See [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md). ProChat trademarks are governed separately by [`TRADEMARKS.md`](TRADEMARKS.md).
+That exception applies only to ProChat Workbench Local public snapshot files. It does not apply to ProChat Memory, ProChat Memory for QA, future products, managed services, private modules, customer operations, or internal commercial systems.
 
-The private engineering repository is the authoritative source. Public releases are deterministic, reviewed snapshots generated from exact private commits. Managed services, private modules, customer operations, and internal commercial material are not part of the public snapshot.
+A separate commercial or OEM license may be requested by organizations that need proprietary embedding, redistribution, or modified hosted use. Public documentation does not grant commercial or OEM rights; commercial rights require a separate written agreement. See [`COMMERCIAL-LICENSING.md`](COMMERCIAL-LICENSING.md). ProChat trademarks are governed separately by [`TRADEMARKS.md`](TRADEMARKS.md).
+
+The private engineering repository is the authoritative implementation source for Workbench code and release mechanics. Mind remains authoritative for company-level strategy and the Workbench Local licensing exception. Public releases are deterministic, reviewed snapshots generated from exact private commits. Managed services, private modules, customer operations, and internal commercial material are not part of the public snapshot.
 
 The dashboard includes a source-code link. Operators of modified network-accessible versions must provide the corresponding source required by the AGPL.
 
@@ -543,7 +547,7 @@ ProChat Workbench Local is free, self-hosted, and open source.
 - Review [`CONTRIBUTING.md`](CONTRIBUTING.md) before submitting code.
 
 ```text
-github.com/prochattools/prochat-workbench
+github.com/prochattools/workbench
 ```
 
 External code contributions require contributor terms that preserve ProChat's ability to distribute accepted work under both AGPL and separate commercial licenses. Issues and design feedback do not require a contributor agreement.

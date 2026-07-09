@@ -15,6 +15,7 @@ coverage/
 pnpm-lock.yaml
 node-compile-cache/
 graphify-out/
+runtime/
 
 # Commit pnpm lockfile for reproducible Docker/GitHub Actions builds
 !pnpm-lock.yaml

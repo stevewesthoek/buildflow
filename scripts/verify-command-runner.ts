@@ -22,6 +22,106 @@ const expectReject = async (label: string, fn: () => Promise<unknown>) => {
   assert.equal(rejected, true, label)
 }
 
+async function verifyStaticAssetGitPaths() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-static-assets-git-'))
+  const git = (args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'pipe', encoding: 'utf8' })
+  const put = (rel: string, content: string | Buffer) => {
+    const full = path.join(repo, rel)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, content)
+  }
+  const cachedPaths = () => git(['diff', '--cached', '--name-only']).trim().split('\n').filter(Boolean).sort()
+  const commandBase = { sourceId: 'static-asset-test', sourceRoot: repo }
+
+  try {
+    git(['init'])
+    git(['config', 'user.email', 'buildflow@example.test'])
+    git(['config', 'user.name', 'BuildFlow Test'])
+    put('src/app/prochat-memory/page.tsx', 'export default function Page() { return null }\n')
+    put('README.md', '# seed\n')
+    git(['add', '--', 'src/app/prochat-memory/page.tsx', 'README.md'])
+    git(['commit', '-m', 'test: seed static asset repo'])
+
+    put('src/app/prochat-memory/page.tsx', 'export default function Page() { return <main>Memory</main> }\n')
+    put('public/prochat-memory/assets/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Logo</title></svg>\n')
+    put('public/prochat-memory/assets/hero.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Hero</title></svg>\n')
+    put('public/other-assets/raw.bin', Buffer.from([0, 1, 2, 3]))
+    put('docs/unrelated.md', 'unrelated change\n')
+
+    await expectReject('git_add_paths requires confirmation for existing untracked static assets', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'] }))
+    assert.deepEqual(cachedPaths(), [])
+
+    let result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmedByUser: true })
+    assert.equal(result.status, 'completed')
+    let details = result.details as {
+      requestedPaths: string[]
+      stagedPaths: string[]
+      staticAssets?: Array<{ path: string; bytes: number; sha256: string; textLike: boolean; validation: string }>
+      exactMatch: boolean
+    }
+    assert.equal(details.exactMatch, true)
+    assert.deepEqual(details.requestedPaths, ['public/prochat-memory/assets/logo.svg'])
+    assert.deepEqual(details.stagedPaths, ['public/prochat-memory/assets/logo.svg'])
+    assert.equal(details.staticAssets?.length, 1)
+    assert.equal(details.staticAssets?.[0]?.path, 'public/prochat-memory/assets/logo.svg')
+    assert.equal(details.staticAssets?.[0]?.textLike, true)
+    assert.equal(details.staticAssets?.[0]?.validation, 'text_secret_scan_passed')
+    assert.equal(typeof details.staticAssets?.[0]?.sha256, 'string')
+    git(['reset', '--', 'public/prochat-memory/assets/logo.svg'])
+
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/*.svg'], confirmedByUser: true })
+    assert.equal(result.status, 'completed')
+    details = result.details as typeof details & { expandedPathScopes?: Array<{ input: string; directory: string; files: string[] }> }
+    assert.equal(details.exactMatch, true)
+    assert.deepEqual(details.expandedPathScopes?.[0], {
+      input: 'public/prochat-memory/assets/*.svg',
+      directory: 'public/prochat-memory/assets',
+      files: ['public/prochat-memory/assets/hero.svg', 'public/prochat-memory/assets/logo.svg']
+    })
+    assert.deepEqual(cachedPaths(), ['public/prochat-memory/assets/hero.svg', 'public/prochat-memory/assets/logo.svg'])
+    git(['reset', '--', 'public/prochat-memory/assets/hero.svg', 'public/prochat-memory/assets/logo.svg'])
+
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['src/app/prochat-memory/page.tsx', 'public/prochat-memory/**'], confirmedByUser: true })
+    assert.equal(result.status, 'completed')
+    details = result.details as typeof details & { expandedPathScopes?: Array<{ input: string; directory: string; files: string[] }> }
+    assert.equal(details.exactMatch, true)
+    assert.deepEqual([...details.stagedPaths].sort(), [
+      'public/prochat-memory/assets/hero.svg',
+      'public/prochat-memory/assets/logo.svg',
+      'src/app/prochat-memory/page.tsx'
+    ])
+    assert.deepEqual(details.expandedPathScopes?.[0], {
+      input: 'public/prochat-memory/**',
+      directory: 'public/prochat-memory',
+      files: ['public/prochat-memory/assets/hero.svg', 'public/prochat-memory/assets/logo.svg']
+    })
+    assert(!cachedPaths().includes('docs/unrelated.md'))
+    assert(!cachedPaths().includes('public/other-assets/raw.bin'))
+
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['src/app/prochat-memory/page.tsx', 'public/prochat-memory/**'], message: 'test: commit approved static assets', confirmedByUser: true })
+    assert.equal(result.status, 'completed')
+    const committedPaths = git(['show', '--pretty=format:', '--name-only', 'HEAD']).trim().split('\n').filter(Boolean).sort()
+    assert.deepEqual(committedPaths, [
+      'public/prochat-memory/assets/hero.svg',
+      'public/prochat-memory/assets/logo.svg',
+      'src/app/prochat-memory/page.tsx'
+    ])
+    const unrelatedStatus = git(['status', '--short', '--', 'docs/unrelated.md', 'public/other-assets/raw.bin'])
+    assert(unrelatedStatus.includes('docs/unrelated.md'))
+    assert(unrelatedStatus.includes('public/other-assets/raw.bin'))
+
+    put('public/prochat-memory/assets/raw.bin', Buffer.from([0, 1, 2, 3]))
+    await expectReject('git_add_paths blocks broad static asset directory scopes', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/**'], confirmedByUser: true }))
+    await expectReject('git_add_paths blocks unsupported static asset extensions by exact path', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/raw.bin'], confirmedByUser: true }))
+    await expectReject('git_add_paths blocks approved directory scopes containing unsupported assets atomically', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/**'], confirmedByUser: true }))
+    assert(!cachedPaths().includes('public/prochat-memory/assets/raw.bin'))
+
+    console.log('✓ static asset staging and commit policy checks passed')
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true })
+  }
+}
+
 async function verifyExtensionlessGitPaths() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-extensionless-git-'))
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-extensionless-outside-'))
@@ -194,6 +294,7 @@ async function verifyExtensionlessGitPaths() {
 }
 
 async function main() {
+await verifyStaticAssetGitPaths()
 await verifyExtensionlessGitPaths()
 run('git', ['init'])
 run('git', ['config', 'user.email', 'buildflow@example.test'])
@@ -201,9 +302,9 @@ run('git', ['config', 'user.name', 'BuildFlow Test'])
 write('src/a.ts', 'export const a = 1\n')
 write('src/config.json', '{"ok":true}\n')
 write('src/not-json.ts', 'export {}\n')
-write('.env.example', 'API_KEY=<token>\n')
+write('.env.example', 'EXAMPLE_PLACEHOLDER=<token>\n')
 write('pkg/package.json', JSON.stringify({ scripts: { typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' } }, null, 2))
-write('src/scan.ts', `const token = "${'g' + 'hp_FAKE_TOKEN_FOR_REDACTION_ONLY'}"\n`)
+write('src/scan.ts', `const value = "${'g' + 'hp_FAKE_TOKEN_FOR_REDACTION_ONLY'}"\n`)
 
 const base = { sourceId: 'test', sourceRoot: root }
 const kinds = getAllowedCommandKinds()
@@ -247,8 +348,44 @@ await expectReject('git_commit rejects tracked binary deletion without confirmat
 result = await runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test: delete tracked asset', confirmedByUser: true })
 assert.equal(result.status, 'completed')
 assert(result.stdout.includes('test: delete tracked asset'))
-write('public/assets/untracked.pdf', 'fake pdf\n')
-await expectReject('git_add_paths rejects untracked binary asset', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/untracked.pdf'], confirmedByUser: true }))
+write('public/assets/tracked.png', 'tracked asset v1\n')
+run('git', ['add', '--', 'public/assets/tracked.png'])
+run('git', ['commit', '-m', 'test: add tracked binary asset'])
+write('public/assets/tracked.png', 'tracked asset v2\n')
+await expectReject('git_add_paths rejects tracked binary asset modification even with confirmation', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/tracked.png'], confirmedByUser: true }))
+run('git', ['checkout', '--', 'public/assets/tracked.png'])
+
+write('public/prochat-memory/assets/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Logo</title></svg>\n')
+await expectReject('git_add_paths requires confirmation for untracked static SVG assets', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'] }))
+result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmedByUser: true })
+assert.equal(result.status, 'completed')
+const svgDetails = result.details as { exactMatch?: boolean; stagedPaths?: string[]; staticAssets?: Array<{ path: string; bytes: number; sha256: string; textLike: boolean; validation: string }> }
+assert.equal(svgDetails.exactMatch, true)
+assert.deepEqual(svgDetails.stagedPaths, ['public/prochat-memory/assets/logo.svg'])
+assert.equal(svgDetails.staticAssets?.[0]?.path, 'public/prochat-memory/assets/logo.svg')
+assert.equal(svgDetails.staticAssets?.[0]?.textLike, true)
+assert.equal(typeof svgDetails.staticAssets?.[0]?.sha256, 'string')
+result = await runSafeCommand({ ...base, commandKind: 'git_commit', paths: ['public/prochat-memory/assets/logo.svg'], message: 'test: commit approved svg asset', confirmedByUser: true })
+assert.equal(result.status, 'completed')
+
+write('public/prochat-memory/assets/hero.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Hero</title></svg>\n')
+write('public/prochat-memory/assets/card.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Card</title></svg>\n')
+write('notes/unrelated-static.md', 'must remain untracked\n')
+await expectReject('git_add_paths rejects broad public directory scopes', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/**'], confirmedByUser: true }))
+result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/prochat-memory/**'], confirmedByUser: true })
+assert.equal(result.status, 'completed')
+const scopeDetails = result.details as { exactMatch?: boolean; stagedPaths?: string[]; expandedPathScopes?: Array<{ input: string; directory: string; files: string[] }>; staticAssets?: Array<{ path: string; bytes: number; sha256: string; textLike: boolean; validation: string }> }
+assert.equal(scopeDetails.exactMatch, true)
+assert.deepEqual(scopeDetails.expandedPathScopes?.[0]?.files, ['public/prochat-memory/assets/card.svg', 'public/prochat-memory/assets/hero.svg'])
+assert.deepEqual(scopeDetails.stagedPaths, ['public/prochat-memory/assets/card.svg', 'public/prochat-memory/assets/hero.svg'])
+assert.equal(scopeDetails.staticAssets?.length, 2)
+const scopedCachedPaths = run('git', ['diff', '--cached', '--name-only']).toString().trim().split('\n').filter(Boolean)
+assert(!scopedCachedPaths.includes('notes/unrelated-static.md'))
+result = await runSafeCommand({ ...base, commandKind: 'git_commit', paths: ['public/prochat-memory/**'], message: 'test: commit approved svg directory scope', confirmedByUser: true })
+assert.equal(result.status, 'completed')
+const scopedCommittedPaths = run('git', ['show', '--pretty=format:', '--name-only', 'HEAD']).toString().trim().split('\n').filter(Boolean).sort()
+assert.deepEqual(scopedCommittedPaths, ['public/prochat-memory/assets/card.svg', 'public/prochat-memory/assets/hero.svg'])
+assert(run('git', ['status', '--short', '--', 'notes/unrelated-static.md']).toString().includes('notes/unrelated-static.md'))
 
 await expectReject('git_push rejects force flag branch', () => runSafeCommand({ ...base, commandKind: 'git_push', branch: '--force', confirmedByUser: true }))
 await expectReject('git_push rejects refspec branch', () => runSafeCommand({ ...base, commandKind: 'git_push', branch: 'main:evil', confirmedByUser: true }))

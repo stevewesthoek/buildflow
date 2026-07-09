@@ -7,6 +7,21 @@ import { getDefaultWritePolicy, validateWriteTarget } from '../packages/cli/src/
 import { validatePath } from '../packages/cli/src/agent/permissions'
 import { attachWriteConfirmation, composeArtifactRelativePath } from '../apps/web/src/lib/actions/gpt'
 
+function findRepoRoot(start: string): string {
+  let current = path.resolve(start)
+  while (true) {
+    if (
+      fs.existsSync(path.join(current, 'package.json')) &&
+      fs.existsSync(path.join(current, 'apps/web')) &&
+      fs.existsSync(path.join(current, 'packages/cli'))
+    ) return current
+    const parent = path.dirname(current)
+    if (parent === current) throw new Error('Could not locate repository root')
+    current = parent
+  }
+}
+
+const repoRoot = findRepoRoot(process.cwd())
 const policy = getDefaultWritePolicy()
 assert.equal(policy.allowCreate, true)
 assert.equal(policy.allowOverwrite, true)
@@ -52,7 +67,7 @@ assert.equal(policy.maxCreateBytes, 200000)
 assert.equal(policy.maxOverwriteBytes, 300000)
 assert.equal(policy.maxPatchTargetBytes, 1000000)
 
-const root = path.resolve(process.cwd(), 'packages/cli')
+const root = path.resolve(repoRoot, 'packages/cli')
 
 const safe = validateWriteTarget({ requestedPath: '.buildflow/write-policy-test.md', changeType: 'create', sourceRoot: root })
 assert.equal(safe.ok, true)
@@ -177,9 +192,15 @@ if (!untrackedAssetDelete.ok) {
 const trackedAssetCreate = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/new.pdf', changeType: 'create', sourceRoot: trackedAssetRoot, content: 'fake pdf\n', confirmedByUser: true })
 assert.equal(trackedAssetCreate.ok, false)
 if (!trackedAssetCreate.ok) assert.equal(trackedAssetCreate.error.code, 'BINARY_WRITE_BLOCKED')
+const trackedSvgAssetCreate = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/new.svg', changeType: 'create', sourceRoot: trackedAssetRoot, content: '<svg></svg>\n', confirmedByUser: true })
+assert.equal(trackedSvgAssetCreate.ok, false)
+if (!trackedSvgAssetCreate.ok) assert.equal(trackedSvgAssetCreate.error.code, 'BINARY_WRITE_BLOCKED')
 const trackedAssetOverwrite = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/file.pdf', changeType: 'overwrite', sourceRoot: trackedAssetRoot, content: 'fake pdf\n', confirmedByUser: true })
 assert.equal(trackedAssetOverwrite.ok, false)
 if (!trackedAssetOverwrite.ok) assert.equal(trackedAssetOverwrite.error.code, 'BINARY_WRITE_BLOCKED')
+const trackedSvgAssetOverwrite = validateWriteTarget({ sourceId: 'test', requestedPath: 'public/assets/file.svg', changeType: 'overwrite', sourceRoot: trackedAssetRoot, content: '<svg></svg>\n', confirmedByUser: true })
+assert.equal(trackedSvgAssetOverwrite.ok, false)
+if (!trackedSvgAssetOverwrite.ok) assert.equal(trackedSvgAssetOverwrite.error.code, 'BINARY_WRITE_BLOCKED')
 const docsAssetCreate = validateWriteTarget({ sourceId: 'test', requestedPath: 'docs/assets/new.pdf', changeType: 'create', sourceRoot: trackedAssetRoot, content: 'fake pdf\n', confirmedByUser: true })
 assert.equal(docsAssetCreate.ok, false)
 if (!docsAssetCreate.ok) assert.equal(docsAssetCreate.error.code, 'BINARY_WRITE_BLOCKED')
@@ -235,11 +256,11 @@ for (const testCase of blockedCases) {
   }
 }
 
-const openapiSource = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/openapi/route.ts'), 'utf8')
-const serverSource = fs.readFileSync(path.join(process.cwd(), 'packages/cli/src/agent/server.ts'), 'utf8')
-const instructionsSource = fs.readFileSync(path.join(process.cwd(), 'docs/CUSTOM_GPT_INSTRUCTIONS.md'), 'utf8')
-const gptActionsSource = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
-const staticOpenapiSource = fs.readFileSync(path.join(process.cwd(), 'docs/openapi.chatgpt.json'), 'utf8')
+const openapiSource = fs.readFileSync(path.join(repoRoot, 'apps/web/src/app/api/openapi/route.ts'), 'utf8')
+const serverSource = fs.readFileSync(path.join(repoRoot, 'packages/cli/src/agent/server.ts'), 'utf8')
+const instructionsSource = fs.readFileSync(path.join(repoRoot, 'docs/CUSTOM_GPT_INSTRUCTIONS.md'), 'utf8')
+const gptActionsSource = fs.readFileSync(path.join(repoRoot, 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
+const staticOpenapiSource = fs.readFileSync(path.join(repoRoot, 'docs/openapi.chatgpt.json'), 'utf8')
 const staticOpenapi = JSON.parse(staticOpenapiSource) as {
   paths?: Record<string, any>
 }

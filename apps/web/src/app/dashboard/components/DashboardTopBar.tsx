@@ -24,7 +24,7 @@ export function DashboardTopBar({
   onRefresh,
   children
 }: DashboardTopBarProps) {
-  const sourceUrl = process.env.NEXT_PUBLIC_WORKBENCH_SOURCE_URL || 'https://github.com/prochattools/prochat-workbench'
+  const sourceUrl = process.env.NEXT_PUBLIC_WORKBENCH_SOURCE_URL || 'https://github.com/prochattools/workbench'
 
   return (
     <div className="shrink-0 border-b border-bf-border/80 bg-bf-surface/96 backdrop-blur supports-[backdrop-filter]:bg-bf-surface/92 dark:border-slate-800/80 dark:bg-slate-950/96">
