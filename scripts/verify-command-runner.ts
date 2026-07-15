@@ -305,6 +305,30 @@ write('src/not-json.ts', 'export {}\n')
 write('.env.example', 'EXAMPLE_PLACEHOLDER=<token>\n')
 write('pkg/package.json', JSON.stringify({ scripts: { typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' } }, null, 2))
 write('src/scan.ts', `const value = "${'g' + 'hp_FAKE_TOKEN_FOR_REDACTION_ONLY'}"\n`)
+write('src/network-safe.test.ts', [
+  "import assert from 'node:assert/strict'",
+  "const source = 'export function preview() { return null }'",
+  "assert.equal(source.includes('fetch('), false)",
+  "const networkMarker = ['fetch', '('].join('')",
+  "const fixture = `fetch('/api/data')`",
+  "// This module must not call fetch.",
+  "it('does not use fetch', () => { assert.equal(source.includes(networkMarker), false) })",
+  ''
+].join('\n'))
+write('src/network-unsafe.test.ts', [
+  "import fetchClient from 'node-fetch'",
+  "import axios from 'axios'",
+  "void fetchClient",
+  "void axios",
+  "fetch('/api/data')",
+  "globalThis.fetch('/api/global')",
+  "window.fetch('/api/window')",
+  "self.fetch('/api/self')",
+  "axios.get('/api/axios')",
+  "it('still detects real calls in tests', async () => { await fetch('/api/test') })",
+  ''
+].join('\n'))
+write('docs/network-example.md', "fetch('/api/data')\n")
 
 const base = { sourceId: 'test', sourceRoot: root }
 const kinds = getAllowedCommandKinds()
@@ -318,6 +342,7 @@ assert(kinds.includes('run_package_script'))
 assert(kinds.includes('run_package_test'))
 assert(kinds.includes('run_package_test_marker'))
 assert(kinds.includes('security_scan_paths'))
+assert(kinds.includes('n8n_workflow_export'))
 
 await expectReject('git_add_paths rejects dot', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['.'] }))
 await expectReject('git_add_paths rejects -A', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['-A'] }))
@@ -405,6 +430,35 @@ assert.equal(result.status, 'failed')
 assert(result.stdout.includes('[REDACTED]'))
 assert(!result.stdout.includes('FAKE_TOKEN_FOR_REDACTION_ONLY'))
 
+result = await runSafeCommand({ ...base, commandKind: 'security_scan_paths', paths: ['src/network-safe.test.ts'], patternSet: 'forbidden_upload_network' })
+assert.equal(result.status, 'completed')
+assert.deepEqual((result.details as { findings: unknown[] }).findings, [])
+result = await runSafeCommand({ ...base, commandKind: 'security_scan_paths', paths: ['src/network-safe.test.ts'], patternSet: 'forbidden_all_high_risk' })
+assert.equal(result.status, 'completed')
+assert.deepEqual((result.details as { findings: unknown[] }).findings, [])
+
+result = await runSafeCommand({ ...base, commandKind: 'security_scan_paths', paths: ['src/network-unsafe.test.ts'], patternSet: 'forbidden_upload_network' })
+assert.equal(result.status, 'failed')
+const networkFindings = (result.details as { findings: Array<{ id: string; ruleId: string; path: string; line: number; syntaxCategory: string; confidence: string; executable: boolean }> }).findings
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.node_fetch_import' && finding.line === 1 && finding.syntaxCategory === 'ImportDeclaration'))
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.axios_import' && finding.line === 2 && finding.syntaxCategory === 'ImportDeclaration'))
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.fetch_call' && finding.line === 5))
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.fetch_member_call' && finding.line === 6))
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.fetch_member_call' && finding.line === 7))
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.fetch_member_call' && finding.line === 8))
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.axios_member_call' && finding.line === 9))
+assert(networkFindings.some(finding => finding.ruleId === 'forbidden_upload_network.fetch_call' && finding.line === 10))
+assert(networkFindings.every(finding => finding.path === 'src/network-unsafe.test.ts' && finding.confidence === 'high' && finding.executable === true && /^[a-f0-9]{16}$/.test(finding.id)))
+const firstNetworkFindingSnapshot = networkFindings.map(finding => ({ id: finding.id, ruleId: finding.ruleId, line: finding.line }))
+result = await runSafeCommand({ ...base, commandKind: 'security_scan_paths', paths: ['src/network-unsafe.test.ts'], patternSet: 'forbidden_upload_network' })
+assert.deepEqual((result.details as { findings: Array<{ id: string; ruleId: string; line: number }> }).findings.map(finding => ({ id: finding.id, ruleId: finding.ruleId, line: finding.line })), firstNetworkFindingSnapshot)
+
+result = await runSafeCommand({ ...base, commandKind: 'security_scan_paths', paths: ['docs/network-example.md'], patternSet: 'forbidden_upload_network' })
+assert.equal(result.status, 'failed')
+const fallbackFinding = (result.details as { findings: Array<{ syntaxCategory: string; confidence: string }> }).findings[0]
+assert.equal(fallbackFinding.syntaxCategory, 'LexicalFallback')
+assert.equal(fallbackFinding.confidence, 'medium')
+
 assert(kinds.includes('run_exact_command'))
 
 write('package.json', JSON.stringify({
@@ -453,6 +507,84 @@ assert.equal(result.actualBranch, branch)
 const siblingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-command-sibling-'))
 await expectReject('exact command cannot access sibling repository', () => runSafeCommand({ ...exactBase, executable: 'node', args: [path.join(siblingRoot, 'file.js')] }))
 fs.rmSync(siblingRoot, { recursive: true, force: true })
+
+const rgRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-rg-command-'))
+const rgGit = (args: string[]) => execFileSync('git', args, { cwd: rgRepo, stdio: 'pipe', encoding: 'utf8' })
+try {
+  execFileSync('rg', ['--version'], { stdio: 'pipe' })
+  rgGit(['init'])
+  rgGit(['config', 'user.email', 'buildflow@example.test'])
+  rgGit(['config', 'user.name', 'BuildFlow Test'])
+  fs.mkdirSync(path.join(rgRepo, 'system/agent-context'), { recursive: true })
+  fs.writeFileSync(path.join(rgRepo, 'system/agent-context/routes.md'), 'capture/inbox\ncapture/failed\nrouter/queue\n')
+  fs.writeFileSync(path.join(rgRepo, 'protected.txt'), 'unchanged\n')
+  fs.writeFileSync(path.join(rgRepo, '.env'), 'capture/inbox=secret\n')
+  rgGit(['add', '--', 'system/agent-context/routes.md', 'protected.txt', '.env'])
+  rgGit(['commit', '-m', 'test: seed direct ripgrep repository'])
+  const rgBranch = rgGit(['branch', '--show-current']).trim()
+  const rgBase = {
+    sourceId: 'rg-test',
+    sourceRoot: rgRepo,
+    commandKind: 'run_exact_command' as const,
+    executable: 'rg' as const,
+    packageDir: '.',
+    requiredBranch: rgBranch,
+    protectedPaths: ['protected.txt'],
+    networkAccess: false as const,
+    timeoutMs: 8_000
+  }
+  const alternation = 'capture/inbox|capture/failed|router/'
+  result = await runSafeCommand({ ...rgBase, args: ['-n', alternation, 'system/agent-context'] })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.matchStatus, 'matches_found')
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.executable, 'rg')
+  assert.equal(result.shell, false)
+  assert.equal(result.resolvedRepositoryRoot, fs.realpathSync(rgRepo))
+  assert.equal(result.filesChanged, false)
+  assert.deepEqual(result.changedPaths, [])
+  assert.deepEqual(result.protectedPathsChanged, [])
+  assert.equal(result.args?.filter(arg => arg === alternation).length, 1)
+  assert(result.stdout.includes('capture/inbox'))
+  assert(result.stdout.includes('capture/failed'))
+  assert(result.stdout.includes('router/queue'))
+  assert(result.runtime?.rgVersion?.startsWith('ripgrep '))
+  assert.deepEqual((result.details as { exactInvocation: { executable: string; args: string[]; shell: boolean } }).exactInvocation, {
+    executable: 'rg',
+    args: result.args,
+    shell: false
+  })
+  assert.equal(fs.readFileSync(path.join(rgRepo, 'protected.txt'), 'utf8'), 'unchanged\n')
+
+  result = await runSafeCommand({ ...rgBase, args: ['-n', 'a-pattern-that-does-not-exist', 'system/agent-context'] })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.matchStatus, 'no_matches')
+  assert.equal(result.exitCode, 1)
+  assert.equal(result.filesChanged, false)
+
+  result = await runSafeCommand({ ...rgBase, args: ['-n', '-e', 'capture/inbox', '-e', 'capture/failed', '-e', 'router/', 'system/agent-context'] })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.matchStatus, 'matches_found')
+
+  result = await runSafeCommand({ ...rgBase, args: ['--hidden', '-n', 'capture/inbox', '.'] })
+  assert.equal(result.status, 'completed')
+  assert(!result.stdout.includes('.env'))
+
+  await expectReject('direct rg rejects standalone pipeline token', () => runSafeCommand({ ...rgBase, args: ['pattern', '.', '|', 'another-command'] }))
+  await expectReject('direct rg rejects standalone command chaining token', () => runSafeCommand({ ...rgBase, args: ['pattern', '.', '&&', 'another-command'] }))
+  await expectReject('direct rg rejects standalone redirect token', () => runSafeCommand({ ...rgBase, args: ['pattern', '.', '>', 'output.txt'] }))
+  await expectReject('direct rg rejects command substitution', () => runSafeCommand({ ...rgBase, args: ['$(command)', '.'] }))
+  await expectReject('direct rg rejects backtick substitution', () => runSafeCommand({ ...rgBase, args: ['`command`', '.'] }))
+  await expectReject('direct rg rejects preprocessor option', () => runSafeCommand({ ...rgBase, args: ['--pre', 'some-command', 'pattern', '.'] }))
+  await expectReject('direct rg rejects preprocessor glob option', () => runSafeCommand({ ...rgBase, args: ['--pre-glob', '*.md', 'pattern', '.'] }))
+  await expectReject('direct rg rejects repository traversal', () => runSafeCommand({ ...rgBase, args: ['pattern', '../../'] }))
+  await expectReject('direct rg rejects absolute paths', () => runSafeCommand({ ...rgBase, args: ['pattern', rgRepo] }))
+  await expectReject('direct rg rejects git metadata paths', () => runSafeCommand({ ...rgBase, args: ['pattern', '.git'] }))
+  await expectReject('direct rg rejects vendor paths', () => runSafeCommand({ ...rgBase, args: ['pattern', 'node_modules'] }))
+  await expectReject('shell executables remain unavailable', () => runSafeCommand({ ...rgBase, executable: 'bash' as any, args: ['-lc', 'rg pattern . | another-command'] }))
+} finally {
+  fs.rmSync(rgRepo, { recursive: true, force: true })
+}
 
 let node20Available = process.version.startsWith('v20.')
 const nvmDirs = Array.from(new Set([
@@ -632,19 +764,123 @@ assert(result.stdout.includes('diff/one.txt'))
 assert(result.stdout.includes('diff/two.txt'))
 assert(!result.stdout.includes('Untracked path evidence:'))
 
+const n8nRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-n8n-export-'))
+const n8nGit = (args: string[]) => execFileSync('git', args, { cwd: n8nRepo, stdio: 'pipe', encoding: 'utf8' })
+const n8nWrapperPath = path.join(n8nRepo, 'tools/n8n-api.sh')
+const n8nWriteWrapper = (stdout: string, exitCode = 0) => {
+  fs.mkdirSync(path.dirname(n8nWrapperPath), { recursive: true })
+  fs.writeFileSync(n8nWrapperPath, `#!/usr/bin/env bash\nprintf '%s' '${stdout.replace(/'/g, `'\\''`)}'\nexit ${exitCode}\n`)
+  fs.chmodSync(n8nWrapperPath, 0o755)
+}
+try {
+  n8nGit(['init'])
+  n8nGit(['config', 'user.email', 'buildflow@example.test'])
+  n8nGit(['config', 'user.name', 'BuildFlow Test'])
+  n8nWriteWrapper(JSON.stringify({ id: 'FwP5INe9qoo1OwGC', versionId: 'v1', updatedAt: '2026-07-10T00:00:00.000Z', nodes: [] }))
+  n8nGit(['add', '--', 'tools/n8n-api.sh'])
+  n8nGit(['commit', '-m', 'test: seed n8n export wrapper'])
+  const n8nBase = {
+    sourceId: 'brain',
+    sourceRoot: n8nRepo,
+    commandKind: 'n8n_workflow_export' as const,
+    workflowId: 'FwP5INe9qoo1OwGC',
+    outputPath: 'operations/reports/artifacts/b1-0a-live-workflow-rollback.json',
+    networkAccess: true,
+    protectedPaths: ['tools/n8n-api.sh'],
+    timeoutMs: 8_000
+  }
+
+  result = await runSafeCommand(n8nBase)
+  assert.equal(result.status, 'needs_confirmation')
+  assert.equal(result.requiresConfirmation, true)
+  assert.equal(typeof result.confirmationToken, 'string')
+
+  result = await runSafeCommand({ ...n8nBase, confirmedByUser: true })
+  assert.equal(result.status, 'completed')
+  assert.equal(result.executable, 'tools/n8n-api.sh')
+  assert.deepEqual(result.args, ['get-workflow', 'FwP5INe9qoo1OwGC'])
+  assert.equal(result.shell, false)
+  assert.equal(result.artifactPath, 'operations/reports/artifacts/b1-0a-live-workflow-rollback.json')
+  assert.match(result.artifactSha256 || '', /^[a-f0-9]{64}$/)
+  assert.equal(result.workflowId, 'FwP5INe9qoo1OwGC')
+  assert.equal(result.workflowVersion, 'v1')
+  assert.equal(result.workflowUpdatedAt, '2026-07-10T00:00:00.000Z')
+  assert.equal(result.networkWriteRequested, false)
+  assert(result.changedPaths.includes('operations/reports/artifacts/b1-0a-live-workflow-rollback.json'))
+  assert.deepEqual(result.protectedPathsChanged, [])
+  const artifact = JSON.parse(fs.readFileSync(path.join(n8nRepo, result.artifactPath!), 'utf8'))
+  assert.equal(artifact.id, 'FwP5INe9qoo1OwGC')
+
+  await expectReject('n8n export rejects wrong source', () => runSafeCommand({ ...n8nBase, sourceId: 'other', confirmedByUser: true }))
+  await expectReject('n8n export rejects wrong workflow', () => runSafeCommand({ ...n8nBase, workflowId: 'other', confirmedByUser: true }))
+  await expectReject('n8n export rejects wrong artifact path', () => runSafeCommand({ ...n8nBase, outputPath: 'operations/reports/artifacts/other.json', confirmedByUser: true }))
+  await expectReject('n8n export rejects extra argv', () => runSafeCommand({ ...n8nBase, args: ['|', 'curl'], confirmedByUser: true }))
+  await expectReject('n8n export rejects alternate argv property', () => runSafeCommand({ ...n8nBase, argv: ['get-workflow', 'other'], confirmedByUser: true } as any))
+  await expectReject('n8n export rejects executable override', () => runSafeCommand({ ...n8nBase, executable: 'rg', confirmedByUser: true }))
+  await expectReject('n8n export rejects shell override', () => runSafeCommand({ ...n8nBase, shell: true, confirmedByUser: true } as any))
+  await expectReject('n8n export rejects env override', () => runSafeCommand({ ...n8nBase, env: { N8N_API_URL: 'https://example.test' }, confirmedByUser: true } as any))
+  await expectReject('n8n export rejects environment override', () => runSafeCommand({ ...n8nBase, environment: { N8N_API_URL: 'https://example.test' }, confirmedByUser: true } as any))
+  await expectReject('n8n export rejects network disabled', () => runSafeCommand({ ...n8nBase, networkAccess: false, confirmedByUser: true }))
+
+  n8nWriteWrapper('{malformed')
+  await expectReject('n8n export rejects malformed JSON', () => runSafeCommand({ ...n8nBase, confirmedByUser: true }))
+  n8nWriteWrapper(JSON.stringify({ id: 'wrong-workflow', nodes: [] }))
+  await expectReject('n8n export rejects mismatched workflow JSON', () => runSafeCommand({ ...n8nBase, confirmedByUser: true }))
+  n8nWriteWrapper(JSON.stringify({ id: 'FwP5INe9qoo1OwGC', [['api', 'Key'].join('')]: 'credential-like-value' }))
+  await expectReject('n8n export rejects credential-like output', () => runSafeCommand({ ...n8nBase, confirmedByUser: true }))
+  n8nWriteWrapper(JSON.stringify({ id: 'FwP5INe9qoo1OwGC', data: 'x'.repeat(500_100) }))
+  await expectReject('n8n export rejects oversized output', () => runSafeCommand({ ...n8nBase, confirmedByUser: true }))
+} finally {
+  fs.rmSync(n8nRepo, { recursive: true, force: true })
+}
+
 const openapiRoute = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/openapi/route.ts'), 'utf8')
-for (const token of ['git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'run_exact_command', 'executable', 'args', 'nodeVersion', 'policy', 'protectedPaths', 'requiredBranch', 'networkAccess', 'packageDir', 'scriptName', 'patternSet', 'confirmationToken']) {
+for (const token of ['git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'run_exact_command', 'n8n_workflow_export', 'workflowId', 'outputPath', 'executable', 'args', 'nodeVersion', 'policy', 'protectedPaths', 'requiredBranch', 'networkAccess', 'packageDir', 'scriptName', 'patternSet', 'confirmationToken']) {
   assert(openapiRoute.includes(token), `OpenAPI route missing ${token}`)
+}
+assert(openapiRoute.includes("enum: ['node', 'pnpm', 'rg']"), 'OpenAPI exact-command executable enum must include direct rg')
+const gptActions = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
+assert(gptActions.includes('runWorkbenchCommandRequestSchema'), 'GPT command dispatcher must import the shared strict parser')
+assert(gptActions.includes('runWorkbenchCommandRequestSchema.safeParse(body)'), 'GPT command dispatcher must use the shared strict parser')
+assert(gptActions.includes("executeAction('/api/commands/run', requestBody"), 'GPT command dispatcher must forward the parsed request body')
+
+const commandRunnerSource = fs.readFileSync(path.join(process.cwd(), 'packages/cli/src/agent/command-runner.ts'), 'utf8')
+const n8nExportAdapterSource = fs.readFileSync(path.join(process.cwd(), 'packages/cli/src/agent/n8n-workflow-export.ts'), 'utf8')
+assert(commandRunnerSource.includes("import { runN8nWorkflowExportCapability } from './n8n-workflow-export'"), 'command runner must import the dedicated n8n export adapter')
+assert(commandRunnerSource.includes('return runN8nWorkflowExportCapability(request, n8nWorkflowExportDependencies)'), 'command runner must dispatch n8n export through the dedicated adapter')
+assert(!commandRunnerSource.includes('const N8N_EXPORT_WORKFLOW_ID'), 'command runner must not retain the legacy n8n export constants')
+assert(!commandRunnerSource.includes('async function runN8nWorkflowExport('), 'command runner must not retain a duplicate n8n export implementation')
+assert(n8nExportAdapterSource.includes("spawn(wrapperPath, ['get-workflow', N8N_EXPORT_WORKFLOW_ID]"), 'n8n export adapter must use fixed get-workflow argv')
+assert(n8nExportAdapterSource.includes('shell: false'), 'n8n export adapter must disable shell execution')
+assert(n8nExportAdapterSource.includes('const N8N_EXPORT_MAX_BYTES = 500_000'), 'n8n export adapter must retain its bounded output limit')
+assert(n8nExportAdapterSource.includes('Math.min(30_000, Math.max(1_000'), 'n8n export adapter must retain its bounded timeout')
+assert(n8nExportAdapterSource.includes('fs.renameSync(tempPath, artifactPath)'), 'n8n export adapter must retain atomic artifact replacement')
+for (const [label, pattern] of [
+  ['Next.js', /(?:from\s+|import\s*)['"]next(?:\/[^'"]*)?['"]/],
+  ['React', /(?:from\s+|import\s*)['"]react(?:\/[^'"]*)?['"]/],
+  ['Fastify', /(?:from\s+|import\s*)['"]fastify(?:\/[^'"]*)?['"]/],
+  ['apps/web', /(?:from\s+|import\s*)['"][^'"]*apps\/web[^'"]*['"]/],
+  ['relay code', /(?:from\s+|import\s*)['"][^'"]*relay[^'"]*['"]/]
+] as const) {
+  assert(!pattern.test(n8nExportAdapterSource), `n8n export adapter must not depend on ${label}`)
 }
 
 const runCommandRoute = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/actions/run-command/route.ts'), 'utf8')
+assert(runCommandRoute.includes("import { runWorkbenchCommandRequestSchema } from '@workbench/shared'"), 'run-command route must import the shared strict parser')
+assert(runCommandRoute.includes('runWorkbenchCommandRequestSchema.safeParse(rawBody)'), 'run-command route must use the shared strict parser')
 assert(
   runCommandRoute.includes("if (clean.status === 'timed_out' && validationJobOperation === undefined)"),
   'run-command route must normalize only synchronous timed_out results'
 )
 assert(runCommandRoute.includes("status: 'timeout'"), 'run-command route missing timeout status')
-for (const token of ['sourceId', 'executable', 'args', 'packageDir', 'requiredBranch', 'actualBranch', 'runtime', 'changedPaths', 'protectedPathsChanged', 'riskLevel', 'requiresConfirmation', 'signal', 'durationMs', 'outputTruncated', 'stdout', 'stderr', 'exitCode']) {
-  assert(runCommandRoute.includes(`${token}:`), `run-command timeout response missing ${token}`)
+for (const token of ['sourceId', 'executable', 'args', 'packageDir', 'requiredBranch', 'actualBranch', 'runtime', 'changedPaths', 'protectedPathsChanged', 'riskLevel', 'requiresConfirmation', 'signal', 'durationMs', 'outputTruncated', 'stdout', 'stderr', 'exitCode', 'artifactPath', 'artifactSha256', 'workflowId', 'workflowVersion', 'workflowUpdatedAt', 'networkWriteRequested']) {
+  assert(runCommandRoute.includes(`${token}:`), `run-command response projection missing ${token}`)
+}
+for (const token of ['artifactPath: clean.artifactPath', 'artifactSha256: clean.artifactSha256', 'workflowId: clean.workflowId', 'workflowVersion: clean.workflowVersion', 'workflowUpdatedAt: clean.workflowUpdatedAt', 'networkWriteRequested: clean.networkWriteRequested']) {
+  assert(runCommandRoute.includes(token), `run-command timeout projection missing ${token}`)
+}
+for (const token of ['artifactPath: clean.artifactPath ?? job?.artifactPath', 'artifactSha256: clean.artifactSha256 ?? job?.artifactSha256', 'workflowId: clean.workflowId ?? job?.workflowId', 'workflowVersion: clean.workflowVersion ?? job?.workflowVersion', 'workflowUpdatedAt: clean.workflowUpdatedAt ?? job?.workflowUpdatedAt', 'networkWriteRequested: clean.networkWriteRequested ?? job?.networkWriteRequested']) {
+  assert(runCommandRoute.includes(token), `run-command success projection missing ${token}`)
 }
 
 fs.rmSync(root, { recursive: true, force: true })

@@ -265,6 +265,10 @@ function isTerminalTaskStatus(status: AgentTaskStatus): boolean {
   return status === 'completed' || status === 'blocked' || status === 'failed' || status === 'skipped'
 }
 
+function clearsContinuationState(status: AgentJobStatus): boolean {
+  return status === 'completed' || status === 'cancelled'
+}
+
 function normalizeTask(raw: unknown, fallbackId: string): AgentJobTask {
   const item = raw && typeof raw === 'object' ? raw as Partial<AgentJobTask> : {}
   const status: AgentTaskStatus = ['pending', 'running', 'completed', 'blocked', 'failed', 'skipped'].includes(String(item.status)) ? item.status as AgentTaskStatus : 'pending'
@@ -346,7 +350,9 @@ function coerceJob(raw: unknown): AgentJob | null {
   if (!item.id || !item.sourceId || !item.goal || !item.createdAt) return null
   const documentationPath = normalizeDocumentationPath(item.documentationPath)
   const roadmapPhases = normalizeRoadmapPhases(item.roadmapPhases, String(item.goal))
-  const activeTaskId = findActiveTaskId(roadmapPhases, item.activeTaskId)
+  const status = item.status || 'running'
+  const continuationCleared = clearsContinuationState(status)
+  const activeTaskId = continuationCleared ? undefined : findActiveTaskId(roadmapPhases, item.activeTaskId)
   const completedTaskCount = countCompletedTasks(roadmapPhases)
   return {
     runVersion: WORKBENCH_RUN_SCHEMA_VERSION,
@@ -359,10 +365,10 @@ function coerceJob(raw: unknown): AgentJob | null {
     currentCommit: typeof item.currentCommit === 'string' ? item.currentCommit : undefined,
     completedPacketIds: Array.isArray(item.completedPacketIds) ? item.completedPacketIds.filter(value => typeof value === 'string') : [],
     resumeState: {
-      nextTaskId: typeof item.resumeState?.nextTaskId === 'string' ? item.resumeState.nextTaskId : activeTaskId,
-      nextFiles: Array.isArray(item.resumeState?.nextFiles) ? item.resumeState.nextFiles.filter(value => typeof value === 'string') : [],
-      nextSymbols: Array.isArray(item.resumeState?.nextSymbols) ? item.resumeState.nextSymbols.filter(value => typeof value === 'string') : [],
-      instructions: Array.isArray(item.resumeState?.instructions) ? item.resumeState.instructions.filter(value => typeof value === 'string') : buildResumeInstructions(documentationPath)
+      nextTaskId: continuationCleared ? undefined : typeof item.resumeState?.nextTaskId === 'string' ? item.resumeState.nextTaskId : activeTaskId,
+      nextFiles: continuationCleared ? [] : Array.isArray(item.resumeState?.nextFiles) ? item.resumeState.nextFiles.filter(value => typeof value === 'string') : [],
+      nextSymbols: continuationCleared ? [] : Array.isArray(item.resumeState?.nextSymbols) ? item.resumeState.nextSymbols.filter(value => typeof value === 'string') : [],
+      instructions: continuationCleared ? [] : Array.isArray(item.resumeState?.instructions) ? item.resumeState.instructions.filter(value => typeof value === 'string') : buildResumeInstructions(documentationPath)
     },
     metrics: {
       completedPackets: Math.max(0, Number(item.metrics?.completedPackets || 0)),
@@ -370,7 +376,7 @@ function coerceJob(raw: unknown): AgentJob | null {
       repairAttempts: Math.max(0, Number(item.metrics?.repairAttempts || 0)),
       userSupervisionEvents: Math.max(0, Number(item.metrics?.userSupervisionEvents || 0))
     },
-    status: item.status || 'running',
+    status,
     createdAt: String(item.createdAt),
     updatedAt: String(item.updatedAt || item.createdAt),
     maxIterations: Math.min(MAX_ITERATIONS, Math.max(1, Number(item.maxIterations || 12))),
@@ -387,10 +393,18 @@ function coerceJob(raw: unknown): AgentJob | null {
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
-    nextActions: Array.isArray(item.nextActions) && item.nextActions.length > 0 ? item.nextActions : buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
+    nextActions: continuationCleared
+      ? []
+      : Array.isArray(item.nextActions)
+        ? item.nextActions
+        : buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
     summary: item.summary || 'Sequential job loaded from persistent roadmap state. Continue the active task, update the handoff, validate, repair, commit, and advance until the bounded batch is complete or blocked.',
     handoffPath: item.handoffPath || documentationPath,
-    resumeInstructions: Array.isArray(item.resumeInstructions) ? item.resumeInstructions : buildResumeInstructions(documentationPath),
+    resumeInstructions: continuationCleared
+      ? []
+      : Array.isArray(item.resumeInstructions)
+        ? item.resumeInstructions
+        : buildResumeInstructions(documentationPath),
     fallbackPrompt: item.fallbackPrompt,
     lastKnownGitStatus: item.lastKnownGitStatus
   }
@@ -554,21 +568,29 @@ export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
   const job = getAgentJob(jobId)
   if (!job) throw new Error(`Agent job not found: ${jobId}`)
   const roadmapPhases = normalizeRoadmapPhases(patch.roadmapPhases || job.roadmapPhases, job.goal)
+  const status = patch.status || job.status
+  const continuationCleared = clearsContinuationState(status)
   const requestedActiveTaskId = Object.prototype.hasOwnProperty.call(patch, 'activeTaskId') ? patch.activeTaskId : job.activeTaskId
-  const activeTaskId = findActiveTaskId(roadmapPhases, requestedActiveTaskId)
+  const activeTaskId = continuationCleared ? undefined : findActiveTaskId(roadmapPhases, requestedActiveTaskId)
   const completedTaskCount = countCompletedTasks(roadmapPhases)
-  const resumeInstructions = job.resumeInstructions && job.resumeInstructions.length > 0 ? job.resumeInstructions : buildResumeInstructions(job.documentationPath)
+  const resumeInstructions = continuationCleared
+    ? []
+    : job.resumeInstructions && job.resumeInstructions.length > 0
+      ? job.resumeInstructions
+      : buildResumeInstructions(job.documentationPath)
   const completedPacketIds = Array.from(new Set((patch.completedPacketIds || job.completedPacketIds).filter(Boolean)))
-  const resumeState: WorkbenchRunResumeState = {
-    nextTaskId: patch.resumeState?.nextTaskId || activeTaskId,
-    nextFiles: Array.from(new Set(patch.resumeState?.nextFiles || job.resumeState.nextFiles)),
-    nextSymbols: Array.from(new Set(patch.resumeState?.nextSymbols || job.resumeState.nextSymbols)),
-    instructions: patch.resumeState?.instructions?.length
-      ? patch.resumeState.instructions
-      : job.resumeState.instructions.length > 0
-        ? job.resumeState.instructions
-        : resumeInstructions
-  }
+  const resumeState: WorkbenchRunResumeState = continuationCleared
+    ? { nextTaskId: undefined, nextFiles: [], nextSymbols: [], instructions: [] }
+    : {
+        nextTaskId: patch.resumeState?.nextTaskId || activeTaskId,
+        nextFiles: Array.from(new Set(patch.resumeState?.nextFiles || job.resumeState.nextFiles)),
+        nextSymbols: Array.from(new Set(patch.resumeState?.nextSymbols || job.resumeState.nextSymbols)),
+        instructions: patch.resumeState?.instructions?.length
+          ? patch.resumeState.instructions
+          : job.resumeState.instructions.length > 0
+            ? job.resumeState.instructions
+            : resumeInstructions
+      }
   const metrics: WorkbenchRunMetrics = {
     completedPackets: Math.max(0, Number(patch.metrics?.completedPackets ?? completedPacketIds.length ?? job.metrics.completedPackets)),
     failedPackets: Math.max(0, Number(patch.metrics?.failedPackets ?? job.metrics.failedPackets)),
@@ -586,9 +608,11 @@ export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
-    nextActions: Array.isArray(patch.nextActions) && patch.nextActions.length > 0
+    nextActions: Array.isArray(patch.nextActions)
       ? patch.nextActions
-      : buildLoopNextActions(job.documentationPath, roadmapPhases, activeTaskId),
+      : continuationCleared
+        ? []
+        : buildLoopNextActions(job.documentationPath, roadmapPhases, activeTaskId),
     updatedAt: new Date().toISOString(),
     resumeInstructions,
     handoffPath: job.handoffPath || job.documentationPath

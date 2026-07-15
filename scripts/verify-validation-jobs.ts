@@ -95,7 +95,7 @@ async function main() {
   if (invalidExact.ok) throw new Error('Expected an invalid exact validation job')
   assert.equal(invalidExact.code, 'VALIDATION_JOB_INVALID')
   assert.equal(invalidExact.field, 'executable')
-  assert.deepEqual(invalidExact.allowedValues, ['node', 'pnpm'])
+  assert.deepEqual(invalidExact.allowedValues, ['node', 'pnpm', 'rg'])
 
   const workerRoot = path.join(isolatedHome, 'worker-repo')
   fs.mkdirSync(workerRoot, { recursive: true })

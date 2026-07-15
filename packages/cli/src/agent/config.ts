@@ -21,13 +21,15 @@ export function normalizeAutoIndexIntervalMinutes(value: unknown): number {
   return Math.min(MAX_AUTO_INDEX_INTERVAL_MINUTES, Math.max(MIN_AUTO_INDEX_INTERVAL_MINUTES, Math.round(numeric)))
 }
 
-export function withSourceDefaults(source: KnowledgeSource): KnowledgeSource {
+export type SourceHydrationOptions = { refreshGitMetadata?: boolean }
+
+export function withSourceDefaults(source: KnowledgeSource, options: SourceHydrationOptions = {}): KnowledgeSource {
   const withDefaults = {
     ...source,
     autoIndexEnabled: typeof source.autoIndexEnabled === 'boolean' ? source.autoIndexEnabled : DEFAULT_AUTO_INDEX_ENABLED,
     autoIndexIntervalMinutes: normalizeAutoIndexIntervalMinutes(source.autoIndexIntervalMinutes)
   }
-  return withSourceGitMetadata(withDefaults)
+  return options.refreshGitMetadata === false ? withDefaults : withSourceGitMetadata(withDefaults)
 }
 
 export interface AgentConfig {
@@ -44,6 +46,7 @@ export interface AgentConfig {
   localPort?: number
   sourceDiscovery?: SourceDiscoverySettings
   autoCommitSourceIds?: string[]
+  controlledN8nWorkflowGrants?: unknown
   mode: 'read_create_append'
   allowedExtensions: string[]
   ignorePatterns: string[]
@@ -100,9 +103,9 @@ export function saveConfig(config: AgentConfig): void {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
-function ensureSources(config: AgentConfig): KnowledgeSource[] {
+function ensureSources(config: AgentConfig, options: SourceHydrationOptions = {}): KnowledgeSource[] {
   if (config.sources !== undefined) {
-    return config.sources.map(withSourceDefaults)
+    return config.sources.map(source => withSourceDefaults(source, options))
   }
 
   if (config.vaultPath) {
@@ -112,7 +115,7 @@ function ensureSources(config: AgentConfig): KnowledgeSource[] {
         label: 'Vault',
         path: config.vaultPath,
         enabled: true
-      })
+      }, options)
     ]
   }
 
@@ -120,7 +123,7 @@ function ensureSources(config: AgentConfig): KnowledgeSource[] {
 }
 
 function persistSources(config: AgentConfig, sources: KnowledgeSource[]): void {
-  config.sources = sources.map(withSourceDefaults)
+  config.sources = sources.map(source => withSourceDefaults(source))
   saveConfig(config)
 }
 
@@ -128,8 +131,8 @@ function persistConfig(config: AgentConfig): void {
   saveConfig(config)
 }
 
-function getAllConfiguredSources(config: AgentConfig): KnowledgeSource[] {
-  return ensureSources(config).map(source => ({
+function getAllConfiguredSources(config: AgentConfig, options: SourceHydrationOptions = {}): KnowledgeSource[] {
+  return ensureSources(config, options).map(source => ({
     ...source,
     path: expandTilde(source.path)
   }))
@@ -272,8 +275,8 @@ export function getSourceIndexState(sourceId: string): ReturnType<typeof getSour
   return getSourceIndexStatus(source)
 }
 
-export function reconcileActiveSources(config: AgentConfig): { mode: ActiveSourcesMode; activeSourceIds: string[]; sources: KnowledgeSource[] } {
-  const allSources = getAllConfiguredSources(config)
+export function reconcileActiveSources(config: AgentConfig, options: SourceHydrationOptions = {}): { mode: ActiveSourcesMode; activeSourceIds: string[]; sources: KnowledgeSource[] } {
+  const allSources = getAllConfiguredSources(config, options)
   const enabledSources = allSources.filter(source => source.enabled)
   const enabledIds = new Set(enabledSources.map(source => source.id))
   const currentMode = config.activeSourcesMode || 'all'
@@ -424,9 +427,9 @@ export function getSources(): KnowledgeSource[] {
   }))
 }
 
-export function getSourcesSafe(): KnowledgeSource[] {
+export function getSourcesSafe(options: SourceHydrationOptions = {}): KnowledgeSource[] {
   const config = loadConfig()
-  const sources = ensureSources(config ?? ({} as AgentConfig))
+  const sources = ensureSources(config ?? ({} as AgentConfig), options)
 
   return sources.map(s => withSourceIndexState({
     ...s,
@@ -438,13 +441,13 @@ export function getEnabledSources(): KnowledgeSource[] {
   return getSources().filter(s => s.enabled)
 }
 
-export function getActiveSourceContext(): { mode: ActiveSourcesMode; activeSourceIds: string[]; sources: KnowledgeSource[] } {
+export function getActiveSourceContext(options: SourceHydrationOptions = {}): { mode: ActiveSourcesMode; activeSourceIds: string[]; sources: KnowledgeSource[] } {
   const config = loadConfig()
   if (!config) {
     return { mode: 'all', activeSourceIds: [], sources: [] }
   }
 
-  return reconcileActiveSources(config)
+  return reconcileActiveSources(config, options)
 }
 
 export function setActiveSourceContext(mode: ActiveSourcesMode, activeSourceIds: string[] = []): { mode: ActiveSourcesMode; activeSourceIds: string[]; sources: KnowledgeSource[] } {

@@ -9,7 +9,10 @@
         "./src/*"
       ],
       "@workbench/shared": [
-        "../../packages/shared/src"
+        "../../packages/shared/src/index.ts"
+      ],
+      "@workbench/bridge/request-audit": [
+        "../../packages/bridge/src/storage/request-audit.ts"
       ]
     },
     "allowJs": true,

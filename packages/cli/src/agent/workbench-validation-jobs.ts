@@ -268,8 +268,8 @@ function normalizeRequest(request: WorkbenchValidationJobRequest): NormalizeVali
     return { ok: false, field: 'marker', reason: 'marker is required for run_package_test_marker.' }
   }
   if (request.commandKind === 'run_exact_command') {
-    if (request.executable !== 'node' && request.executable !== 'pnpm') {
-      return { ok: false, field: 'executable', reason: 'executable is required for run_exact_command.', allowedValues: ['node', 'pnpm'] }
+    if (request.executable !== 'node' && request.executable !== 'pnpm' && request.executable !== 'rg') {
+      return { ok: false, field: 'executable', reason: 'executable is required for run_exact_command.', allowedValues: ['node', 'pnpm', 'rg'] }
     }
     if (!Array.isArray(request.args) || request.args.length === 0) {
       return { ok: false, field: 'args', reason: 'A non-empty exact argument array is required for run_exact_command.' }

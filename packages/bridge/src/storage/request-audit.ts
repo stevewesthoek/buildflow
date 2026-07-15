@@ -22,7 +22,14 @@ function ensureDir(): void {
   }
 }
 
-function loadFromDisk(): RequestRecord[] {
+function replaceLogAtomically(content: string): void {
+  const temporary = `${initFile()}.tmp-${process.pid}`
+  fs.writeFileSync(temporary, content, { mode: 0o600 })
+  fs.renameSync(temporary, initFile())
+  fs.chmodSync(initFile(), 0o600)
+}
+
+function loadFromDisk(): RequestRecord[] | null {
   ensureDir()
   if (!fs.existsSync(initFile())) {
     return []
@@ -30,26 +37,29 @@ function loadFromDisk(): RequestRecord[] {
   try {
     const content = fs.readFileSync(initFile(), 'utf-8')
     const data = JSON.parse(content)
-    return Array.isArray(data) ? data : []
+    if (!Array.isArray(data)) throw new Error('Request audit root must be an array.')
+    return data
   } catch (err) {
     console.error(`Failed to load request log: ${err}`)
-    return []
+    return null
   }
 }
 
-function saveToDisk(): void {
+function saveToDisk(): boolean {
   ensureDir()
   try {
     const content = JSON.stringify(requestLog, null, 2)
-    fs.writeFileSync(initFile(), content)
+    replaceLogAtomically(content)
 
     // Check size and rotate if needed
     const stats = fs.statSync(initFile())
     if (stats.size > MAX_FILE_SIZE) {
       rotateLog()
     }
+    return true
   } catch (err) {
     console.error(`Failed to save request log: ${err}`)
+    return false
   }
 }
 
@@ -63,7 +73,7 @@ function rotateLog(): void {
     )
     fs.copyFileSync(initFile(), archivePath)
     requestLog = []
-    fs.writeFileSync(initFile(), JSON.stringify([], null, 2))
+    replaceLogAtomically(JSON.stringify([], null, 2))
     console.log(`[RequestAudit] Rotated log to ${archivePath}`)
   } catch (err) {
     console.error(`Failed to rotate request log: ${err}`)
@@ -71,13 +81,18 @@ function rotateLog(): void {
 }
 
 export function loadRequests(): RequestRecord[] {
-  requestLog = loadFromDisk()
+  const loaded = loadFromDisk()
+  if (loaded === null) return []
+  requestLog = loaded
   return requestLog
 }
 
-export function logRequest(record: RequestRecord): void {
+export function logRequest(record: RequestRecord): boolean {
+  const loaded = loadFromDisk()
+  if (loaded === null) return false
+  requestLog = loaded
   requestLog.push(record)
-  saveToDisk()
+  return saveToDisk()
 }
 
 export function getRecentRequests(limit: number = 50): RequestRecord[] {

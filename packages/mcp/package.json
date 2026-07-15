@@ -1,0 +1,25 @@
+{
+  "name": "@workbench/mcp",
+  "version": "1.3.1-beta",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "type-check": "tsc --noEmit",
+    "test": "node --test dist/tests/*.test.js",
+    "verify": "pnpm --dir ../shared build && pnpm type-check && pnpm build && pnpm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@workbench/shared": "workspace:*",
+    "ajv": "8.20.0",
+    "smol-toml": "1.7.0",
+    "zod-to-json-schema": "3.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,0 +1,232 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import {
+  parseRunCommandRequest,
+  toSafeCommandRequest
+} from '../packages/cli/src/agent/run-command-request'
+import { runControlledWorkflowMigrationCommand } from '../packages/cli/src/agent/n8n-workflow-migration-command-adapter'
+
+const invalid = parseRunCommandRequest({
+  sourceId: 'brain',
+  commandKind: 'git_status_short',
+  args: ['status']
+})
+assert.equal(invalid.ok, false)
+if (!invalid.ok) {
+  assert.equal(invalid.error.code, 'INVALID_WORKBENCH_COMMAND_REQUEST')
+  assert.ok(invalid.error.issues.length > 0)
+  assert.ok(invalid.error.issues.length <= 10)
+}
+
+const direct = parseRunCommandRequest({
+  sourceId: 'workbench-example-source',
+  commandKind: 'git_diff',
+  paths: ['packages/cli/src/agent/server.ts'],
+  timeoutMs: 5000
+})
+assert.equal(direct.ok, true)
+if (direct.ok && direct.kind === 'direct') {
+  const safe = toSafeCommandRequest(direct.request, '/srv/workbench')
+  assert.equal(safe.sourceId, 'workbench-example-source')
+  assert.equal(safe.sourceRoot, '/srv/workbench')
+  assert.equal(safe.commandKind, 'git_diff')
+  assert.deepEqual(safe.paths, ['packages/cli/src/agent/server.ts'])
+  assert.equal(safe.timeoutMs, 5000)
+}
+
+const exportRequest = parseRunCommandRequest({
+  sourceId: 'brain',
+  commandKind: 'n8n_workflow_export',
+  workflowId: 'workflow-id',
+  outputPath: 'operations/reports/rollback.json',
+  networkAccess: true,
+  protectedPaths: ['tools/n8n-api.sh'],
+  confirmedByUser: true
+})
+assert.equal(exportRequest.ok, true)
+if (exportRequest.ok && exportRequest.kind === 'direct') {
+  const safe = toSafeCommandRequest(exportRequest.request, '/srv/brain')
+  assert.equal(safe.commandKind, 'n8n_workflow_export')
+  assert.equal(safe.workflowId, 'workflow-id')
+  assert.equal(safe.outputPath, 'operations/reports/rollback.json')
+  assert.equal(safe.networkAccess, true)
+  assert.equal(safe.confirmedByUser, true)
+}
+
+const submit = parseRunCommandRequest({
+  sourceId: 'workbench-example-source',
+  commandKind: 'run_exact_command',
+  validationJobOperation: 'submit',
+  idempotencyKey: 'adapter-test',
+  validationJobTimeoutMs: 45000,
+  executable: 'rg',
+  args: ['-n', 'parseRunCommandRequest', 'packages/cli/src'],
+  networkAccess: false,
+  policy: { denyNetworkCommands: true },
+  protectedPaths: ['AGENTS.md']
+})
+assert.equal(submit.ok, true)
+if (submit.ok && submit.kind === 'validation_submit') {
+  assert.equal(submit.request.commandKind, 'run_exact_command')
+  assert.equal(submit.request.timeoutMs, 45000)
+  assert.equal(submit.request.networkAccess, false)
+  assert.deepEqual(submit.request.protectedPaths, ['AGENTS.md'])
+}
+
+const status = parseRunCommandRequest({
+  sourceId: 'workbench-example-source',
+  commandKind: 'type_check_cli',
+  validationJobOperation: 'status',
+  validationJobId: 'job-id'
+})
+assert.equal(status.ok, true)
+if (status.ok && status.kind === 'validation_status') {
+  assert.equal(status.validationJobId, 'job-id')
+  assert.equal(status.commandKind, 'type_check_cli')
+}
+
+async function verifyMigrationAdapter() {
+const migration = parseRunCommandRequest({
+  sourceId: 'brain',
+  commandKind: 'n8n_workflow_migration',
+  migration: {
+    mode: 'apply',
+    phase: 'prepare',
+    workflowId: 'workflow-id',
+    candidatePath: 'artifacts/candidate.json',
+    rollbackPath: 'artifacts/rollback.json',
+    manifestPath: 'artifacts/manifest.json',
+    networkAccess: true
+  }
+})
+assert.equal(migration.ok, true)
+if (migration.ok && migration.kind === 'migration') {
+  let executorCreated = false
+  const result = await runControlledWorkflowMigrationCommand(migration.request, {
+    getSources: () => [{ id: 'brain', label: 'Brain', path: '/srv/brain', enabled: true }],
+    getConfiguredGrants: () => undefined,
+    realpath: value => value,
+    createExecutor: () => {
+      executorCreated = true
+      return async () => { throw new Error('executor must not run without a grant') }
+    }
+  })
+  assert.equal(result.statusCode, 503)
+  assert.equal(result.body.error?.code, 'capability_not_configured')
+  assert.equal(result.body.migrationMode, 'apply')
+  assert.equal(result.body.migrationPhase, 'prepare')
+  assert.equal(executorCreated, false, 'missing grants must not construct or invoke an executor')
+
+  let mixedGrantPrepareCalled = false
+  const invalidMixedGrant = await runControlledWorkflowMigrationCommand(migration.request, {
+    getSources: () => [{ id: 'brain', label: 'Brain', path: '/srv/brain', enabled: true }],
+    getConfiguredGrants: () => [{
+      grantId: 'valid-looking-grant',
+      version: 1,
+      enabled: true,
+      sourceId: 'brain',
+      workflowId: 'workflow-id',
+      wrapperPath: 'tools/n8n-api.sh',
+      wrapperSha256: 'a'.repeat(64),
+      allowedCandidateRoots: ['artifacts'],
+      allowedRollbackRoots: ['artifacts'],
+      allowedManifestRoots: ['artifacts'],
+      canonicalizationVersion: 1,
+      confirmationTtlSeconds: 600,
+      operationTimeoutMs: 120000,
+      maxArtifactBytes: 1048576,
+      maximumPolicy: {
+        activation: 'unchanged', settings: 'unchanged', tags: 'unchanged', sharing: 'unchanged',
+        credentials: 'unchanged', webhooks: 'unchanged', schedules: 'unchanged'
+      }
+    }, { grantId: 'malformed-neighbor' }],
+    realpath: value => value,
+    prepare: (async () => {
+      mixedGrantPrepareCalled = true
+      throw new Error('prepare must not run for a partially invalid grant set')
+    }) as never
+  })
+  assert.equal(invalidMixedGrant.statusCode, 503)
+  assert.deepEqual(invalidMixedGrant.body.error, {
+    code: 'capability_not_configured', message: 'Controlled workflow migration grants are invalid.'
+  })
+  assert.equal(mixedGrantPrepareCalled, false, 'any grant parse issue must disable the entire capability')
+}
+
+  const phaseSource = () => [{ id: 'migration-source', label: 'Migration source', path: '/srv/migration-source', enabled: true }]
+  const projectedOperation = { operationId: 'cap-op-example', status: 'prepared', mode: 'apply' }
+  const phaseDependencies = {
+    getSources: phaseSource,
+    getConfiguredGrants: () => undefined,
+    realpath: (value: string) => value,
+    prepare: (async (request: { sourceId: string }) => ({
+      ok: true as const, status: 'needs_confirmation' as const, confirmationToken: 'opaque-confirmation-token', operation: { ...projectedOperation, sourceId: request.sourceId }
+    })) as never,
+    execute: (async (request: { operationId: string }) => ({
+      ok: true as const, status: 'completed' as const, operation: { ...projectedOperation, operationId: request.operationId, status: 'completed' }
+    })) as never,
+    status: ((request: { operationId: string }) => ({
+      ok: true as const, status: 'prepared' as const, operation: { ...projectedOperation, operationId: request.operationId }
+    })) as never
+  }
+  const prepare = parseRunCommandRequest({
+    sourceId: 'migration-source', commandKind: 'n8n_workflow_migration',
+    migration: { mode: 'apply', phase: 'prepare', workflowId: 'workflow-id', candidatePath: 'artifacts/candidate.json', rollbackPath: 'artifacts/rollback.json', manifestPath: 'artifacts/manifest.json', networkAccess: true }
+  })
+  const execute = parseRunCommandRequest({
+    sourceId: 'migration-source', commandKind: 'n8n_workflow_migration',
+    migration: { mode: 'apply', phase: 'execute', operationId: 'cap-op-execute', confirmationToken: 'opaque-confirmation-token' }
+  })
+  const status = parseRunCommandRequest({
+    sourceId: 'migration-source', commandKind: 'n8n_workflow_migration',
+    migration: { mode: 'apply', phase: 'status', operationId: 'cap-op-status' }
+  })
+  for (const parsed of [prepare, execute, status]) {
+    assert.equal(parsed.ok, true)
+    if (!parsed.ok || parsed.kind !== 'migration') continue
+    const response = await runControlledWorkflowMigrationCommand(parsed.request, phaseDependencies)
+    assert.equal(response.statusCode, 200)
+    assert.equal(response.body.migrationPhase, parsed.request.migration.phase)
+    assert.equal(response.body.commandKind, 'n8n_workflow_migration')
+  }
+  if (prepare.ok && prepare.kind === 'migration') {
+    const blocked = await runControlledWorkflowMigrationCommand(prepare.request, {
+      ...phaseDependencies,
+      prepare: (async () => { throw new Error('/private/path/and-secret must not be exposed') }) as never
+    })
+    assert.equal(blocked.statusCode, 409)
+    assert.deepEqual(blocked.body.error, {
+      code: 'mutation_blocked', message: 'Controlled workflow migration could not be completed safely.'
+    })
+  }
+}
+
+const sourceRootInjection = parseRunCommandRequest({
+  sourceId: 'workbench-example-source',
+  commandKind: 'git_status_short',
+  sourceRoot: '/attacker-controlled'
+})
+assert.equal(sourceRootInjection.ok, false, 'sourceRoot must never be accepted from public input')
+
+const migrationExecutable = parseRunCommandRequest({
+  sourceId: 'brain',
+  commandKind: 'n8n_workflow_migration',
+  executable: 'node',
+  migration: {
+    mode: 'apply',
+    phase: 'status',
+    operationId: 'operation-id'
+  }
+})
+assert.equal(migrationExecutable.ok, false, 'migration must reject caller-selected executables')
+
+const adapterSource = fs.readFileSync(path.resolve(__dirname, '../packages/cli/src/agent/n8n-workflow-migration-command-adapter.ts'), 'utf8')
+assert.doesNotMatch(adapterSource, /spawn\(|child_process|update-workflow|wrapperOperation|confirmationDigest|dispatchAuthorization|leaseProof/)
+
+void verifyMigrationAdapter().then(() => {
+  console.log('CLI runWorkbenchCommand adapter verification passed')
+}).catch(error => {
+  console.error(error)
+  process.exitCode = 1
+})

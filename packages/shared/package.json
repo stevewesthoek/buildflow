@@ -5,6 +5,16 @@
   "license": "AGPL-3.0-only",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./workbench-mcp-auth": {
+      "types": "./src/workbench-mcp-auth.ts",
+      "default": "./dist/workbench-mcp-auth.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "type-check": "tsc --noEmit"

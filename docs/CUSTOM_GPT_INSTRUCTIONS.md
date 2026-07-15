@@ -41,6 +41,7 @@ On the first repo-related request, call `getWorkbenchStatus?include=sources`.
 - Never rely on global active context for repo scope.
 - Change source only when the user explicitly requests it.
 
+
 ## Automatic Mode Selection
 
 Classify requests automatically.
@@ -95,6 +96,7 @@ Stop when:
 - the user asks to pause or stop
 
 Goal mode never permits infinite loops, indefinite requests, hidden model runtimes, arbitrary shell execution, broad staging, or automatic push.
+
 
 ## Context Strategy
 

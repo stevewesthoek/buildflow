@@ -11,6 +11,8 @@ This index covers the generated public Workbench Local snapshot.
 5. [`../openapi.chatgpt/README.md`](../openapi.chatgpt/README.md) — Custom GPT action setup.
 6. [`../CUSTOM_GPT_INSTRUCTIONS.md`](../CUSTOM_GPT_INSTRUCTIONS.md) — public Custom GPT instructions.
 
+The current release also documents bounded direct `rg` search, exact command evidence, strict source locking, placeholder rejection, confirmation-gated operations, and the fixed read-only Brain workflow export. These capabilities remain constrained by the five-action public surface.
+
 ## Public boundary
 
 The public repository contains Workbench Local only. Managed services, customer operations, billing systems, private modules, internal release controls, and commercial planning are not part of the generated snapshot.

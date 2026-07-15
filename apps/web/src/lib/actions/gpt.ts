@@ -3,7 +3,11 @@ import { executeAction, ActionTransportError, executeActionGET, fetchWithTimeout
 import { getBackendUrl, getBackendMode } from './config'
 import { buildActionErrorEnvelope } from './action-response'
 import { GPT_ACTION_RESPONSE_BYTE_LIMIT, GPT_ACTION_RESPONSE_CHAR_LIMIT } from './payload-budget'
-import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_DEFAULT_INSPECT_LIMIT } from '@workbench/shared'
+import {
+  GPT_ACTION_DEFAULT_FILE_BYTES,
+  GPT_ACTION_DEFAULT_INSPECT_LIMIT,
+  runWorkbenchCommandRequestSchema
+} from '@workbench/shared'
 import { getActionDiagnostics } from '../env-compat'
 
 type NormalizedSource = {
@@ -115,6 +119,23 @@ const ENV_TEMPLATE_FILES = new Set([
   '.env.development.example',
   '.env.production.example'
 ])
+
+const PLACEHOLDER_SOURCE_IDS = new Set(['default', 'workspace', 'current', 'repo'])
+
+export function sourceSelectionRequired(sourceId: unknown) {
+  const normalized = typeof sourceId === 'string' ? sourceId.trim().toLowerCase() : ''
+  if (!PLACEHOLDER_SOURCE_IDS.has(normalized)) return null
+  return {
+    code: 'SOURCE_SELECTION_REQUIRED',
+    message: `sourceId "${normalized}" is a placeholder, not a configured Workbench source.`,
+    details: 'Use getWorkbenchStatus with include=sources, then retry with one exact enabled source ID such as brain.',
+    recovery: [
+      'Call getWorkbenchStatus with include=sources.',
+      'Choose one exact enabled source ID from the response.',
+      'Retry the original action with that exact sourceId. Do not use default, workspace, current, or repo.'
+    ]
+  }
+}
 
 // Enforce conversation isolation: repo-specific actions must pass an explicit sourceId.
 // Do not fall back to global active context; it is shared across chats and can drift.
@@ -1101,92 +1122,42 @@ export async function dispatchWorkbenchRead(body: Record<string, unknown>, userT
   throw new Error('Invalid mode')
 }
 
-const SAFE_COMMAND_KINDS = new Set([
-  'git_status_short',
-  'git_diff_stat',
-  'git_diff_name_only',
-  'git_diff',
-  'git_log_latest',
-  'git_branch_current',
-  'verify_public_scope',
-  'type_check_web',
-  'type_check_cli',
-  'verify_write_policy',
-  'verify_source_reindex_resilience',
-  'git_diff_cached_stat',
-  'git_diff_cached_name_only',
-  'git_add_paths',
-  'git_commit',
-  'git_push',
-  'validate_json_files',
-  'run_package_script',
-  'run_package_test',
-  'run_package_test_marker',
-  'security_scan_paths',
-  'diagnose_performance',
-  'local_cli_github_auth_status',
-  'local_cli_github_repo_view',
-  'run_exact_command'
-])
-
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
 export async function dispatchWorkbenchCommand(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
-  const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
-  const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''
-  const validationJobOperation = body.validationJobOperation === 'submit' || body.validationJobOperation === 'status'
-    ? body.validationJobOperation
+  const parsed = runWorkbenchCommandRequestSchema.safeParse(body)
+  if (!parsed.success) {
+    const details = parsed.error.issues
+      .slice(0, 10)
+      .map(issue => `${issue.path.join('.') || 'request'}: ${issue.message}`)
+      .join('; ')
+    throw new Error(`Invalid runWorkbenchCommand request: ${details}`)
+  }
+  const requestBody = parsed.data
+  const { sourceId, commandKind } = requestBody
+  const validationJobOperation = 'validationJobOperation' in requestBody
+    ? requestBody.validationJobOperation
     : undefined
-  if (!sourceId) throw new Error('sourceId is required')
-  if (!SAFE_COMMAND_KINDS.has(commandKind)) throw new Error('commandKind is not allowlisted')
-  const result = await executeAction('/api/commands/run', {
-    sourceId,
-    commandKind,
-    validationJobOperation,
-    validationJobId: typeof body.validationJobId === 'string' ? body.validationJobId : undefined,
-    idempotencyKey: typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined,
-    runId: typeof body.runId === 'string' ? body.runId : undefined,
-    packetId: typeof body.packetId === 'string' ? body.packetId : undefined,
-    taskId: typeof body.taskId === 'string' ? body.taskId : undefined,
-    timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
-    validationJobTimeoutMs: typeof body.validationJobTimeoutMs === 'number' ? body.validationJobTimeoutMs : undefined,
-    paths: Array.isArray(body.paths) ? body.paths : undefined,
-    packageDir: typeof body.packageDir === 'string' ? body.packageDir : undefined,
-    scriptName: typeof body.scriptName === 'string' ? body.scriptName : undefined,
-    marker: typeof body.marker === 'string' ? body.marker : undefined,
-    message: typeof body.message === 'string' ? body.message : undefined,
-    body: typeof body.body === 'string' ? body.body : undefined,
-    remote: typeof body.remote === 'string' ? body.remote : undefined,
-    branch: typeof body.branch === 'string' ? body.branch : undefined,
-    patternSet: typeof body.patternSet === 'string' ? body.patternSet : undefined,
-    executable: body.executable === 'node' || body.executable === 'pnpm' ? body.executable : undefined,
-    args: Array.isArray(body.args) ? body.args.filter((item: unknown): item is string => typeof item === 'string') : undefined,
-    nodeVersion: body.nodeVersion === '20' ? '20' : undefined,
-    policy: typeof body.policy === 'object' && body.policy !== null ? body.policy : undefined,
-    protectedPaths: Array.isArray(body.protectedPaths) ? body.protectedPaths.filter((item: unknown): item is string => typeof item === 'string') : undefined,
-    requiredBranch: typeof body.requiredBranch === 'string' ? body.requiredBranch : undefined,
-    networkAccess: body.networkAccess === false ? false : undefined,
-    confirmedByUser: typeof body.confirmedByUser === 'boolean' ? body.confirmedByUser : undefined,
-    confirmationToken: typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
-  }, userToken, transportOptions)
+  const result = await executeAction('/api/commands/run', requestBody, userToken, transportOptions)
   const resultRecord = result as Record<string, unknown>
   const status = typeof resultRecord.status === 'string' ? resultRecord.status : 'failed'
   const job = resultRecord.job && typeof resultRecord.job === 'object' ? resultRecord.job as Record<string, unknown> : undefined
   const jobId = typeof job?.jobId === 'string' ? job.jobId : undefined
   const isActiveValidationJob = validationJobOperation !== undefined && (status === 'queued' || status === 'running')
+  const needsConfirmation = status === 'needs_confirmation'
   const exitCode = typeof resultRecord.exitCode === 'number'
     ? resultRecord.exitCode
     : typeof job?.exitCode === 'number' ? job.exitCode : null
   const outputTruncated = resultRecord.outputTruncated === true || job?.outputTruncated === true
   return withActivity(resultRecord, makeActivity({
     operationId: 'runWorkbenchCommand',
-    phase: isActiveValidationJob ? 'verifying' : status === 'completed' ? 'completed' : 'failed',
+    phase: isActiveValidationJob ? 'verifying' : needsConfirmation ? 'waiting_for_confirmation' : status === 'completed' ? 'completed' : 'failed',
     actionLabel: isActiveValidationJob ? 'Tracked long-running validation' : 'Ran safe validation command',
     userMessage: isActiveValidationJob
       ? `Workbench validation job ${jobId || 'unknown'} is ${status} in ${sourceId}.`
       : `Workbench ran ${commandKind} in ${sourceId} and finished with ${status}${exitCode !== null ? ` (exit ${exitCode})` : ''}.`,
     sourceId,
     riskLevel: 'medium',
-    requiresConfirmation: false,
+    requiresConfirmation: needsConfirmation || resultRecord.requiresConfirmation === true,
     verified: status === 'completed',
     provenFacts: compactList([
       `Command kind: ${commandKind}`,
@@ -1196,12 +1167,13 @@ export async function dispatchWorkbenchCommand(body: Record<string, unknown>, us
       exitCode !== null ? `Exit code: ${exitCode}` : undefined,
       outputTruncated ? 'Output was truncated.' : undefined
     ]),
-    whatRemains: isActiveValidationJob ? ['The persisted validation job has not reached a terminal result.'] : undefined,
+    whatRemains: isActiveValidationJob ? ['The persisted validation job has not reached a terminal result.'] : needsConfirmation ? ['Wait for explicit confirmation before executing the prepared operation.'] : undefined,
     nextActions: isActiveValidationJob && jobId
       ? [`Check validation job ${jobId} with validationJobOperation status; do not submit a duplicate build.`]
       : undefined,
     nextStep: isActiveValidationJob
       ? 'Wait for the persisted validation to finish, then check the same job ID.'
+      : needsConfirmation ? 'Request explicit confirmation, then submit only the returned operation ID and confirmation token.'
       : status === 'completed' ? 'Use the command result as validation evidence.' : 'Inspect stderr/stdout and decide the next repair step.'
   }))
 }

@@ -4,8 +4,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const LOCAL_BASE_URL = process.env.LOCAL_DASHBOARD_BASE_URL || 'http://127.0.0.1:3054'
-const TOKEN = process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || ''
+const REQUIRE_LIVE_CHECK = process.argv.includes('--require-live')
 const ROOT = process.cwd()
+
+function actionCredential() {
+  return process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || ''
+}
 const DOCS_SCHEMA_FILE = path.join(ROOT, 'docs/openapi.chatgpt.json')
 const INSTRUCTIONS_FILE = path.join(ROOT, 'docs/CUSTOM_GPT_INSTRUCTIONS.md')
 const DOCS_SCHEMA_DIR = path.join(ROOT, 'docs/openapi.chatgpt')
@@ -166,8 +170,39 @@ function ensureSchemaRules(schema) {
   assert(readProps.maxMatches?.maximum <= 10, 'grep_context maxMatches must be capped at 10')
 
   const runCommand = ops.find(op => op.operationId === 'runWorkbenchCommand')
-  const commandProps = runCommand?.requestBody?.content?.['application/json']?.schema?.properties || {}
+  const commandContent = runCommand?.requestBody?.content?.['application/json']
+  const commandProps = commandContent?.schema?.properties || {}
   assert(commandProps.timeoutMs?.maximum <= 12000, 'runWorkbenchCommand timeoutMs must be capped at 12000')
+  assert((commandProps.commandKind?.enum || []).includes('n8n_workflow_export'), 'Generated schema must expose n8n_workflow_export')
+  assert((commandProps.commandKind?.enum || []).includes('n8n_workflow_migration'), 'Generated schema must expose n8n_workflow_migration')
+  assert(commandProps.workflowId, 'Generated schema must expose workflowId')
+  assert(commandProps.outputPath, 'Generated schema must expose outputPath')
+  assert(commandProps.networkAccess?.type === 'boolean', 'Generated schema networkAccess must be boolean')
+  const sourceDescription = commandProps.sourceId?.description || ''
+  for (const required of ['getWorkbenchStatus', 'include=sources', 'default', 'workspace', 'current', 'repo']) {
+    assert(sourceDescription.includes(required), `runWorkbenchCommand sourceId guidance missing ${required}`)
+  }
+  const examples = commandContent?.examples || {}
+  assert(examples.repositoryStatusCheck?.value?.sourceId === 'workbench-example-source', 'Generated schema must include the explicit generic source example')
+  assert(examples.repositoryStatusCheck?.value?.commandKind === 'git_status_short', 'Generic source example must use git_status_short')
+  assert(examples.workflowExportConfirmation?.value?.sourceId === 'workflow-example-source', 'Generated schema must include a synthetic workflow source example')
+  assert(examples.workflowExportConfirmation?.value?.commandKind === 'n8n_workflow_export', 'Workflow example must use n8n_workflow_export')
+  assert(examples.controlledMigrationPrepare?.value?.sourceId === 'migration-example-source', 'Migration example must use a synthetic source ID')
+  assert(examples.controlledMigrationPrepare?.value?.commandKind === 'n8n_workflow_migration', 'Migration example must use n8n_workflow_migration')
+  assert(examples.controlledMigrationPrepare?.value?.migration?.phase === 'prepare', 'Migration example must use prepare phase')
+  assert(examples.controlledMigrationPrepare?.value?.migration?.networkAccess === true, 'Migration prepare example must explicitly require network access')
+  assert(examples.controlledMigrationExecute?.value?.migration?.phase === 'execute', 'Migration execute example must use execute phase')
+  assert(examples.controlledMigrationStatus?.value?.migration?.phase === 'status', 'Migration status example must use status phase')
+  assert(Array.isArray(commandProps.migration?.oneOf) && commandProps.migration.oneOf.length === 3, 'Generated schema must expose strict prepare, execute, and status migration schemas')
+  const migrationPhaseProperties = commandProps.migration.oneOf.flatMap(phase => Object.keys(phase.properties || {}))
+  for (const forbidden of ['executable', 'args', 'shell', 'environment', 'wrapperOperation', 'confirmationDigest', 'dispatchAuthorization', 'leaseProof', 'credential']) {
+    assert(!migrationPhaseProperties.includes(forbidden), `Migration schema must not expose ${forbidden}`)
+  }
+  const placeholderSources = new Set(['default', 'workspace', 'current', 'repo'])
+  for (const [name, example] of Object.entries(examples)) {
+    const sourceId = typeof example?.value?.sourceId === 'string' ? example.value.sourceId.toLowerCase() : ''
+    assert(!placeholderSources.has(sourceId), `Generated schema example ${name} uses forbidden placeholder sourceId ${sourceId}`)
+  }
 }
 
 function ensureInstructions() {
@@ -253,8 +288,12 @@ function ensureSourceDeadlineLayer() {
   const files = {
     deadline: path.join(ROOT, 'apps/web/src/lib/actions/deadline.ts'),
     transport: path.join(ROOT, 'apps/web/src/lib/actions/transport.ts'),
+    gptActions: path.join(ROOT, 'apps/web/src/lib/actions/gpt.ts'),
     readContext: path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'),
-    runCommand: path.join(ROOT, 'apps/web/src/app/api/actions/run-command/route.ts')
+    runCommand: path.join(ROOT, 'apps/web/src/app/api/actions/run-command/route.ts'),
+    openapi: path.join(ROOT, 'apps/web/src/app/api/openapi/route.ts'),
+    schemaGenerator: path.join(ROOT, 'scripts/generate-openapi-chatgpt.mjs'),
+    localStack: path.join(ROOT, 'scripts/workbench-local-stack.sh')
   }
   for (const [label, file] of Object.entries(files)) {
     assert(fs.existsSync(file), `Missing source file for deadline verification: ${label}`)
@@ -266,7 +305,31 @@ function ensureSourceDeadlineLayer() {
   assert(transportText.includes('signal?: AbortSignal'), 'Transport must accept AbortSignal')
   assert(transportText.includes('const REQUEST_TIMEOUT_MS = 12000'), 'Transport default timeout must be below the old 30s value')
   assert(fs.readFileSync(files.readContext, 'utf8').includes('withGptActionDeadline'), 'read-context route must use deadline wrapper')
-  assert(fs.readFileSync(files.runCommand, 'utf8').includes('commandTimeoutMs'), 'run-command route must clamp GPT command timeouts')
+  const runCommandText = fs.readFileSync(files.runCommand, 'utf8')
+  assert(runCommandText.includes('commandTimeoutMs'), 'run-command route must clamp GPT command timeouts')
+  assert(runCommandText.includes('sourceSelectionRequired(body.sourceId)'), 'run-command route must reject placeholder source IDs before dispatch')
+  assert(runCommandText.includes("code: 'SOURCE_SELECTION_REQUIRED'" ) || fs.readFileSync(files.gptActions, 'utf8').includes("code: 'SOURCE_SELECTION_REQUIRED'"), 'Source-selection rejection must expose the canonical error code')
+  const gptActionsText = fs.readFileSync(files.gptActions, 'utf8')
+  for (const placeholder of ["'default'", "'workspace'", "'current'", "'repo'"]) {
+    assert(gptActionsText.includes(placeholder), `Source-selection helper must reject ${placeholder}`)
+  }
+  const openapiText = fs.readFileSync(files.openapi, 'utf8')
+  for (const required of ['repositoryStatusCheck', "sourceId: 'workbench-example-source'", 'workflowExportConfirmation', "sourceId: 'workflow-example-source'", 'controlledMigrationPrepare', 'controlledMigrationExecute', 'controlledMigrationStatus', 'migration-example-source', 'getWorkbenchStatus(include=sources)']) {
+    assert(openapiText.includes(required), `OpenAPI source must include ${required}`)
+  }
+  const generatorText = fs.readFileSync(files.schemaGenerator, 'utf8')
+  for (const required of ['n8n_workflow_export', 'n8n_workflow_migration', 'workflowId', 'outputPath', 'migration', 'include=sources', 'repositoryStatusCheck', 'workflowExportConfirmation', 'controlledMigrationPrepare', 'current', 'repo', 'fs.renameSync']) {
+    assert(generatorText.includes(required), `Schema generator must validate or atomically write ${required}`)
+  }
+  const localStackText = fs.readFileSync(files.localStack, 'utf8')
+  assert(localStackText.includes('regenerate_openapi_schema'), 'Local stack start/restart must regenerate the verified GPT schema')
+  assert(
+    /! verify_stack \|\|\s+! verify_sustained_stack \|\|\s+! regenerate_openapi_schema; then/.test(localStackText),
+    'Schema regeneration must run only after unified and sustained health pass'
+  )
+  for (const field of ['executable', 'args', 'shell', 'matchStatus', 'resolvedRepositoryRoot', 'filesChanged']) {
+    assert(runCommandText.includes(`${field}: clean.${field}`) || runCommandText.includes(`${field}: clean.${field} ?? job?.${field}`), `run-command route must project exact-command evidence field: ${field}`)
+  }
 }
 
 function ensureRetiredAgentActionRoutes() {
@@ -345,7 +408,7 @@ async function requestJson(pathname, options = {}, timeoutMs = 15_000) {
       ...options,
       signal: controller.signal,
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
+        Authorization: `Bearer ${actionCredential()}`,
         ...(options.headers || {})
       }
     })
@@ -359,7 +422,10 @@ async function requestJson(pathname, options = {}, timeoutMs = 15_000) {
 }
 
 async function runLiveSmokeChecks() {
-  if (!TOKEN) return { skipped: true, reason: 'BUILDFLOW_ACTION_TOKEN not set' }
+  if (!actionCredential() && REQUIRE_LIVE_CHECK) {
+    throw new Error('Authenticated live GPT action smoke requires WORKBENCH_ACTION_TOKEN or BUILDFLOW_ACTION_TOKEN in the invoking process environment.')
+  }
+  if (!actionCredential()) return { requested: false, skipped: true, reason: 'optional_live_smoke_not_requested' }
   const status = await requestJson('/api/actions/status', { method: 'GET' })
   assert(status.response.status === 200, `status action returned ${status.response.status}`)
   assert(status.bytes <= HARD_ACTION_RESPONSE_BYTES, `status action exceeds hard budget: ${status.bytes}`)

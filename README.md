@@ -113,6 +113,8 @@ Workbench supports:
 - optional per-source auto-index settings
 - searchable status reporting for ChatGPT and the dashboard
 
+Every repo action carries an explicit source lock. Start with `getWorkbenchStatus?include=sources`, then reuse one exact enabled `sourceId` for the conversation. The placeholders `default`, `workspace`, `current`, and `repo` are rejected; Workbench never maps them to an implicit or environment-specific source.
+
 Branch-aware activation works on configured checkouts and worktrees. When a repo has multiple configured branch worktrees, enabling/disabling or activating one configured branch expands to the configured siblings in the same repo group. Workbench does not silently check out every Git branch inside one working tree; create linked Git worktrees and add/discover them as sources when you want simultaneous branch access.
 
 ### Verified file writes
@@ -156,7 +158,15 @@ Supported command families include:
 - named security scans
 - Workbench verification scripts
 
+Direct `rg` execution is read-only and structured. Regex alternation such as `capture/inbox|capture/failed|router/` remains one argv element, execution always uses `shell:false`, and shell operators, subprocess/preprocessor options, traversal, prohibited paths, writes, and network access remain blocked. A no-match exit is reported as completed evidence rather than a failed command.
+
+Command responses project verified evidence from the runner, including the executable, exact `args`, `shell`, match status, resolved repository root, changed paths, protected-path changes, bounded output, and exit status. These fields are evidence, not synthesized success claims.
+
+Confirmation-gated operations return `needs_confirmation` and a backend-issued token. Do not retry with guessed tokens or bypass the gate. The fixed `n8n_workflow_export` capability is limited to the Brain source, one approved workflow, one credential-abstracting wrapper invocation, and one rollback artifact; it does not update, activate, delete, invoke, or deploy workflows.
+
 Workbench does **not** expose arbitrary shell execution. More command capability should be added as named, source-relative command kinds instead of unrestricted terminal access.
+
+Named security scans use syntax-aware handling for JavaScript and TypeScript: inert comments, strings, fixtures, and source-inspection assertions are ignored, while executable `fetch` calls, prohibited clients/imports, and high-confidence network behavior remain findings. Results are projected into bounded, redacted evidence.
 
 ### Fast Repo Assistant workflow
 

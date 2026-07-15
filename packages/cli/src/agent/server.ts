@@ -531,48 +531,38 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { sourceId: string; commandKind: SafeCommandKind; validationJobOperation?: 'submit' | 'status'; validationJobId?: string; idempotencyKey?: string; runId?: string; packetId?: string; taskId?: string; timeoutMs?: number; validationJobTimeoutMs?: number; paths?: string[]; packageDir?: string; scriptName?: string; marker?: string; message?: string; body?: string; remote?: string; branch?: string; patternSet?: 'forbidden_runtime_execution' | 'forbidden_secret_material' | 'forbidden_upload_network' | 'forbidden_all_high_risk'; executable?: 'node' | 'pnpm'; args?: string[]; nodeVersion?: '20'; policy?: { denyDatabaseCommands?: boolean; denyMigrationCommands?: boolean; denyDeploymentCommands?: boolean; denyNetworkCommands?: boolean }; protectedPaths?: string[]; requiredBranch?: string; networkAccess?: false; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/commands/run', async (request, reply) => {
+  fastify.post<{ Body: unknown }>('/api/commands/run', async (request, reply) => {
     try {
-      const { sourceId, commandKind, validationJobOperation, validationJobId, idempotencyKey, runId, packetId, taskId, timeoutMs, validationJobTimeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, executable, args, nodeVersion, policy, protectedPaths, requiredBranch, networkAccess, confirmedByUser, confirmationToken } = request.body
-      if (!sourceId || typeof sourceId !== 'string') return reply.code(400).send({ error: 'sourceId is required' })
-      const source = getSourcesSafe().find(item => item.id === sourceId)
-      if (!source || !source.enabled) return reply.code(404).send({ error: `Source not found or disabled: ${sourceId}` })
+      const { parseRunCommandRequest, toSafeCommandRequest } = await import('./run-command-request')
+      const parsed = parseRunCommandRequest(request.body)
+      if (parsed.ok === false) {
+        return reply.code(400).header('Cache-Control', 'no-store').send({ error: parsed.error })
+      }
 
-      if (validationJobOperation === 'submit') {
-        const { submitWorkbenchValidationJob } = await import('./workbench-validation-jobs')
-        const submitted = submitWorkbenchValidationJob({
-          sourceId,
-          idempotencyKey: String(idempotencyKey || ''),
-          commandKind: commandKind as 'run_package_script' | 'run_package_test' | 'run_package_test_marker' | 'type_check_web' | 'type_check_cli' | 'run_exact_command',
-          packageDir,
-          scriptName,
-          marker,
-          timeoutMs: validationJobTimeoutMs,
-          runId,
-          packetId,
-          taskId,
-          executable,
-          args,
-          nodeVersion,
-          policy,
-          requiredBranch,
-          protectedPaths,
-          networkAccess
+      const source = getSourcesSafe().find(item => item.id === parsed.sourceId)
+      if (!source || !source.enabled) {
+        return reply.code(404).header('Cache-Control', 'no-store').send({
+          error: `Source not found or disabled: ${parsed.sourceId}`
         })
+      }
+
+      if (parsed.kind === 'validation_submit') {
+        const { submitWorkbenchValidationJob, scheduleWorkbenchValidationJob } = await import('./workbench-validation-jobs')
+        const submitted = submitWorkbenchValidationJob(parsed.request)
         if ('code' in submitted) {
           return reply.code(submitted.code === 'VALIDATION_JOB_STORE_BUSY' ? 409 : 400).header('Cache-Control', 'no-store').send(submitted)
         }
         const schedule = submitted.job.status === 'queued'
-          ? (await import('./workbench-validation-jobs')).scheduleWorkbenchValidationJob({
+          ? scheduleWorkbenchValidationJob({
               jobId: submitted.job.jobId,
-              sourceId,
+              sourceId: parsed.sourceId,
               sourceRoot: source.path,
               leaseMs: Math.max(30_000, Math.min((submitted.job.timeoutMs || 300_000) + 60_000, 960_000))
             })
           : undefined
         return reply.header('Cache-Control', 'no-store').send({
           status: schedule?.status === 'scheduled' ? 'running' : submitted.job.status,
-          validationJobOperation,
+          validationJobOperation: 'submit',
           created: submitted.created,
           job: schedule?.status === 'scheduled'
             ? { ...submitted.job, status: 'running', workerId: schedule.workerId }
@@ -581,16 +571,35 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         })
       }
 
-      if (validationJobOperation === 'status') {
-        if (!validationJobId) return reply.code(400).send({ error: 'validationJobId is required for validation job status' })
+      if (parsed.kind === 'validation_status') {
         const { getCompactWorkbenchValidationJob } = await import('./workbench-validation-jobs')
-        const job = getCompactWorkbenchValidationJob(validationJobId, sourceId)
-        if (!job) return reply.code(404).header('Cache-Control', 'no-store').send({ error: 'Validation job not found for the selected source.' })
-        return reply.header('Cache-Control', 'no-store').send({ status: job.status, validationJobOperation, job })
+        const job = getCompactWorkbenchValidationJob(parsed.validationJobId, parsed.sourceId)
+        if (!job) {
+          return reply.code(404).header('Cache-Control', 'no-store').send({
+            error: 'Validation job not found for the selected source.'
+          })
+        }
+        return reply.header('Cache-Control', 'no-store').send({
+          status: job.status,
+          validationJobOperation: 'status',
+          job
+        })
       }
 
-      if (!commandKind || !getAllowedCommandKinds().includes(commandKind)) return reply.code(400).send({ error: 'commandKind is not allowlisted' })
-      const result = await runSafeCommand({ sourceId, sourceRoot: source.path, commandKind, timeoutMs, paths, packageDir, scriptName, marker, message, body, remote, branch, patternSet, executable, args, nodeVersion, policy, protectedPaths, requiredBranch, networkAccess, confirmedByUser, confirmationToken })
+      if (parsed.kind === 'migration') {
+        const { runControlledWorkflowMigrationCommand } = await import('./n8n-workflow-migration-command-adapter')
+        const result = await runControlledWorkflowMigrationCommand(parsed.request, {
+          getSources: getSourcesSafe,
+          getConfiguredGrants: () => loadConfig()?.controlledN8nWorkflowGrants
+        })
+        return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.body)
+      }
+
+      const safeRequest = toSafeCommandRequest(parsed.request, source.path)
+      if (!getAllowedCommandKinds().includes(safeRequest.commandKind)) {
+        return reply.code(400).header('Cache-Control', 'no-store').send({ error: 'commandKind is not allowlisted' })
+      }
+      const result = await runSafeCommand(safeRequest)
       return reply.header('Cache-Control', 'no-store').send(result)
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
@@ -1159,8 +1168,9 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   })
 
   fastify.post<{ Body: { sourceId?: string; mode?: 'single' | 'multi' | 'all'; activeSourceIds?: string[] }; Querystring: { lite?: string } }>('/api/get-active-sources', async (request) => {
-    const active = getActiveSourceContext()
-    if (request.query?.lite === '1' || request.query?.lite === 'true') {
+    const lite = request.query?.lite === '1' || request.query?.lite === 'true'
+    const active = getActiveSourceContext(lite ? { refreshGitMetadata: false } : {})
+    if (lite) {
       return { mode: active.mode, activeSourceIds: active.activeSourceIds, sources: [] }
     }
     const sources = getSourcesSafe().map(source => ({ ...source, active: active.activeSourceIds.includes(source.id), type: (source as any).type || 'unknown' }))
@@ -1677,9 +1687,9 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.get<{ Querystring: { lite?: string } }>('/api/sources/list', async (request, reply) => {
     try {
-      const active = getActiveSourceContext()
       const lite = request.query?.lite === '1' || request.query?.lite === 'true'
-      const sources = getSourcesSafe().map(source => ({
+      const active = getActiveSourceContext(lite ? { refreshGitMetadata: false } : {})
+      const sources = active.sources.map(source => ({
         id: source.id,
         label: source.label,
         enabled: source.enabled,

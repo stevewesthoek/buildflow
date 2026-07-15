@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { runWorkbenchCommandRequestSchema } from '@workbench/shared'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchWorkbenchCommand, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchCommand, sourceSelectionRequired, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 
@@ -45,25 +46,54 @@ export async function POST(request: NextRequest) {
     if (!auth.valid) return auth.error!
 
     deadline.setPhase('parse_body')
-    const body = await request.json()
-    const commandKind = typeof body.commandKind === 'string' ? body.commandKind : ''
-    const validationJobOperation = body.validationJobOperation === 'submit' || body.validationJobOperation === 'status'
-      ? body.validationJobOperation
-      : undefined
-    const timeoutMs = Math.min(commandTimeoutMs(commandKind, body.timeoutMs), deadline.transportTimeoutMs(11_500))
+    const rawBody = await request.json()
+    const parsed = runWorkbenchCommandRequestSchema.safeParse(rawBody)
+    if (!parsed.success) {
+      return NextResponse.json({
+        ok: false,
+        connected: true,
+        status: 'blocked',
+        error: {
+          code: 'INVALID_WORKBENCH_COMMAND_REQUEST',
+          message: 'The runWorkbenchCommand request failed strict validation.',
+          issues: parsed.error.issues.slice(0, 10).map(issue => ({
+            path: issue.path.join('.') || 'request',
+            message: issue.message
+          }))
+        },
+        diagnostics: deadline.diagnostics({ phase: 'invalid_command_request' })
+      }, { status: 400, headers: { 'Cache-Control': 'no-store' } })
+    }
+    const body = parsed.data
+    const sourceSelection = sourceSelectionRequired(body.sourceId)
+    if (sourceSelection) {
+      return NextResponse.json({
+        ok: false,
+        connected: true,
+        status: 'blocked',
+        error: sourceSelection,
+        sourceId: body.sourceId,
+        diagnostics: deadline.diagnostics({ phase: 'source_selection_required' })
+      }, { status: 400 })
+    }
+    const commandKind = body.commandKind
+    const validationJobOperation = 'validationJobOperation' in body ? body.validationJobOperation : undefined
+    const requestedTimeoutMs = 'timeoutMs' in body ? body.timeoutMs : undefined
+    const timeoutMs = Math.min(commandTimeoutMs(commandKind, requestedTimeoutMs), deadline.transportTimeoutMs(11_500))
     deadline.addDiagnostics({
-      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
+      sourceId: body.sourceId,
       commandKind,
-      paths: Array.isArray(body.paths) ? body.paths.filter((item: unknown): item is string => typeof item === 'string').slice(0, 10) : undefined
+      paths: 'paths' in body && Array.isArray(body.paths) ? body.paths.slice(0, 10) : undefined
     })
     deadline.setPhase('run_command')
-    const data = await dispatchWorkbenchCommand({ ...body, timeoutMs }, auth.bearerToken, {
+    const dispatchBody = commandKind === 'n8n_workflow_migration' ? body : { ...body, timeoutMs }
+    const data = await dispatchWorkbenchCommand(dispatchBody, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(11_750),
       diagnostics: deadline.diagnostics({
         phase: 'run_command',
         commandKind,
-        sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined
+        sourceId: body.sourceId
       })
     })
     const clean = stripBloat(data) as Record<string, unknown>
@@ -87,6 +117,16 @@ export async function POST(request: NextRequest) {
         commandKind,
         executable: clean.executable,
         args: clean.args,
+        shell: clean.shell,
+        matchStatus: clean.matchStatus,
+        resolvedRepositoryRoot: clean.resolvedRepositoryRoot,
+        filesChanged: clean.filesChanged,
+        artifactPath: clean.artifactPath,
+        artifactSha256: clean.artifactSha256,
+        workflowId: clean.workflowId,
+        workflowVersion: clean.workflowVersion,
+        workflowUpdatedAt: clean.workflowUpdatedAt,
+        networkWriteRequested: clean.networkWriteRequested,
         packageDir: clean.packageDir,
         requiredBranch: clean.requiredBranch,
         actualBranch: clean.actualBranch,
@@ -135,6 +175,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       ok: clean.status === 'completed' && resolvedExitCode === 0,
       status: clean.status,
+      sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       commandKind,
       validationJobOperation,
       validationJobId: typeof job?.jobId === 'string' ? job.jobId : undefined,
@@ -142,6 +183,18 @@ export async function POST(request: NextRequest) {
       updatedAt: job?.updatedAt,
       startedAt: job?.startedAt,
       completedAt: job?.completedAt,
+      executable: clean.executable ?? job?.executable,
+      args: clean.args ?? job?.args,
+      shell: clean.shell ?? job?.shell,
+      matchStatus: clean.matchStatus ?? job?.matchStatus,
+      resolvedRepositoryRoot: clean.resolvedRepositoryRoot ?? job?.resolvedRepositoryRoot,
+      filesChanged: clean.filesChanged ?? job?.filesChanged,
+      artifactPath: clean.artifactPath ?? job?.artifactPath,
+      artifactSha256: clean.artifactSha256 ?? job?.artifactSha256,
+      workflowId: clean.workflowId ?? job?.workflowId,
+      workflowVersion: clean.workflowVersion ?? job?.workflowVersion,
+      workflowUpdatedAt: clean.workflowUpdatedAt ?? job?.workflowUpdatedAt,
+      networkWriteRequested: clean.networkWriteRequested ?? job?.networkWriteRequested,
       stdout: resolvedStdout,
       stderr: resolvedStderr,
       exitCode: resolvedExitCode,
@@ -153,6 +206,9 @@ export async function POST(request: NextRequest) {
       requiredBranch: clean.requiredBranch ?? job?.requiredBranch,
       actualBranch: clean.actualBranch ?? job?.actualBranch,
       protectedPathsChanged: clean.protectedPathsChanged ?? job?.protectedPathsChanged,
+      requiresConfirmation: clean.requiresConfirmation,
+      confirmationToken: clean.confirmationToken,
+      reason: clean.reason,
       terminatedByInfrastructure: clean.terminatedByInfrastructure ?? job?.terminatedByInfrastructure,
       terminationReason: clean.terminationReason ?? job?.terminationReason ?? null,
       activity: clean.activity

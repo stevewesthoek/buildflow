@@ -98,6 +98,16 @@ Use Graphify for unknown architecture, then verify exact source before editing. 
 - Dashboard active context is not implicit GPT scope.
 - A conversation should lock one source until the user explicitly changes it.
 - Configured Git worktrees may be grouped for dashboard use, but Workbench must not switch the GPT’s source silently.
+- Call `getWorkbenchStatus?include=sources` before the first repo action and use one exact enabled returned ID.
+- Reject `default`, `workspace`, `current`, and `repo`; Workbench returns an actionable source-selection response instead of dispatching them.
+
+## Bounded command evidence
+
+`runWorkbenchCommand` supports direct read-only `rg` execution with structured argv. Regex alternation remains one argument and the runner guarantees `shell:false`. The response can project the verified executable, exact arguments, match status, repository root, changed paths, protected-path changes, bounded output, and exit status. `rg` no-match exit `1` is a completed result.
+
+The fixed `n8n_workflow_export` request is limited to the Brain source and approved workflow/artifact values. It requires an explicit backend-issued confirmation token and returns bounded artifact metadata. It cannot update, activate, delete, invoke, or deploy workflows. Confirmation-gated requests must stop until the user explicitly confirms.
+
+Runtime validation is ordered: restart Workbench, verify unified health, regenerate the schema from the healthy endpoint, re-import it, refresh the GPT, lock an exact source, and test only through the confirmation boundary. A deployment-plan safety rejection is a successful safety result, not permission to bypass the boundary.
 
 ## Write and Git behavior
 

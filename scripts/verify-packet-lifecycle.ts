@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'child_process'
 import fs from 'fs'
+import path from 'path'
 import {
   reserveWorkbenchPacket,
   claimNextWorkbenchPacket,
@@ -279,6 +281,13 @@ async function testCloseRunRetiresPackets() {
 
   const closed = closeWorkbenchRun({ sourceId, runId: run.id, summary: 'All intended work is complete.' })
   assert.equal(closed.status, 'completed')
+  assert.equal(closed.activeTaskId, undefined)
+  assert.equal(closed.resumeState.nextTaskId, undefined)
+  assert.deepEqual(closed.resumeState.nextFiles, [])
+  assert.deepEqual(closed.resumeState.nextSymbols, [])
+  assert.deepEqual(closed.resumeState.instructions, [])
+  assert.deepEqual(closed.nextActions, [])
+  assert.deepEqual(closed.resumeInstructions, [])
   assert.equal(getAgentJob(run.id)?.status, 'completed')
   assert.equal(getWorkbenchPacketRecord(queuedPacket.packetId)?.status, 'cancelled')
   assert.equal(getWorkbenchPacketRecord(pausedPacket.packetId)?.status, 'cancelled')
@@ -293,6 +302,19 @@ async function testCloseRunRetiresPackets() {
   assert.equal(retired?.leaseToken, undefined)
   assert.equal(retired?.leaseOwner, undefined)
   assert.equal(retired?.controlRequested, undefined)
+
+  const reloadedOutput = execFileSync(
+    path.join(process.cwd(), 'packages/cli/node_modules/.bin/tsx'),
+    ['-e', `import { getAgentJob } from './packages/cli/src/agent/agent-jobs'; console.log(JSON.stringify(getAgentJob('${run.id}')))`],
+    { cwd: process.cwd(), env: { ...process.env, WORKBENCH_CONFIG_DIR: testConfigDir }, encoding: 'utf8' }
+  )
+  const reloaded = JSON.parse(reloadedOutput) as ReturnType<typeof getAgentJob>
+  assert.equal(reloaded?.status, 'completed')
+  assert.equal(reloaded?.activeTaskId, undefined)
+  assert.equal(reloaded?.resumeState.nextTaskId, undefined)
+  assert.deepEqual(reloaded?.resumeState.instructions, [])
+  assert.deepEqual(reloaded?.nextActions, [])
+  assert.deepEqual(reloaded?.resumeInstructions, [])
   console.log('  ✓ close_run retires queued, paused, and expired running packets')
 }
 

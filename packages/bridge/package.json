@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@workbench/shared": "workspace:*",
-    "ws": "^8.14.0"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

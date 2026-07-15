@@ -3,6 +3,7 @@ import { createHash } from 'crypto'
 import { execFileSync, spawn } from 'child_process'
 import path from 'path'
 import { normalizeRepoRelativePath, validateWriteTarget } from './safe-access'
+import { runN8nWorkflowExportCapability } from './n8n-workflow-export'
 
 const MAX_OUTPUT_BYTES = 60_000
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -35,8 +36,9 @@ export type SafeCommandKind =
   | 'local_cli_github_auth_status'
   | 'local_cli_github_repo_view'
   | 'run_exact_command'
+  | 'n8n_workflow_export'
 
-export type ExactCommandExecutable = 'node' | 'pnpm'
+export type ExactCommandExecutable = 'node' | 'pnpm' | 'rg'
 
 export type ExactCommandPolicy = {
   denyDatabaseCommands?: boolean
@@ -51,6 +53,7 @@ export type ExactCommandRuntimeEvidence = {
   nodeVersion?: string
   nodeMajorVersion?: number
   pnpmVersion?: string
+  rgVersion?: string
 }
 
 export type LocalCliCapabilityProfile = {
@@ -98,7 +101,9 @@ export type SafeCommandRequest = {
   policy?: ExactCommandPolicy
   protectedPaths?: string[]
   requiredBranch?: string
-  networkAccess?: false
+  networkAccess?: boolean
+  workflowId?: string
+  outputPath?: string
   persistedValidation?: boolean
   confirmedByUser?: boolean
   confirmationToken?: string
@@ -109,8 +114,18 @@ export type SafeCommandResult = {
   commandKind: SafeCommandKind
   command: string[]
   cwd: string
-  executable?: ExactCommandExecutable
+  executable?: string
   args?: string[]
+  shell?: false
+  matchStatus?: 'matches_found' | 'no_matches' | 'execution_error'
+  resolvedRepositoryRoot?: string
+  filesChanged?: boolean
+  artifactPath?: string
+  artifactSha256?: string
+  workflowId?: string
+  workflowVersion?: string | number
+  workflowUpdatedAt?: string
+  networkWriteRequested?: false
   packageDir?: string
   requiredBranch?: string
   actualBranch?: string
@@ -500,7 +515,7 @@ function assertCommitPathAllowed(request: SafeCommandRequest, sourceRoot: string
 }
 
 function commandConfirmationToken(request: SafeCommandRequest, reason: string): string {
-  const parts = [request.sourceId, request.commandKind, reason, ...(request.paths || []), request.message || '', request.remote || '', request.branch || '']
+  const parts = [request.sourceId, request.commandKind, reason, ...(request.paths || []), request.message || '', request.remote || '', request.branch || '', request.workflowId || '', request.outputPath || '', String(request.networkAccess ?? '')]
   return `confirm-command:${Buffer.from(parts.join('|')).toString('base64url')}`
 }
 
@@ -873,6 +888,27 @@ async function runGithubCliBackedPush(request: SafeCommandRequest, remote: strin
   }
 }
 
+type SecurityFinding = {
+  id: string
+  ruleId: string
+  path: string
+  line: number
+  pattern: string
+  syntaxCategory: 'CallExpression' | 'ImportDeclaration' | 'LexicalFallback'
+  confidence: 'high' | 'medium'
+  executable: boolean
+  snippet: string
+}
+
+type JavaScriptLiteral = {
+  start: number
+  end: number
+  value: string
+}
+
+const JAVASCRIPT_SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts'])
+const NETWORK_PATTERN_NAMES = new Set(SECURITY_PATTERNS.forbidden_upload_network.map(entry => entry.name))
+
 function patternList(patternSet: SecurityPatternSet): Array<{ name: string; pattern: RegExp }> {
   if (patternSet === 'forbidden_all_high_risk') return Object.values(SECURITY_PATTERNS).flat()
   const selected = SECURITY_PATTERNS[patternSet]
@@ -880,41 +916,123 @@ function patternList(patternSet: SecurityPatternSet): Array<{ name: string; patt
   return selected
 }
 
-function scanSecurityPaths(request: SafeCommandRequest): SafeCommandResult {
-  const paths = assertExplicitPaths(request.paths)
-  const patternSet = request.patternSet || 'forbidden_all_high_risk'
-  const patterns = patternList(patternSet)
-  const findings: Array<{ path: string; line: number; pattern: string; snippet: string }> = []
+function maskJavaScriptInertText(content: string): { masked: string; literals: JavaScriptLiteral[] } {
+  const masked = [...content]
+  const literals: JavaScriptLiteral[] = []
+  const maskAt = (index: number) => {
+    if (masked[index] !== '\n' && masked[index] !== '\r') masked[index] = ' '
+  }
+  let index = 0
+  let templateExpressionDepth = 0
+  let mode: 'code' | 'single' | 'double' | 'line_comment' | 'block_comment' | 'template' = 'code'
+  let literalStart = -1
 
-  for (const relPath of paths) {
-    const fullPath = resolveSafePath(path.resolve(request.sourceRoot), relPath)
-    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) throw new Error(`scan path not found: ${relPath}`)
-    const size = fs.statSync(fullPath).size
-    if (size > TEXT_SCAN_MAX_BYTES) throw new Error(`scan file too large: ${relPath}`)
-    const content = fs.readFileSync(fullPath, 'utf8')
-    const lines = content.split(/\r?\n/)
-    lines.forEach((line, index) => {
-      for (const entry of patterns) {
-        if (entry.pattern.test(line)) {
-          findings.push({ path: relPath, line: index + 1, pattern: entry.name, snippet: redactOutput(line).slice(0, 240) })
+  while (index < content.length) {
+    const current = content[index]
+    const next = content[index + 1]
+
+    if (mode === 'line_comment') {
+      if (current === '\n') mode = 'code'
+      else maskAt(index)
+      index += 1
+      continue
+    }
+    if (mode === 'block_comment') {
+      maskAt(index)
+      if (current === '*' && next === '/') {
+        maskAt(index + 1)
+        index += 2
+        mode = 'code'
+      } else index += 1
+      continue
+    }
+    if (mode === 'single' || mode === 'double') {
+      const quote = mode === 'single' ? "'" : '"'
+      maskAt(index)
+      if (current === '\\' && next !== undefined) {
+        maskAt(index + 1)
+        index += 2
+        continue
+      }
+      if (current === quote) {
+        literals.push({ start: literalStart, end: index + 1, value: content.slice(literalStart + 1, index) })
+        literalStart = -1
+        mode = 'code'
+      }
+      index += 1
+      continue
+    }
+    if (mode === 'template') {
+      maskAt(index)
+      if (current === '\\' && next !== undefined) {
+        maskAt(index + 1)
+        index += 2
+        continue
+      }
+      if (current === '\`') {
+        mode = 'code'
+        index += 1
+        continue
+      }
+      if (current === '$' && next === '{') {
+        maskAt(index + 1)
+        templateExpressionDepth = 1
+        mode = 'code'
+        index += 2
+        continue
+      }
+      index += 1
+      continue
+    }
+
+    if (current === '/' && next === '/') {
+      maskAt(index)
+      maskAt(index + 1)
+      mode = 'line_comment'
+      index += 2
+      continue
+    }
+    if (current === '/' && next === '*') {
+      maskAt(index)
+      maskAt(index + 1)
+      mode = 'block_comment'
+      index += 2
+      continue
+    }
+    if (current === "'") {
+      literalStart = index
+      maskAt(index)
+      mode = 'single'
+      index += 1
+      continue
+    }
+    if (current === '"') {
+      literalStart = index
+      maskAt(index)
+      mode = 'double'
+      index += 1
+      continue
+    }
+    if (current === '\`') {
+      maskAt(index)
+      mode = 'template'
+      index += 1
+      continue
+    }
+    if (templateExpressionDepth > 0) {
+      if (current === '{') templateExpressionDepth += 1
+      if (current === '}') {
+        templateExpressionDepth -= 1
+        if (templateExpressionDepth === 0) {
+          maskAt(index)
+          mode = 'template'
         }
       }
-    })
+    }
+    index += 1
   }
 
-  return {
-    status: findings.length === 0 ? 'completed' : 'failed',
-    commandKind: request.commandKind,
-    command: ['buildflow', 'security_scan_paths', patternSet],
-    cwd: path.resolve(request.sourceRoot),
-    exitCode: findings.length === 0 ? 0 : 1,
-    signal: null,
-    stdout: JSON.stringify({ findings }, null, 2),
-    stderr: '',
-    outputTruncated: false,
-    durationMs: 0,
-    details: { findings }
-  }
+  return { masked: masked.join(''), literals }
 }
 
 async function validateJsonFiles(request: SafeCommandRequest): Promise<SafeCommandResult> {
@@ -967,7 +1085,8 @@ export function getAllowedCommandKinds(): SafeCommandKind[] {
     'diagnose_performance',
     'local_cli_github_auth_status',
     'local_cli_github_repo_view',
-    'run_exact_command'
+    'run_exact_command',
+    'n8n_workflow_export'
   ]
 }
 
@@ -1184,7 +1303,45 @@ function buildInlineNodeValidationSource(sourceRoot: string, cwd: string, userSo
 `
 }
 
-function exactValidateArgs(sourceRoot: string, cwd: string, args: unknown): string[] {
+const EXACT_STANDALONE_SHELL_CONTROL_TOKENS = new Set([
+  '|', '||', '&&', ';', '>', '>>', '<', '<<', '1>', '1>>', '2>', '2>>', '&>'
+])
+
+const RIPGREP_BOOLEAN_FLAGS = new Set([
+  '-n', '--line-number', '-i', '--ignore-case', '-F', '--fixed-strings', '--hidden'
+])
+
+const RIPGREP_VALUE_FLAGS = new Set(['-e', '--regexp', '-g', '--glob'])
+const RIPGREP_PROHIBITED_PATH_PARTS = new Set([
+  '.git', 'node_modules', 'vendor', '.next', '.turbo', 'dist', 'build', 'coverage', 'out', '.buildflow', 'graphify-out'
+])
+const RIPGREP_MANDATORY_EXCLUSIONS = [
+  '!**/.git/**',
+  '!**/node_modules/**',
+  '!**/vendor/**',
+  '!**/.next/**',
+  '!**/.turbo/**',
+  '!**/dist/**',
+  '!**/build/**',
+  '!**/coverage/**',
+  '!**/out/**',
+  '!**/.buildflow/**',
+  '!**/graphify-out/**',
+  '!**/.env',
+  '!**/.env.*',
+  '!**/*.pem',
+  '!**/*.key',
+  '!**/*.p12',
+  '!**/*.pfx'
+]
+
+function exactRejectShellComposition(value: string, index: number): void {
+  if (/\0|[\r\n]/.test(value)) throw new Error(`args[${index}] contains prohibited control characters`)
+  if (EXACT_STANDALONE_SHELL_CONTROL_TOKENS.has(value.trim())) throw new Error(`args[${index}] is a prohibited shell control token`)
+  if (/`|\$\(/.test(value)) throw new Error(`args[${index}] contains prohibited command substitution syntax`)
+}
+
+function exactValidateNodeOrPnpmArgs(sourceRoot: string, cwd: string, args: unknown): string[] {
   if (!Array.isArray(args)) throw new Error('args must be an array')
   if (args.length > 0 && args[0] === '-e') {
     if (args.length !== 2 || typeof args[1] !== 'string') throw new Error('inline Node validation requires args ["-e", JavaScriptSource]')
@@ -1202,6 +1359,91 @@ function exactValidateArgs(sourceRoot: string, cwd: string, args: unknown): stri
     }
     return value
   })
+}
+
+function exactValidateRipgrepPath(sourceRoot: string, value: string, index: number): string {
+  if (path.isAbsolute(value)) throw new Error(`args[${index}] contains an absolute ripgrep search path`)
+  const normalized = normalizeRepoRelativePath(value)
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.includes('..')) throw new Error(`args[${index}] contains repository traversal`)
+  if (parts.some(part => RIPGREP_PROHIBITED_PATH_PARTS.has(part.toLowerCase()))) throw new Error(`args[${index}] targets a prohibited repository tree`)
+  if (exactIsProtectedFile(normalized)) throw new Error(`args[${index}] targets a protected path`)
+  const resolved = path.resolve(sourceRoot, normalized || '.')
+  if (resolved !== sourceRoot && !resolved.startsWith(`${sourceRoot}${path.sep}`)) throw new Error(`args[${index}] resolves outside the source root`)
+  if (!fs.existsSync(resolved)) throw new Error(`args[${index}] search path does not exist`)
+  exactRealpathWithin(sourceRoot, resolved, `args[${index}] search path`)
+  return value
+}
+
+function exactValidateRipgrepGlob(value: string, index: number): void {
+  const normalized = value.toLowerCase().replace(/\\/g, '/')
+  if ([...RIPGREP_PROHIBITED_PATH_PARTS].some(part => normalized.includes(part))) throw new Error(`args[${index}] glob references a prohibited repository tree`)
+  if (/(^|\/)\.env(?:\.|$)|\.(?:pem|key|p12|pfx)(?:$|[/*?\[\]{}])/.test(normalized)) throw new Error(`args[${index}] glob references protected files`)
+}
+
+function exactValidateRipgrepArgs(sourceRoot: string, cwd: string, args: unknown): { args: string[]; searchPaths: string[] } {
+  if (cwd !== sourceRoot) throw new Error('direct rg execution requires packageDir "." or no packageDir')
+  if (!Array.isArray(args) || args.length === 0) throw new Error('rg args must be a non-empty array')
+  if (args.length > 100) throw new Error('rg args exceed the bounded argument limit')
+
+  const values = args.map((value, index) => {
+    if (typeof value !== 'string' || value.length === 0 || value.length > 500) throw new Error(`args[${index}] must be a non-empty string of at most 500 characters`)
+    exactRejectShellComposition(value, index)
+    return value
+  })
+
+  const optionArgs: string[] = []
+  const positional: Array<{ value: string; index: number }> = []
+  let explicitPatternCount = 0
+  let seenPositional = false
+
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index]
+    if (value === '--') throw new Error('rg argument terminator is not supported; use -e for patterns beginning with a dash')
+    if (value === '--pre' || value.startsWith('--pre=') || value === '--pre-glob' || value.startsWith('--pre-glob=')) {
+      throw new Error(`args[${index}] enables a prohibited ripgrep preprocessor`)
+    }
+    if (RIPGREP_BOOLEAN_FLAGS.has(value) || (/^-[niF]{2,}$/.test(value) && !value.includes('e'))) {
+      if (seenPositional) throw new Error(`args[${index}] places an option after the pattern or search path`)
+      optionArgs.push(value)
+      continue
+    }
+    if (RIPGREP_VALUE_FLAGS.has(value)) {
+      if (seenPositional) throw new Error(`args[${index}] places an option after the pattern or search path`)
+      const optionValue = values[index + 1]
+      if (optionValue === undefined) throw new Error(`args[${index}] requires a value`)
+      if (value === '-e' || value === '--regexp') explicitPatternCount += 1
+      else exactValidateRipgrepGlob(optionValue, index + 1)
+      optionArgs.push(value, optionValue)
+      index += 1
+      continue
+    }
+    if (value.startsWith('--regexp=')) {
+      if (seenPositional) throw new Error(`args[${index}] places an option after the pattern or search path`)
+      if (value.length === '--regexp='.length) throw new Error(`args[${index}] requires a pattern`)
+      explicitPatternCount += 1
+      optionArgs.push(value)
+      continue
+    }
+    if (value.startsWith('--glob=')) {
+      if (seenPositional) throw new Error(`args[${index}] places an option after the pattern or search path`)
+      const glob = value.slice('--glob='.length)
+      if (!glob) throw new Error(`args[${index}] requires a glob`)
+      exactValidateRipgrepGlob(glob, index)
+      optionArgs.push(value)
+      continue
+    }
+    if (value.startsWith('-')) throw new Error(`args[${index}] uses an unsupported ripgrep option`)
+    seenPositional = true
+    positional.push({ value, index })
+  }
+
+  const searchPathEntries = explicitPatternCount > 0 ? positional : positional.slice(1)
+  if (explicitPatternCount === 0 && positional.length === 0) throw new Error('rg requires a pattern')
+  if (searchPathEntries.length === 0) throw new Error('rg requires at least one repository-relative search path')
+  const searchPaths = searchPathEntries.map(entry => exactValidateRipgrepPath(sourceRoot, entry.value, entry.index))
+  const mandatoryArgs = RIPGREP_MANDATORY_EXCLUSIONS.flatMap(glob => ['--glob', glob])
+  return { args: [...optionArgs, ...mandatoryArgs, ...positional.map(entry => entry.value)], searchPaths }
 }
 
 function exactResolveNode20(): { nodeExecutable: string; binDir: string; nodeVersion: string; nodeMajorVersion: number } {
@@ -1349,10 +1591,15 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
   exactRealpathWithin(sourceRoot, cwd, 'packageDir')
   const actualBranch = currentBranch(sourceRoot)
   if (request.requiredBranch && actualBranch !== request.requiredBranch) return exactBlockedResult(request, 'branch_mismatch', actualBranch)
-  if (request.executable !== 'node' && request.executable !== 'pnpm') throw new Error('executable must be node or pnpm')
-  const args = exactValidateArgs(sourceRoot, cwd, request.args)
-  const runtime = exactResolveNode20()
-  if (request.nodeVersion === '20' && runtime.nodeMajorVersion !== 20) throw new Error('Resolved child runtime is not Node 20')
+  if (request.executable !== 'node' && request.executable !== 'pnpm' && request.executable !== 'rg') throw new Error('executable must be node, pnpm, or rg')
+
+  const isRipgrep = request.executable === 'rg'
+  if (isRipgrep && request.nodeVersion !== undefined) throw new Error('nodeVersion is not supported for direct rg execution')
+  if (isRipgrep && request.networkAccess !== false) throw new Error('direct rg execution requires networkAccess: false')
+  const ripgrepValidation = isRipgrep ? exactValidateRipgrepArgs(sourceRoot, cwd, request.args) : undefined
+  const args = ripgrepValidation?.args || exactValidateNodeOrPnpmArgs(sourceRoot, cwd, request.args)
+  const runtime = isRipgrep ? undefined : exactResolveNode20()
+  if (request.nodeVersion === '20' && runtime?.nodeMajorVersion !== 20) throw new Error('Resolved child runtime is not Node 20')
   const { resolvedScriptName, scriptCommand } = exactPackageScript(cwd, request.executable, args)
   exactAssertPolicy(scriptCommand, request.policy)
   const protectedPaths = (request.protectedPaths || []).map(item => assertSafeRepoPath(item, 'protectedPath'))
@@ -1360,22 +1607,28 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
   const before = exactGitSnapshot(sourceRoot)
   const mandatoryProtectedBefore = exactProtectedFilesystemSnapshot(sourceRoot)
   const pnpmName = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
-  const pnpmCandidates = [
+  const pnpmCandidates = runtime ? [
     path.join(runtime.binDir, pnpmName),
     process.env.PNPM_HOME ? path.join(process.env.PNPM_HOME, pnpmName) : undefined,
     ...(process.env.PATH || '').split(path.delimiter).filter(Boolean).map(entry => path.join(entry, pnpmName))
-  ].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0)
+  ].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0) : []
+  const rgName = process.platform === 'win32' ? 'rg.exe' : 'rg'
+  const rgCandidates = (process.env.PATH || '').split(path.delimiter).filter(Boolean).map(entry => path.join(entry, rgName))
   const executablePath = request.executable === 'node'
-    ? runtime.nodeExecutable
-    : pnpmCandidates.find(candidate => fs.existsSync(candidate))
-  if (!executablePath) throw new Error(`Unable to resolve ${request.executable} in the Node 20 environment`)
+    ? runtime!.nodeExecutable
+    : request.executable === 'pnpm'
+      ? pnpmCandidates.find(candidate => fs.existsSync(candidate))
+      : rgCandidates.find(candidate => fs.existsSync(candidate))
+  if (!executablePath) throw new Error(`Unable to resolve allowlisted executable: ${request.executable}`)
+  const executionBinDir = runtime?.binDir || path.dirname(executablePath)
+  const executionEnv = exactMinimalEnv(executionBinDir)
   const startedAt = Date.now()
   const outputState = { bytes: 0, truncated: false }
   const inlineNode = request.executable === 'node' && Array.isArray(request.args) && request.args[0] === '-e'
   const timeoutCeiling = request.persistedValidation ? MAX_TIMEOUT_MS : 12_000
   const timeoutMs = Math.min(timeoutCeiling, Math.max(1_000, request.timeoutMs || 8_000))
   const result = await new Promise<SafeCommandResult>((resolve, reject) => {
-    const child = spawn(executablePath, args, { cwd, shell: false, detached: process.platform !== 'win32', env: exactMinimalEnv(runtime.binDir) })
+    const child = spawn(executablePath, args, { cwd, shell: false, detached: process.platform !== 'win32', env: executionEnv })
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -1393,7 +1646,7 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
       killTimer = setTimeout(() => signalProcess('SIGKILL'), 500)
     }, timeoutMs)
     const terminateForOutputLimit = () => {
-      if (!inlineNode || !outputState.truncated || outputLimitExceeded) return
+      if ((!inlineNode && !isRipgrep) || !outputState.truncated || outputLimitExceeded) return
       outputLimitExceeded = true
       clearTimeout(timer)
       signalProcess('SIGTERM')
@@ -1411,36 +1664,89 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
     child.on('close', (exitCode, signal) => {
       clearTimeout(timer)
       if (killTimer) clearTimeout(killTimer)
+      const matchStatus = isRipgrep
+        ? exitCode === 0 ? 'matches_found' : exitCode === 1 ? 'no_matches' : 'execution_error'
+        : undefined
+      const status = outputLimitExceeded
+        ? 'failed'
+        : timedOut
+          ? 'timed_out'
+          : isRipgrep && exitCode === 1
+            ? 'completed'
+            : exitCode === 0
+              ? 'completed'
+              : 'failed'
       resolve({
-        status: outputLimitExceeded ? 'failed' : timedOut ? 'timed_out' : exitCode === 0 ? 'completed' : 'failed', commandKind: request.commandKind,
-        reason: outputLimitExceeded ? 'output_limit_exceeded' : undefined,
-        command: [request.executable!, ...args], cwd, executable: request.executable, args, packageDir: request.packageDir || '.',
-        requiredBranch: request.requiredBranch, actualBranch, runtime: { requestedNodeVersion: request.nodeVersion, nodeExecutable: runtime.nodeExecutable, nodeVersion: runtime.nodeVersion, nodeMajorVersion: runtime.nodeMajorVersion },
-        exitCode, signal, stdout, stderr, outputTruncated: outputState.truncated, durationMs: Date.now() - startedAt,
-        changedPaths: [], protectedPathsChanged: [], riskLevel: 'medium', requiresConfirmation: false,
-        details: resolvedScriptName ? { resolvedScriptName } : undefined
+        status,
+        commandKind: request.commandKind,
+        reason: outputLimitExceeded ? 'output_limit_exceeded' : isRipgrep && exitCode !== null && exitCode >= 2 ? 'ripgrep_execution_error' : undefined,
+        command: [request.executable!, ...args],
+        cwd,
+        executable: request.executable,
+        args,
+        shell: false,
+        matchStatus,
+        resolvedRepositoryRoot: sourceRoot,
+        filesChanged: false,
+        packageDir: request.packageDir || '.',
+        requiredBranch: request.requiredBranch,
+        actualBranch,
+        runtime: runtime ? { requestedNodeVersion: request.nodeVersion, nodeExecutable: runtime.nodeExecutable, nodeVersion: runtime.nodeVersion, nodeMajorVersion: runtime.nodeMajorVersion } : undefined,
+        exitCode,
+        signal,
+        stdout,
+        stderr,
+        outputTruncated: outputState.truncated,
+        durationMs: Date.now() - startedAt,
+        changedPaths: [],
+        protectedPathsChanged: [],
+        riskLevel: 'medium',
+        requiresConfirmation: false,
+        details: isRipgrep
+          ? { searchPaths: ripgrepValidation?.searchPaths || [], exactInvocation: { executable: request.executable, args, shell: false } }
+          : resolvedScriptName ? { resolvedScriptName } : undefined
       })
     })
   })
   if (request.executable === 'pnpm') {
-    try { result.runtime = { ...result.runtime, pnpmVersion: execFileSync(executablePath, ['--version'], { cwd, env: exactMinimalEnv(runtime.binDir), encoding: 'utf8', timeout: 2_000 }).trim() } } catch { /* retain command evidence */ }
+    try { result.runtime = { ...result.runtime, pnpmVersion: execFileSync(executablePath, ['--version'], { cwd, env: executionEnv, encoding: 'utf8', timeout: 2_000 }).trim() } } catch { /* retain command evidence */ }
+  } else if (request.executable === 'rg') {
+    try { result.runtime = { rgVersion: execFileSync(executablePath, ['--version'], { cwd, env: executionEnv, encoding: 'utf8', timeout: 2_000 }).split('\n')[0].trim() } } catch { /* retain command evidence */ }
   }
   const mandatoryProtectedAfter = exactProtectedFilesystemSnapshot(sourceRoot)
   result.changedPaths = exactChangedPaths(before, exactGitSnapshot(sourceRoot))
+  result.filesChanged = result.changedPaths.length > 0
   const callerProtectedChanges = protectedPaths.filter(item => protectedBefore.get(item) !== exactPathHash(sourceRoot, item))
   const mandatoryProtectedChanges = exactProtectedChanges(mandatoryProtectedBefore, mandatoryProtectedAfter)
   result.protectedPathsChanged = [...new Set([...callerProtectedChanges, ...mandatoryProtectedChanges])].sort()
   if (result.protectedPathsChanged.length > 0) {
     result.status = 'blocked'
     result.reason = mandatoryProtectedChanges.length > 0 ? 'mandatory_protected_path_changed' : 'protected_path_changed'
+  } else if (isRipgrep && result.filesChanged) {
+    result.status = 'blocked'
+    result.reason = 'read_only_command_changed_worktree'
   }
   return result
+}
+
+const n8nWorkflowExportDependencies = {
+  hasCommandConfirmation,
+  needsConfirmationResult,
+  resolveSafePath,
+  exactRealpathWithin,
+  assertSafeRepoPath,
+  exactPathHash,
+  exactGitSnapshot,
+  exactChangedPaths,
+  exactProtectedFilesystemSnapshot,
+  exactProtectedChanges
 }
 
 export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeCommandResult> {
   const sourceRoot = path.resolve(request.sourceRoot)
 
   if (request.commandKind === 'run_exact_command') return runExactCommand(request)
+  if (request.commandKind === 'n8n_workflow_export') return runN8nWorkflowExportCapability(request, n8nWorkflowExportDependencies)
 
   if (request.commandKind === 'verify_write_policy') return runRepoLocalTsxScript(request, 'scripts/verify-write-policy.ts')
   if (request.commandKind === 'verify_source_reindex_resilience') return runRepoLocalTsxScript(request, 'scripts/verify-source-reindex-resilience.ts')
@@ -1575,4 +1881,123 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
   }
 
   return runProcess(request, command, sourceRoot)
+}
+
+function lineNumberAt(content: string, index: number): number {
+  let line = 1
+  for (let cursor = 0; cursor < index; cursor += 1) if (content[cursor] === '\n') line += 1
+  return line
+}
+
+function securityFinding(
+  content: string,
+  relPath: string,
+  index: number,
+  ruleId: string,
+  pattern: string,
+  syntaxCategory: SecurityFinding['syntaxCategory'],
+  confidence: SecurityFinding['confidence'],
+  executable: boolean
+): SecurityFinding {
+  const line = lineNumberAt(content, index)
+  const snippet = redactOutput(content.split(/\r?\n/)[line - 1] || '').slice(0, 240)
+  const id = createHash('sha256').update(`${ruleId}\0${relPath}\0${line}\0${snippet}`).digest('hex').slice(0, 16)
+  return { id, ruleId, path: relPath, line, pattern, syntaxCategory, confidence, executable, snippet }
+}
+
+function scanJavaScriptNetworkUsage(content: string, relPath: string): SecurityFinding[] {
+  const { masked, literals } = maskJavaScriptInertText(content)
+  const findings: SecurityFinding[] = []
+  const seen = new Set<string>()
+  const add = (index: number, ruleId: string, pattern: string, syntaxCategory: SecurityFinding['syntaxCategory']) => {
+    const key = `${ruleId}:${index}`
+    if (seen.has(key)) return
+    seen.add(key)
+    findings.push(securityFinding(content, relPath, index, ruleId, pattern, syntaxCategory, 'high', true))
+  }
+  const runRule = (ruleId: string, pattern: string, expression: RegExp) => {
+    for (const match of masked.matchAll(expression)) add(match.index || 0, ruleId, pattern, 'CallExpression')
+  }
+
+  runRule('forbidden_upload_network.fetch_member_call', 'network_fetch', /\b(?:globalThis|window|self)\s*\.\s*fetch\s*\(/g)
+  for (const match of masked.matchAll(/\bfetch\s*\(/g)) {
+    const index = match.index || 0
+    const prefix = masked.slice(0, index).trimEnd()
+    if (prefix.endsWith('.')) continue
+    add(index, 'forbidden_upload_network.fetch_call', 'network_fetch', 'CallExpression')
+  }
+  runRule('forbidden_upload_network.axios_member_call', 'network_fetch', /\baxios\s*\.\s*(?:get|post|put|patch|delete|request|head|options)\s*\(/g)
+  runRule('forbidden_upload_network.axios_call', 'network_fetch', /\baxios\s*\(/g)
+  runRule('forbidden_upload_network.xml_http_request', 'network_fetch', /\b(?:new\s+)?XMLHttpRequest\s*\(/g)
+  runRule('forbidden_upload_network.curl_or_wget_call', 'curl_or_wget', /\b(?:curl|wget)\s*\(/g)
+  runRule('forbidden_upload_network.form_data_call', 'upload_keyword', /\b(?:new\s+)?FormData\s*\(/g)
+  runRule('forbidden_upload_network.upload_call', 'upload_keyword', /\bupload\s*\(/gi)
+
+  for (const literal of literals) {
+    const moduleName = literal.value.toLowerCase()
+    if (moduleName !== 'node-fetch' && moduleName !== 'axios') continue
+    const lineStart = masked.lastIndexOf('\n', literal.start) + 1
+    const prefix = masked.slice(lineStart, literal.start)
+    if (/\bfrom\s*$/.test(prefix) || /\brequire\s*\(\s*$/.test(prefix) || /\bimport\s*\(\s*$/.test(prefix)) {
+      add(literal.start, `forbidden_upload_network.${moduleName === 'axios' ? 'axios' : 'node_fetch'}_import`, 'network_fetch', 'ImportDeclaration')
+    }
+  }
+
+  return findings.sort((left, right) => left.line - right.line || left.ruleId.localeCompare(right.ruleId) || left.id.localeCompare(right.id))
+}
+
+function scanSecurityPaths(request: SafeCommandRequest): SafeCommandResult {
+  const paths = assertExplicitPaths(request.paths)
+  const patternSet = request.patternSet || 'forbidden_all_high_risk'
+  const patterns = patternList(patternSet)
+  const includesNetworkRules = patternSet === 'forbidden_upload_network' || patternSet === 'forbidden_all_high_risk'
+  const findings: SecurityFinding[] = []
+
+  for (const relPath of paths) {
+    const fullPath = resolveSafePath(path.resolve(request.sourceRoot), relPath)
+    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) throw new Error(`scan path not found: ${relPath}`)
+    const size = fs.statSync(fullPath).size
+    if (size > TEXT_SCAN_MAX_BYTES) throw new Error(`scan file too large: ${relPath}`)
+    const content = fs.readFileSync(fullPath, 'utf8')
+    const isJavaScriptSource = JAVASCRIPT_SOURCE_EXTENSIONS.has(path.extname(relPath).toLowerCase())
+
+    if (includesNetworkRules && isJavaScriptSource) findings.push(...scanJavaScriptNetworkUsage(content, relPath))
+
+    const lexicalPatterns = includesNetworkRules && isJavaScriptSource
+      ? patterns.filter(entry => !NETWORK_PATTERN_NAMES.has(entry.name))
+      : patterns
+    const lines = content.split(/\r?\n/)
+    let offset = 0
+    lines.forEach(line => {
+      for (const entry of lexicalPatterns) {
+        if (!entry.pattern.test(line)) continue
+        if (isJavaScriptSource && entry.name === 'secret_assignment') {
+          const assignmentIndex = line.indexOf('=') >= 0 ? line.indexOf('=') : line.indexOf(':')
+          const rightHandSide = assignmentIndex >= 0 ? line.slice(assignmentIndex + 1).trimStart() : ''
+          const assemblesKnownNetworkToken = rightHandSide.startsWith('[')
+            && /\.join\(\s*['"]{2}\s*\)/.test(rightHandSide)
+            && /\b(fetch|axios|XMLHttpRequest|curl|wget|upload|multipart|formData)\b/i.test(rightHandSide)
+          if (assemblesKnownNetworkToken) continue
+        }
+        findings.push(securityFinding(content, relPath, offset, `${patternSet}.${entry.name}`, entry.name, 'LexicalFallback', 'medium', true))
+      }
+      offset += line.length + 1
+    })
+  }
+
+  findings.sort((left, right) => left.path.localeCompare(right.path) || left.line - right.line || left.ruleId.localeCompare(right.ruleId) || left.id.localeCompare(right.id))
+
+  return {
+    status: findings.length === 0 ? 'completed' : 'failed',
+    commandKind: request.commandKind,
+    command: ['buildflow', 'security_scan_paths', patternSet],
+    cwd: path.resolve(request.sourceRoot),
+    exitCode: findings.length === 0 ? 0 : 1,
+    signal: null,
+    stdout: JSON.stringify({ findings }, null, 2),
+    stderr: '',
+    outputTruncated: false,
+    durationMs: 0,
+    details: { findings }
+  }
 }

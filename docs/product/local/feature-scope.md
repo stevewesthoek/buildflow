@@ -7,6 +7,7 @@ Current and planned Workbench Local features:
 - local indexing
 - dashboard active context
 - explicit-source Custom GPT actions
+- strict source locking with placeholder-source rejection
 - safe write mode
 - local dashboard
 - local activity
@@ -15,6 +16,10 @@ Current and planned Workbench Local features:
 - local activity/event history
 - local handoff objects and links
 - optional confirmed local runner
+- bounded direct `rg` execution with regex alternation and `shell:false`
+- projected command evidence (`executable`, argv, match status, repository and path-change evidence)
+- confirmation-gated fixed Brain `n8n_workflow_export`
+- syntax-aware network/security scanning for JavaScript and TypeScript
 - local plans and tasks
 - Custom GPT and OpenAPI setup with a user-owned endpoint
 - verification and test scripts

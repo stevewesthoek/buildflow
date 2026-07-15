@@ -18,7 +18,7 @@
     "sourceMap": true,
     "baseUrl": ".",
     "paths": {
-      "@workbench/shared": ["packages/shared/src"],
+      "@workbench/shared": ["packages/shared/src/index.ts"],
       "@workbench/shared/*": ["packages/shared/src/*"]
     }
   }

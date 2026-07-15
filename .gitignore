@@ -16,6 +16,8 @@ pnpm-lock.yaml
 node-compile-cache/
 graphify-out/
 runtime/
+.codex/config.toml
+.codex/*.backup.toml
 
 # Commit pnpm lockfile for reproducible Docker/GitHub Actions builds
 !pnpm-lock.yaml

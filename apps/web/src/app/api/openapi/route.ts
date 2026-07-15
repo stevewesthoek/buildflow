@@ -56,7 +56,7 @@ const openapi = {
                 additionalProperties: false,
                 properties: {
                   mode: { type: 'string', enum: ['prepare_task_context', 'read_paths', 'search_and_read', 'list_files', 'search', 'grep_context', 'read_range', 'read_symbol', 'graph_context', 'active_run'], description: 'Mode determines operation. Use active_run to resume source-scoped goal work; graph_context for unknown areas; exact read modes for known paths or symbols.' },
-                  sourceId: { type: 'string' },
+                  sourceId: { type: 'string', description: 'Required exact enabled source ID returned by getWorkbenchStatus with include=sources. Never use placeholder values such as default, workspace, current, or repo.' },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 5, description: 'At most 5 exact repo-relative paths for GPT use. For read_paths, enforced; for search_and_read, used as filter.' },
                   query: { type: 'string', maxLength: 200, description: 'Concrete task goal or search query. Broad unscoped queries ("all", "repo", "code") fail fast with narrower-mode guidance. For graph_context, ranks cached Graphify navigation hints. For search modes, must be specific (e.g., "function name", "error message pattern").' },
                   path: { type: 'string', description: 'Folder for list_files, or exact repo-relative file path for grep_context/read_range/read_symbol.' },
@@ -100,7 +100,7 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  sourceId: { type: 'string' },
+                  sourceId: { type: 'string', description: 'Required exact enabled source ID returned by getWorkbenchStatus with include=sources. Never use placeholder values such as default, workspace, current, or repo.' },
                   changeType: {
                     type: 'string',
                     enum: ['create', 'overwrite', 'patch', 'append', 'delete_file', 'move', 'create_run', 'resume_run', 'close_run', 'packet_preflight', 'packet_claim', 'packet_plan', 'packet_execute'],
@@ -126,7 +126,7 @@ const openapi = {
                       runId: { type: 'string' },
                       packetId: { type: 'string', minLength: 8, maxLength: 160 },
                       idempotencyKey: { type: 'string', minLength: 8, maxLength: 160, description: 'Must equal runId:packetId.' },
-                      sourceId: { type: 'string' },
+                      sourceId: { type: 'string', description: 'Required exact enabled source ID returned by getWorkbenchStatus with include=sources. Never use placeholder values such as default, workspace, current, or repo.' },
                       taskId: { type: 'string' },
                       goalSummary: { type: 'string', maxLength: 500 },
                       expectedHead: { type: 'string', minLength: 7, maxLength: 64 },
@@ -212,7 +212,7 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  sourceId: { type: 'string' },
+                  sourceId: { type: 'string', description: 'Required exact enabled source ID returned by getWorkbenchStatus with include=sources. Never use placeholder values such as default, workspace, current, or repo.' },
                   paths: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 50, description: 'Specific files to stage — never commit everything at once' },
                   message: { type: 'string', description: 'Commit message, e.g. "fix: normalize path in read-context route"' },
                   confirmedByUser: { type: 'boolean', description: 'Only set true when committing a confirmation-gated exact-path change the user explicitly approved.' },
@@ -235,7 +235,7 @@ const openapi = {
       post: {
         operationId: 'runWorkbenchCommand',
         summary: 'Run or track allowlisted command with a 12s GPT cap',
-        description: 'Run fast allowlisted commands synchronously, or submit/check a persisted allowlisted validation job that continues outside the GPT request. Status checks reuse the same job ID and never start a duplicate command.',
+        description: 'Run allowlisted commands or persisted validation jobs. If no source is locked, call getWorkbenchStatus(include=sources); use one exact returned sourceId. Never use default, workspace, current, or repo. Controlled workflow operations require a configured grant.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -246,10 +246,10 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  sourceId: { type: 'string' },
+                  sourceId: { type: 'string', minLength: 1, pattern: '^(?!default$|workspace$|current$|repo$).+', examples: ['workbench-example-source', 'migration-example-source'], description: 'Required exact enabled source ID returned by getWorkbenchStatus with include=sources. Never use placeholder values such as default, workspace, current, or repo. Controlled workflow operations require Workbench-owned grants.' },
                   commandKind: {
                     type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance', 'run_exact_command']
+                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance', 'run_exact_command', 'n8n_workflow_export', 'n8n_workflow_migration']
                   },
                   validationJobOperation: { type: 'string', enum: ['submit', 'status'], description: 'Submit an allowlisted persisted validation job or check an existing job without resubmitting it.' },
                   validationJobId: { type: 'string', description: 'Stable persisted validation job ID returned by submit and reused for status checks.' },
@@ -258,7 +258,7 @@ const openapi = {
                   runId: { type: 'string', description: 'Optional persistent Workbench run linked to the validation job.' },
                   packetId: { type: 'string', description: 'Optional Workbench packet linked to the validation job.' },
                   taskId: { type: 'string', description: 'Optional persistent run task linked to the validation job.' },
-                  executable: { type: 'string', enum: ['node', 'pnpm'], description: 'Allowlisted executable for run_exact_command.' },
+                  executable: { type: 'string', enum: ['node', 'pnpm', 'rg'], description: 'Allowlisted executable for run_exact_command. Direct rg searches use structured argv with shell disabled.' },
                   args: { type: 'array', items: { type: 'string' }, description: 'Exact argument array for run_exact_command. Raw shell strings are not accepted.' },
                   nodeVersion: { type: 'string', enum: ['20'], description: 'Require execution under an installed Node 20 runtime.' },
                   policy: {
@@ -273,7 +273,18 @@ const openapi = {
                   },
                   protectedPaths: { type: 'array', items: { type: 'string' }, description: 'Repository-relative paths that must not change during execution.' },
                   requiredBranch: { type: 'string', description: 'Exact branch required before command execution. BuildFlow never switches branches automatically.' },
-                  networkAccess: { type: 'boolean', enum: [false], description: 'Validation commands default to no network access where platform enforcement is available.' },
+                  networkAccess: { type: 'boolean', description: 'Validation commands default to no network access; n8n_workflow_export and migration prepare require true only for their fixed controlled operations.' },
+                  workflowId: { type: 'string', description: 'Fixed workflow identifier for n8n_workflow_export.' },
+                  outputPath: { type: 'string', description: 'Fixed repository-relative rollback artifact path for n8n_workflow_export.' },
+                  migration: {
+                    type: 'object',
+                    description: 'Strict controlled migration request. Prepare needs a matching Workbench-owned grant and returns a short-lived token; execute accepts only the persisted operation ID and that token; status is read-only. No executable, argv, shell, environment, credentials, or caller policy fields are accepted.',
+                    oneOf: [
+                      { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['apply', 'rollback'] }, phase: { type: 'string', enum: ['prepare'] }, workflowId: { type: 'string' }, candidatePath: { type: 'string' }, rollbackPath: { type: 'string' }, manifestPath: { type: 'string' }, networkAccess: { type: 'boolean', enum: [true] } }, required: ['mode', 'phase', 'workflowId', 'candidatePath', 'rollbackPath', 'manifestPath', 'networkAccess'] },
+                      { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['apply', 'rollback'] }, phase: { type: 'string', enum: ['execute'] }, operationId: { type: 'string' }, confirmationToken: { type: 'string' } }, required: ['mode', 'phase', 'operationId', 'confirmationToken'] },
+                      { type: 'object', additionalProperties: false, properties: { mode: { type: 'string', enum: ['apply', 'rollback'] }, phase: { type: 'string', enum: ['status'] }, operationId: { type: 'string' } }, required: ['mode', 'phase', 'operationId'] }
+                    ]
+                  },
                   paths: { type: 'array', items: { type: 'string' }, maxItems: 50 },
                   message: { type: 'string' },
                   body: { type: 'string' },
@@ -288,6 +299,54 @@ const openapi = {
                   timeoutMs: { type: 'integer', minimum: 1000, maximum: 12000, description: 'GPT-facing command timeout. Defaults to 5-8s and is capped well below the external action timeout.' }
                 },
                 required: ['sourceId', 'commandKind']
+              },
+              examples: {
+                repositoryStatusCheck: {
+                  summary: 'Run a bounded command against an explicitly selected source',
+                  value: {
+                    sourceId: 'workbench-example-source',
+                    commandKind: 'git_status_short',
+                    timeoutMs: 5000
+                  }
+                },
+                workflowExportConfirmation: {
+                  summary: 'Request confirmation for a grant-bound workflow export using synthetic values',
+                  value: {
+                    sourceId: 'workflow-example-source',
+                    commandKind: 'n8n_workflow_export',
+                    workflowId: 'workflow-example',
+                    outputPath: 'artifacts/workflow-example-rollback.json',
+                    networkAccess: true,
+                    protectedPaths: ['tools/workflow-wrapper.sh', 'artifacts/workflow-example.json'],
+                    timeoutMs: 12000
+                  }
+                },
+                controlledMigrationPrepare: {
+                  summary: 'Prepare a grant-bound controlled migration using synthetic example values',
+                  value: {
+                    sourceId: 'migration-example-source',
+                    commandKind: 'n8n_workflow_migration',
+                    migration: {
+                      mode: 'apply', phase: 'prepare', workflowId: 'workflow-example',
+                      candidatePath: 'artifacts/candidate.json', rollbackPath: 'artifacts/rollback.json',
+                      manifestPath: 'artifacts/manifest.json', networkAccess: true
+                    }
+                  }
+                },
+                controlledMigrationExecute: {
+                  summary: 'Execute a prepared migration with a synthetic confirmation token',
+                  value: {
+                    sourceId: 'migration-example-source', commandKind: 'n8n_workflow_migration',
+                    migration: { mode: 'apply', phase: 'execute', operationId: 'operation-example', confirmationToken: 'confirmation-example' }
+                  }
+                },
+                controlledMigrationStatus: {
+                  summary: 'Read a prepared migration status using a synthetic operation ID',
+                  value: {
+                    sourceId: 'migration-example-source', commandKind: 'n8n_workflow_migration',
+                    migration: { mode: 'apply', phase: 'status', operationId: 'operation-example' }
+                  }
+                }
               }
             }
           }

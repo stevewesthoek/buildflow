@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AGENT_DIR="$ROOT_DIR/packages/cli"
 WEB_DIR="$ROOT_DIR/apps/web"
 COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
 PROJECT_NAME="workbench"
+SERVICE_MANAGER="$ROOT_DIR/scripts/workbench-detached-service.mjs"
 
 HOST="127.0.0.1"
 AGENT_PORT="${AGENT_PORT:-3052}"
@@ -26,53 +26,6 @@ log() {
 
 pids_on_port() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null || true
-}
-
-pid_cwd() {
-  lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true
-}
-
-pid_command() {
-  ps -p "$1" -o command= 2>/dev/null || true
-}
-
-is_workbench_pid() {
-  local pid="$1"
-  local cwd
-  local cmd
-
-  cwd="$(pid_cwd "$pid")"
-  cmd="$(pid_command "$pid")"
-
-  [[ "$cwd" == "$ROOT_DIR"* ]] && return 0
-  [[ "$cmd" == *"$ROOT_DIR"* ]] && return 0
-
-  return 1
-}
-
-kill_workbench_port() {
-  local port="$1"
-  local label="$2"
-  local pids
-  pids="$(pids_on_port "$port")"
-
-  if [ -z "$pids" ]; then
-    log "✓ $label port $port already free"
-    return 0
-  fi
-
-  for pid in $pids; do
-    if is_workbench_pid "$pid"; then
-      log "Stopping stale $label process pid=$pid"
-      kill "$pid" 2>/dev/null || true
-    else
-      log "ERROR: port $port is occupied by a non-Workbench process"
-      log "pid=$pid"
-      log "cwd=$(pid_cwd "$pid")"
-      log "cmd=$(pid_command "$pid")"
-      exit 1
-    fi
-  done
 }
 
 wait_port_free() {
@@ -129,8 +82,8 @@ stop_relay() {
 stop_stack() {
   log "Stopping Workbench host services only"
 
-  kill_workbench_port "$WEB_PORT" "web"
-  kill_workbench_port "$AGENT_PORT" "agent"
+  node "$SERVICE_MANAGER" stop web --port "$WEB_PORT"
+  node "$SERVICE_MANAGER" stop agent --port "$AGENT_PORT"
 
   wait_port_free "$WEB_PORT" "web"
   wait_port_free "$AGENT_PORT" "agent"
@@ -150,68 +103,82 @@ build_runtime_packages() {
 
 start_relay() {
   log "Starting relay compose project only"
-  docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up -d --remove-orphans
-  wait_http_ok "http://$HOST:$RELAY_PORT/health" "relay"
+  if ! docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up -d --remove-orphans; then
+    return 1
+  fi
+  if ! wait_http_ok "http://$HOST:$RELAY_PORT/health" "relay"; then
+    return 1
+  fi
 }
 
 start_agent() {
+  local launch_id="$1"
   log "Starting agent on $AGENT_PORT"
 
-  (
-    cd "$AGENT_DIR"
-    nohup env \
-      PORT="$AGENT_PORT" \
-      HOST="$HOST" \
-      WORKBENCH_AGENT_PORT="$AGENT_PORT" \
-      WORKBENCH_AGENT_HOST="$HOST" \
-      BUILDFLOW_AGENT_PORT="$AGENT_PORT" \
-      BUILDFLOW_AGENT_HOST="$HOST" \
-      node dist/index.js serve \
-      > "$AGENT_LOG" 2> "$AGENT_ERR" &
-    echo $! > "$RUN_DIR/agent.pid"
-  )
+  if ! node "$SERVICE_MANAGER" start agent --port "$AGENT_PORT" --launch-id "$launch_id"; then
+    return 1
+  fi
 
-  wait_http_ok "http://$HOST:$AGENT_PORT/health" "agent" || {
+  if ! wait_http_ok "http://$HOST:$AGENT_PORT/health" "agent"; then
     log "Recent agent stdout:"
     tail -n 120 "$AGENT_LOG" 2>/dev/null || true
     log "Recent agent stderr:"
     tail -n 120 "$AGENT_ERR" 2>/dev/null || true
-    exit 1
-  }
+    return 1
+  fi
 }
 
 start_web() {
+  local launch_id="$1"
   log "Starting web on $WEB_PORT"
 
-  (
-    cd "$WEB_DIR"
-    nohup env \
-      PORT="$WEB_PORT" \
-      HOSTNAME="$HOST" \
-      node_modules/.bin/next start -H "$HOST" -p "$WEB_PORT" \
-      > "$WEB_LOG" 2> "$WEB_ERR" &
-    echo $! > "$RUN_DIR/web.pid"
-  )
+  if ! node "$SERVICE_MANAGER" start web --port "$WEB_PORT" --launch-id "$launch_id"; then
+    return 1
+  fi
 
-  wait_http_ok "http://$HOST:$WEB_PORT/api/openapi" "web api" || {
+  if ! wait_http_ok "http://$HOST:$WEB_PORT/api/openapi" "web api"; then
     log "Recent web stdout:"
     tail -n 120 "$WEB_LOG" 2>/dev/null || true
     log "Recent web stderr:"
     tail -n 120 "$WEB_ERR" 2>/dev/null || true
-    exit 1
-  }
+    return 1
+  fi
 
-  wait_http_ok "http://$HOST:$WEB_PORT/" "web page" || {
+  if ! wait_http_ok "http://$HOST:$WEB_PORT/" "web page"; then
     log "Recent web stdout:"
     tail -n 120 "$WEB_LOG" 2>/dev/null || true
     log "Recent web stderr:"
     tail -n 120 "$WEB_ERR" 2>/dev/null || true
-    exit 1
-  }
+    return 1
+  fi
+}
+
+cleanup_launch_attempt() {
+  local launch_id="$1"
+  log "Cleaning up only host services launched by attempt $launch_id"
+  node "$SERVICE_MANAGER" stop web --port "$WEB_PORT" --launch-id "$launch_id" || true
+  node "$SERVICE_MANAGER" stop agent --port "$AGENT_PORT" --launch-id "$launch_id" || true
+}
+
+regenerate_openapi_schema() {
+  log "Regenerating verified Custom GPT schema from the healthy web endpoint"
+  if ! (
+    cd "$ROOT_DIR"
+    LOCAL_DASHBOARD_BASE_URL="http://$HOST:$WEB_PORT" node scripts/generate-openapi-chatgpt.mjs
+  ); then
+    log "ERROR: verified schema regeneration failed"
+    return 1
+  fi
+  log "✓ verified schema regenerated: docs/openapi.chatgpt.json"
 }
 
 verify_stack() {
   log "Verifying unified health"
+
+  if ! node "$SERVICE_MANAGER" status-all --agent-port "$AGENT_PORT" --web-port "$WEB_PORT"; then
+    log "ERROR: Workbench service ownership status is not live"
+    return 1
+  fi
 
   local body
   body="$(curl -fsS --max-time 5 "http://$HOST:$WEB_PORT/api/unified-health")"
@@ -232,16 +199,42 @@ verify_stack() {
   tail -n 120 "$WEB_LOG" 2>/dev/null || true
   log "Recent web stderr:"
   tail -n 120 "$WEB_ERR" 2>/dev/null || true
-  exit 1
+  return 1
+}
+
+verify_sustained_stack() {
+  log "Requiring sustained process and HTTP health before launcher exit"
+  if ! node "$SERVICE_MANAGER" sustain \
+      --agent-port "$AGENT_PORT" \
+      --relay-port "$RELAY_PORT" \
+      --web-port "$WEB_PORT" \
+      --duration-ms 8000 \
+      --interval-ms 2000; then
+    log "ERROR: sustained Workbench readiness failed"
+    return 1
+  fi
+  log "✓ Workbench stack sustained readiness passed"
 }
 
 start_stack_clean() {
+  local launch_id="restart-$$-$(date +%s)"
+
   stop_stack
   build_runtime_packages
-  start_relay
-  start_agent
-  start_web
-  verify_stack
+
+  if ! start_relay; then
+    stop_relay
+    return 1
+  fi
+  if ! start_agent "$launch_id" ||
+     ! start_web "$launch_id" ||
+     ! verify_stack ||
+     ! verify_sustained_stack ||
+     ! regenerate_openapi_schema; then
+    cleanup_launch_attempt "$launch_id"
+    stop_relay
+    return 1
+  fi
 }
 
 case "${1:-restart}" in
