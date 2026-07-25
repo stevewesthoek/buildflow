@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
+import { recordTunnelHealthTelemetry } from '@/lib/actions/runtime-tunnel-telemetry'
 
 export async function GET() {
+  const startedAt = Date.now()
   const relayUrl = process.env.BRIDGE_URL || 'http://127.0.0.1:3053'
 
   try {
@@ -9,6 +11,11 @@ export async function GET() {
       cache: 'no-store'
     })
     if (!response.ok) {
+      recordTunnelHealthTelemetry({
+        health: response.status >= 500 ? 'degraded' : 'unknown',
+        durationMs: Date.now() - startedAt,
+        reasonCode: 'relay_degraded'
+      })
       return NextResponse.json(
         { error: 'Relay health check failed', status: response.status },
         { status: 502 }
@@ -16,9 +23,19 @@ export async function GET() {
     }
 
     const data = await response.json()
+    recordTunnelHealthTelemetry({
+      health: 'healthy',
+      durationMs: Date.now() - startedAt,
+      reasonCode: 'relay_healthy'
+    })
     return NextResponse.json(data)
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === 'AbortError'
+    recordTunnelHealthTelemetry({
+      health: 'unknown',
+      durationMs: Date.now() - startedAt,
+      reasonCode: isTimeout ? 'relay_timed_out' : 'relay_unreachable'
+    })
     return NextResponse.json(
       {
         error: isTimeout

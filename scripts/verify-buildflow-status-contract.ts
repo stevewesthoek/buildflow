@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { NextRequest } from 'next/server'
 
 async function main() {
   process.env.WORKBENCH_ACTION_TOKEN = process.env.WORKBENCH_ACTION_TOKEN || process.env.BUILDFLOW_ACTION_TOKEN || 'test-token'
@@ -38,20 +39,21 @@ async function main() {
     status: 200,
     headers: { 'content-type': 'application/json' }
   })) as unknown as typeof fetch, async () => {
-    const response = await GET(new Request('http://127.0.0.1/api/actions/status', { headers: authHeaders }))
+    const response = await GET(new NextRequest('http://127.0.0.1/api/actions/status', { headers: authHeaders }))
     assert.equal(response.status, 200)
     const { json } = await readJson(response)
     assert.equal(json.ok, true)
     assert.equal(json.connected, true)
-    assert.equal(json.status, 'available')
-    assert.equal(json.message, 'BuildFlow is available')
-    assert.equal(json.sourcesReady, true)
-    assert.equal(typeof json.serverTime, 'string')
+    assert.equal(typeof json.runtime, 'object')
+    assert.equal(typeof json.runtime.activeRequests, 'number')
+    assert.equal(typeof json.runtime.heapUsedMb, 'number')
+    assert.equal(typeof json.runtime.rssMb, 'number')
+    assert.equal(json.runtime.service.role, 'web')
   })
 
   await withFetch((async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch, async () => {
-    const response = await GET(new Request('http://127.0.0.1/api/actions/status', { headers: authHeaders }))
-    assert.equal(response.status, 503)
+    const response = await GET(new NextRequest('http://127.0.0.1/api/actions/status', { headers: authHeaders }))
+    assert.equal(response.status, 200)
     const { json } = await readJson(response)
     assert.equal(json.ok, false)
     assert.equal(json.connected, false)
@@ -76,11 +78,11 @@ async function main() {
   })
 
   await withFetch((async () => { throw new Error('boom') }) as unknown as typeof fetch, async () => {
-    const response = await GET(new Request('http://127.0.0.1/api/actions/status', { headers: authHeaders }))
-    assert.equal(response.status, 503)
+    const response = await GET(new NextRequest('http://127.0.0.1/api/actions/status', { headers: authHeaders }))
+    assert.equal(response.status, 200)
     const { json } = await readJson(response)
     assert.equal(json.ok, false)
-    assert.equal(json.error.code, 'BUILDFLOW_STATUS_ERROR')
+    assert.equal(json.error.code, 'ACTION_TRANSPORT_ERROR')
   })
 
   console.log('verify-buildflow-status-contract: passed')

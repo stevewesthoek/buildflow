@@ -3,6 +3,7 @@ import {
   RUN_WORKBENCH_DIRECT_COMMAND_KINDS,
   runWorkbenchCommandRequestSchema
 } from '../packages/shared/src/workbench-command-contract'
+import { parseRunCommandRequest } from '../packages/cli/src/agent/run-command-request'
 
 const expectValid = (value: unknown, label: string) => {
   const parsed = runWorkbenchCommandRequestSchema.safeParse(value)
@@ -16,6 +17,34 @@ const expectInvalid = (value: unknown, label: string) => {
 
 expectValid({ sourceId: 'workbench-example-source', commandKind: 'git_status_short', timeoutMs: 5000 }, 'status')
 expectValid({ sourceId: 'workbench-example-source', commandKind: 'git_diff', paths: ['packages/shared/src/index.ts'] }, 'diff')
+expectValid({
+  sourceId: 'workbench-example-source',
+  commandKind: 'git_add_paths',
+  paths: ['.github/workflows/example.yml'],
+  confirmedByUser: true,
+  confirmationToken: 'confirm:example'
+}, 'confirmed staging')
+expectValid({
+  sourceId: 'workbench-example-source',
+  commandKind: 'git_commit',
+  paths: ['.github/workflows/example.yml'],
+  message: 'test: commit guarded workflow',
+  confirmedByUser: true,
+  confirmationToken: 'confirm:example'
+}, 'confirmed commit')
+const parsedConfirmedCommit = parseRunCommandRequest({
+  sourceId: 'workbench-example-source',
+  commandKind: 'git_commit',
+  paths: ['.github/workflows/example.yml'],
+  message: 'test: commit guarded workflow',
+  confirmedByUser: true,
+  confirmationToken: 'confirm:example'
+})
+assert.equal(parsedConfirmedCommit.ok, true)
+if (parsedConfirmedCommit.ok && parsedConfirmedCommit.kind === 'direct') {
+  assert.equal(parsedConfirmedCommit.request.confirmedByUser, true)
+  assert.equal(parsedConfirmedCommit.request.confirmationToken, 'confirm:example')
+}
 expectValid({
   sourceId: 'workbench-example-source',
   commandKind: 'run_exact_command',

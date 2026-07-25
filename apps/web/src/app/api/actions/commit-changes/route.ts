@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
 
     deadline.setPhase('parse_body')
     const body = await request.json()
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
     const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
     const paths = Array.isArray(body.paths) ? body.paths as string[] : []
     const message = typeof body.message === 'string' ? body.message : ''
@@ -31,6 +32,9 @@ export async function POST(request: NextRequest) {
     const confirmationToken = typeof body.confirmationToken === 'string' ? body.confirmationToken : undefined
     deadline.addDiagnostics({ sourceId, paths: paths.slice(0, 10), phase: 'validate_input' })
 
+    if (!sessionId) {
+      return NextResponse.json(buildActionErrorEnvelope({ code: 'MISSING_PARAM', message: 'sessionId is required' }), { status: 400 })
+    }
     if (!sourceId) {
       return NextResponse.json(buildActionErrorEnvelope({ code: 'MISSING_PARAM', message: 'sourceId is required' }), { status: 400 })
     }
@@ -43,7 +47,7 @@ export async function POST(request: NextRequest) {
 
     // Step 1: diff to get proof of what changed
     deadline.setPhase('git_diff_stat')
-    const diff = await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_diff_stat', timeoutMs: 2000 }, auth.bearerToken, {
+    const diff = await dispatchWorkbenchCommand({ version: 2, sessionId, command: { sourceId, commandKind: 'git_diff_stat', timeoutMs: 2000 } }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(2500),
       diagnostics: deadline.diagnostics({ phase: 'git_diff_stat', sourceId, paths })
@@ -54,7 +58,7 @@ export async function POST(request: NextRequest) {
 
     // Step 2: stage specific paths
     deadline.setPhase('git_add_paths')
-    const add = await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_add_paths', paths, confirmedByUser, confirmationToken, timeoutMs: 2500 }, auth.bearerToken, {
+    const add = await dispatchWorkbenchCommand({ version: 2, sessionId, command: { sourceId, commandKind: 'git_add_paths', paths, confirmedByUser, confirmationToken, timeoutMs: 2500 } }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(3000),
       diagnostics: deadline.diagnostics({ phase: 'git_add_paths', sourceId, paths })
@@ -65,7 +69,7 @@ export async function POST(request: NextRequest) {
     const guardedCommit = await dispatchAfterExactStaging(add as StagedSetGuardInput, async () => {
       // Step 3: commit with provided message
       deadline.setPhase('git_commit')
-      return await dispatchWorkbenchCommand({ sourceId, commandKind: 'git_commit', paths, message, confirmedByUser, confirmationToken, timeoutMs: 4500 }, auth.bearerToken, {
+      return await dispatchWorkbenchCommand({ version: 2, sessionId, command: { sourceId, commandKind: 'git_commit', paths, message, confirmedByUser, confirmationToken, timeoutMs: 4500 } }, auth.bearerToken, {
         signal: deadline.signal,
         timeoutMs: deadline.transportTimeoutMs(5000),
         diagnostics: deadline.diagnostics({ phase: 'git_commit', sourceId, paths })

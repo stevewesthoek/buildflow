@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
 import type { WorkbenchPacket } from './workbench-packets'
+import { recordGitLockTelemetry } from './git-lock-telemetry'
 
 export const WORKBENCH_PACKET_STORE_VERSION = 1 as const
 
@@ -117,13 +118,26 @@ function persistStore(store: WorkbenchPacketStore): void {
 
 function withExclusiveStoreLock<T>(callback: () => T): T | undefined {
   fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
+  const startedAt = Date.now()
   let descriptor: number | undefined
   try {
     descriptor = fs.openSync(LOCK_PATH, 'wx')
+    recordGitLockTelemetry({
+      storeKind: 'packet_store',
+      waitMs: Date.now() - startedAt,
+      contended: false
+    })
     return callback()
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code) : ''
-    if (code === 'EEXIST') return undefined
+    if (code === 'EEXIST') {
+      recordGitLockTelemetry({
+        storeKind: 'packet_store',
+        waitMs: Date.now() - startedAt,
+        contended: true
+      })
+      return undefined
+    }
     throw error
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor)

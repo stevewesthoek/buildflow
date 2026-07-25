@@ -12,13 +12,37 @@ AGENT_PORT="${AGENT_PORT:-3052}"
 RELAY_PORT="${RELAY_PORT:-3053}"
 WEB_PORT="${WEB_PORT:-3054}"
 
-RUN_DIR="$ROOT_DIR/runtime/local/workbench-stack"
+OWNER_HOME="$(node -p "require('node:os').userInfo().homedir")"
+RUN_DIR="$OWNER_HOME/.config/workbench/runtime-state"
 AGENT_LOG="$RUN_DIR/agent.log"
 AGENT_ERR="$RUN_DIR/agent.err.log"
 WEB_LOG="$RUN_DIR/web.log"
 WEB_ERR="$RUN_DIR/web.err.log"
 
 mkdir -p "$RUN_DIR"
+
+initialize_build_identity() {
+  local package_version
+  local git_sha
+  local build_timestamp
+
+  package_version="$(node -p "require('$ROOT_DIR/package.json').version" 2>/dev/null || true)"
+  git_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+  build_timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+  if ! printf '%s' "$git_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+    log "ERROR: could not establish exact Workbench Git revision"
+    return 1
+  fi
+  if [ -z "$package_version" ]; then
+    log "ERROR: could not establish Workbench package version"
+    return 1
+  fi
+
+  export WORKBENCH_PACKAGE_VERSION="$package_version"
+  export WORKBENCH_BUILD_SHA="$git_sha"
+  export WORKBENCH_BUILD_TIMESTAMP="$build_timestamp"
+}
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -94,11 +118,20 @@ stop_stack() {
 build_runtime_packages() {
   log "Building runtime packages only"
 
-  pnpm --dir "$ROOT_DIR/packages/shared" build
   pnpm --dir "$ROOT_DIR/packages/proxy" build
   pnpm --dir "$ROOT_DIR/packages/bridge" build
   pnpm --dir "$ROOT_DIR/packages/cli" build
   pnpm --dir "$WEB_DIR" build
+}
+
+preflight_action_auth() {
+  log "Validating owner-local Workbench action authentication"
+  pnpm --dir "$ROOT_DIR/packages/shared" build
+  if ! node "$SERVICE_MANAGER" validate-auth; then
+    log "ERROR: owner-local Workbench action authentication is unavailable"
+    return 1
+  fi
+  log "✓ owner-local Workbench action authentication validated"
 }
 
 start_relay() {
@@ -187,19 +220,24 @@ verify_stack() {
 
   if printf '%s' "$body" | grep -q '"allHealthy":true'; then
     log "✓ Workbench stack healthy"
-    return 0
+  else
+    log "ERROR: unified health is not allHealthy=true"
+    log "Recent agent stdout:"
+    tail -n 120 "$AGENT_LOG" 2>/dev/null || true
+    log "Recent agent stderr:"
+    tail -n 120 "$AGENT_ERR" 2>/dev/null || true
+    log "Recent web stdout:"
+    tail -n 120 "$WEB_LOG" 2>/dev/null || true
+    log "Recent web stderr:"
+    tail -n 120 "$WEB_ERR" 2>/dev/null || true
+    return 1
   fi
 
-  log "ERROR: unified health is not allHealthy=true"
-  log "Recent agent stdout:"
-  tail -n 120 "$AGENT_LOG" 2>/dev/null || true
-  log "Recent agent stderr:"
-  tail -n 120 "$AGENT_ERR" 2>/dev/null || true
-  log "Recent web stdout:"
-  tail -n 120 "$WEB_LOG" 2>/dev/null || true
-  log "Recent web stderr:"
-  tail -n 120 "$WEB_ERR" 2>/dev/null || true
-  return 1
+  if ! node "$SERVICE_MANAGER" verify-auth --web-port "$WEB_PORT"; then
+    log "ERROR: authenticated Workbench status verification failed"
+    return 1
+  fi
+  log "✓ authenticated Workbench status verification passed"
 }
 
 verify_sustained_stack() {
@@ -219,6 +257,8 @@ verify_sustained_stack() {
 start_stack_clean() {
   local launch_id="restart-$$-$(date +%s)"
 
+  initialize_build_identity
+  preflight_action_auth
   stop_stack
   build_runtime_packages
 

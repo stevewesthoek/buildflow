@@ -1,10 +1,41 @@
 {
   "name": "@workbench/mcp",
-  "version": "1.3.1-beta",
+  "version": "1.3.3-beta",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "dist/server.js",
+  "exports": {
+    ".": "./dist/server.js",
+    "./registration": {
+      "types": "./dist/registration-manifest.d.ts",
+      "default": "./dist/registration-manifest.js"
+    },
+    "./adapter": {
+      "types": "./dist/adapter-contract.d.ts",
+      "default": "./dist/adapter-contract.js"
+    },
+    "./claude-adapter": {
+      "types": "./dist/claude-adapter.d.ts",
+      "default": "./dist/claude-adapter.js"
+    },
+    "./codex-adapter": {
+      "types": "./dist/codex-adapter.d.ts",
+      "default": "./dist/codex-adapter.js"
+    },
+    "./orchestration": {
+      "types": "./dist/registration-orchestrator.d.ts",
+      "default": "./dist/registration-orchestrator.js"
+    },
+    "./policy": {
+      "types": "./dist/registration-policy.d.ts",
+      "default": "./dist/registration-policy.js"
+    },
+    "./ide-adapters": {
+      "types": "./dist/ide-adapters.d.ts",
+      "default": "./dist/ide-adapters.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "type-check": "tsc --noEmit",

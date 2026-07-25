@@ -3,6 +3,8 @@ import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
 import { runSafeCommand, type SafeCommandRequest, type SafeCommandResult } from './command-runner'
+import { recordValidationJobTelemetry, type TerminalValidationJobStatus } from './validation-job-telemetry'
+import { recordGitLockTelemetry } from './git-lock-telemetry'
 
 export const WORKBENCH_VALIDATION_JOB_STORE_VERSION = 1 as const
 
@@ -143,6 +145,7 @@ export type SubmitWorkbenchValidationJobResult =
 const STORE_PATH = path.join(getConfigDir(), 'workbench-validation-jobs.json')
 const LOCK_PATH = `${STORE_PATH}.lock`
 const MAX_JOB_RECORDS = 300
+const TERMINAL_JOB_RETENTION_MS = 4 * 60 * 60_000  // terminal jobs older than this are pruned
 const MAX_PERSISTED_OUTPUT_BYTES = 60_000
 const COMPACT_OUTPUT_TAIL_BYTES = 4_000
 const MIN_TIMEOUT_MS = 1_000
@@ -193,10 +196,13 @@ function readStore(): WorkbenchValidationJobStore {
 
 function persistStore(store: WorkbenchValidationJobStore): void {
   fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
+  const cutoffMs = Date.now() - TERMINAL_JOB_RETENTION_MS
+  const TERMINAL_STATUSES = new Set<WorkbenchValidationJobStatus>(['completed', 'failed', 'timed_out', 'cancelled'])
   const payload: WorkbenchValidationJobStore = {
     version: WORKBENCH_VALIDATION_JOB_STORE_VERSION,
     updatedAt: new Date().toISOString(),
     jobs: [...store.jobs]
+      .filter(job => !TERMINAL_STATUSES.has(job.status) || Date.parse(job.updatedAt) > cutoffMs)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(-MAX_JOB_RECORDS)
   }
@@ -207,15 +213,28 @@ function persistStore(store: WorkbenchValidationJobStore): void {
 
 function withExclusiveStoreLock<T>(callback: () => T): T | undefined {
   fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true })
+  const startedAt = Date.now()
   let descriptor: number | undefined
   try {
     descriptor = fs.openSync(LOCK_PATH, 'wx')
+    recordGitLockTelemetry({
+      storeKind: 'validation_jobs',
+      waitMs: Date.now() - startedAt,
+      contended: false
+    })
     return callback()
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error
       ? String((error as { code?: unknown }).code)
       : ''
-    if (code === 'EEXIST') return undefined
+    if (code === 'EEXIST') {
+      recordGitLockTelemetry({
+        storeKind: 'validation_jobs',
+        waitMs: Date.now() - startedAt,
+        contended: true
+      })
+      return undefined
+    }
     throw error
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor)
@@ -444,13 +463,14 @@ export function listCompactWorkbenchValidationJobs(params: {
 export function recordWorkbenchValidationJobResult(params: {
   jobId: string
   sourceId: string
-  status: Extract<WorkbenchValidationJobStatus, 'completed' | 'failed' | 'timed_out' | 'cancelled'>
+  status: TerminalValidationJobStatus
   result: WorkbenchValidationJobResult
 }): CompactWorkbenchValidationJob | undefined {
-  return withExclusiveStoreLock(() => {
+  const transition = withExclusiveStoreLock(() => {
     const store = readStore()
     const record = store.jobs.find(job => job.jobId === params.jobId && job.sourceId === params.sourceId)
     if (!record) return undefined
+    const alreadyTerminal = ['completed', 'failed', 'timed_out', 'cancelled'].includes(record.status)
     const now = new Date().toISOString()
     record.status = params.status
     record.updatedAt = now
@@ -464,8 +484,17 @@ export function recordWorkbenchValidationJobResult(params: {
       changedPaths: Array.from(new Set(params.result.changedPaths)).sort().slice(0, 200)
     }
     persistStore(store)
-    return compactWorkbenchValidationJob(record)
+    return {
+      compact: compactWorkbenchValidationJob(record),
+      record: { ...record, command: { ...record.command }, result: record.result ? { ...record.result } : undefined },
+      shouldRecordTelemetry: !alreadyTerminal
+    }
   })
+  if (!transition) return undefined
+  if (transition.shouldRecordTelemetry) {
+    recordValidationJobTelemetry(transition.record, params.status, params.result.durationMs)
+  }
+  return transition.compact
 }
 
 export function toSafeCommandRequest(job: WorkbenchValidationJobRecord, sourceRoot: string): SafeCommandRequest {

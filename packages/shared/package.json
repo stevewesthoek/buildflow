@@ -13,6 +13,10 @@
     "./workbench-mcp-auth": {
       "types": "./src/workbench-mcp-auth.ts",
       "default": "./dist/workbench-mcp-auth.js"
+    },
+    "./workbench-owner-config": {
+      "types": "./src/workbench-owner-config.ts",
+      "default": "./dist/workbench-owner-config.js"
     }
   },
   "scripts": {

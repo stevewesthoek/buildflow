@@ -81,7 +81,7 @@ export function scheduleWorkbenchPacket(params: {
       if (!result.packetId || !result.runId) return
 
       const [
-        { getAgentJob },
+        { getAgentJob, evaluateWorkbenchRunBudget, recordWorkbenchRunRepairAttempt },
         { getWorkbenchContinuationDecision },
         { acceptWorkbenchRepairAttempt, getWorkbenchRepairState }
       ] = await Promise.all([
@@ -135,12 +135,20 @@ export function scheduleWorkbenchPacket(params: {
         .sort((a, b) => a.reservedAt.localeCompare(b.reservedAt))[0]
       if (!repairRecord || scheduledPacketIds.has(repairRecord.packet.packetId)) return
 
+      const budgetDecision = evaluateWorkbenchRunBudget({
+        runId: result.runId,
+        now: new Date().toISOString(),
+        operation: 'repair'
+      })
+      if (!budgetDecision.allowed) return
+
       acceptWorkbenchRepairAttempt({
         runId: result.runId,
         taskId,
         failedPacketId: result.packetId,
         repairPacketId: repairRecord.packet.packetId
       })
+      recordWorkbenchRunRepairAttempt(result.runId, new Date().toISOString())
       scheduleWorkbenchPacket({
         packetId: repairRecord.packet.packetId,
         sourceId,

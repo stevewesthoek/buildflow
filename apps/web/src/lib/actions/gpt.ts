@@ -6,7 +6,7 @@ import { GPT_ACTION_RESPONSE_BYTE_LIMIT, GPT_ACTION_RESPONSE_CHAR_LIMIT } from '
 import {
   GPT_ACTION_DEFAULT_FILE_BYTES,
   GPT_ACTION_DEFAULT_INSPECT_LIMIT,
-  runWorkbenchCommandRequestSchema
+  sessionAwareRunWorkbenchCommandRequestSchema
 } from '@workbench/shared'
 import { getActionDiagnostics } from '../env-compat'
 
@@ -1124,7 +1124,7 @@ export async function dispatchWorkbenchRead(body: Record<string, unknown>, userT
 
 // Run a narrow allowlisted git/status or validation command inside a selected source root; returns redacted bounded output with activity narration.
 export async function dispatchWorkbenchCommand(body: Record<string, unknown>, userToken?: string, transportOptions?: ActionTransportOptions) {
-  const parsed = runWorkbenchCommandRequestSchema.safeParse(body)
+  const parsed = sessionAwareRunWorkbenchCommandRequestSchema.safeParse(body)
   if (!parsed.success) {
     const details = parsed.error.issues
       .slice(0, 10)
@@ -1133,9 +1133,9 @@ export async function dispatchWorkbenchCommand(body: Record<string, unknown>, us
     throw new Error(`Invalid runWorkbenchCommand request: ${details}`)
   }
   const requestBody = parsed.data
-  const { sourceId, commandKind } = requestBody
-  const validationJobOperation = 'validationJobOperation' in requestBody
-    ? requestBody.validationJobOperation
+  const { sourceId, commandKind } = requestBody.command
+  const validationJobOperation = 'validationJobOperation' in requestBody.command
+    ? requestBody.command.validationJobOperation
     : undefined
   const result = await executeAction('/api/commands/run', requestBody, userToken, transportOptions)
   const resultRecord = result as Record<string, unknown>
@@ -1316,7 +1316,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       maxIterations: body.maxIterations,
       autoCommit: body.autoCommit
     }, userToken, transportOptions)
-    const run = (result as { run?: { id?: string; activeTask?: { title?: string } } }).run
+    const run = (result as { run?: { id?: string; sessionId?: string; activeTask?: { title?: string } } }).run
     return withActivity(result as Record<string, unknown>, makeActivity({
       operationId: 'applyWorkbenchFileChange',
       phase: 'planning',
@@ -1326,7 +1326,10 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       riskLevel: 'low',
       requiresConfirmation: false,
       verified: true,
-      nextStep: run?.activeTask?.title ? `Continue active task: ${run.activeTask.title}.` : 'Read active_run and continue the persisted goal.'
+      provenFacts: run?.sessionId ? [`Active session ID: ${run.sessionId}`] : undefined,
+      nextStep: run?.sessionId
+        ? `Use session ${run.sessionId} for every command in this run.`
+        : run?.activeTask?.title ? `Continue active task: ${run.activeTask.title}.` : 'Read active_run and continue the persisted goal.'
     }))
   }
 
@@ -1335,7 +1338,7 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       sourceId: body.sourceId,
       runId: body.runId
     }, userToken, transportOptions)
-    const run = (result as { run?: { id?: string; activeTask?: { title?: string } } }).run
+    const run = (result as { run?: { id?: string; sessionId?: string; activeTask?: { title?: string } } }).run
     return withActivity(result as Record<string, unknown>, makeActivity({
       operationId: 'applyWorkbenchFileChange',
       phase: 'planning',
@@ -1345,7 +1348,10 @@ export async function dispatchWorkbenchFileChange(body: Record<string, unknown>,
       riskLevel: 'low',
       requiresConfirmation: false,
       verified: true,
-      nextStep: run?.activeTask?.title ? `Continue active task: ${run.activeTask.title}.` : 'Continue from the persisted resume state.'
+      provenFacts: run?.sessionId ? [`Active session ID: ${run.sessionId}`] : undefined,
+      nextStep: run?.sessionId
+        ? `Use session ${run.sessionId} for every command in this run.`
+        : run?.activeTask?.title ? `Continue active task: ${run.activeTask.title}.` : 'Continue from the persisted resume state.'
     }))
   }
 

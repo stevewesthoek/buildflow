@@ -1,5 +1,14 @@
 # ProChat Workbench
 
+A review-first local workbench for safely applying AI-assisted workflows to
+repositories and project documentation.
+
+## Maintainer
+
+Created and maintained by
+[Steve Westhoek](https://github.com/stevewesthoek)
+under the [ProChat organization](https://github.com/prochattools).
+
 **ProChat Workbench lets ChatGPT work safely with your real local projects.**
 
 Connect a Custom GPT to your own computer and use ChatGPT as the reasoning interface for local repositories, documentation, plans, notes, and knowledge folders. Workbench provides exact source context, guarded file operations, bounded local execution, validation, checkpoints, and explicit-path Git workflows.
@@ -381,10 +390,11 @@ ProChat Workbench runs on your machine.
 
 ```bash
 pnpm install
+pnpm auth:configure -- --from-env-file /absolute/path/to/owner-only-existing.env
 pnpm local:restart
 ```
 
-`pnpm local:restart` delegates to `scripts/workbench-local-stack.sh`, which stops only Workbench-owned services, frees ports `3052`, `3053`, and `3054`, starts the agent, relay, and web app, and verifies unified health before reporting success.
+`pnpm auth:configure` atomically migrates an existing canonical or legacy action token into the fixed owner-local `~/.config/workbench/runtime.env` source without printing it. The input must be an absolute owner-only regular file. `pnpm local:restart` validates that owner source before stopping a healthy runtime, starts only Workbench-owned agent, relay, and web services, and requires unified health plus an authenticated status request before reporting success. Authentication is installation-scoped and does not depend on the Workbench worktree or selected repository source.
 
 Then open:
 

@@ -257,7 +257,18 @@ const PROTECTED_FILES = new Set<string>()
 const BLOCKED_DIRECTORY_NAMES = new Set(['node_modules', '.next', 'dist', 'build', 'coverage', '.git'])
 const ALLOWED_DOTFILES = new Set(['.github', '.kiro', '.ai', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example', '.gitignore', '.buildflow', '.nvmrc', '.prettierrc', '.eslintrc'])
 const CONFIRMATION_REQUIRED_GLOBS = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', '.github/**', 'LICENSE']
-const BLOCKED_CONTENT_PATTERNS = ['BEGIN RSA PRIVATE KEY', 'BEGIN OPENSSH PRIVATE KEY', 'BEGIN EC PRIVATE KEY', 'ghp_', 'github_pat_', 'sk_live_', 'rk_live_', 'xoxb-', 'AKIA', 'AIza']
+const BLOCKED_CONTENT_PATTERNS = [
+  ['BEGIN RSA PRIVATE', ' KEY'].join(''),
+  ['BEGIN OPENSSH PRIVATE', ' KEY'].join(''),
+  ['BEGIN EC PRIVATE', ' KEY'].join(''),
+  ['gh', 'p_'].join(''),
+  ['github', '_pat_'].join(''),
+  ['sk', '_live_'].join(''),
+  ['rk', '_live_'].join(''),
+  ['xo', 'xb-'].join(''),
+  ['AK', 'IA'].join(''),
+  ['AI', 'za'].join('')
+]
 const STATIC_ASSET_EXTENSIONS = new Set([
   '.pdf',
   '.png',
@@ -332,7 +343,7 @@ export function getDefaultWritePolicy(): WritePolicySummary {
     allowRmdir: true,
     recursiveDeleteRequiresConfirmation: true,
     maxRecursiveDeleteFilesWithoutConfirmation: 0,
-    allowedRoots: ['src/**', 'app/**', 'components/**', 'lib/**', 'pages/**', 'server/**', 'client/**', 'shared/**', 'features/**', 'modules/**', 'utils/**', 'hooks/**', 'services/**', 'styles/**', 'types/**', 'test/**', 'tests/**', '__tests__/**', 'e2e/**', 'playwright/**', 'cypress/**', 'prisma/**', 'scripts/**', 'bin/**', 'tools/**', 'ai/skills/**', 'operations/runbooks/**', 'operations/specs/**', 'operations/specs/video-orchestrator/**', 'projects/*', 'projects/*/**', 'projects/*/src/**', 'projects/probot/src/**', 'services/*/src/**', 'packages/*/src/**', 'specs/**', 'runbooks/**', '*.md', '*.mdx', 'docs/**', 'plans/**', 'notes/**', 'artifacts/**', '.buildflow/**', '.gitignore', '.graphifyignore', 'README.md', 'CHANGELOG.md', 'CLAUDE.md', 'decision-log.md', 'LICENSE', 'package.json', 'docker-compose.yml', 'docker-compose.yaml', 'docker-compose.*.yml', 'docker-compose.*.yaml', 'compose.yml', 'compose.yaml', 'compose.*.yml', 'compose.*.yaml', 'Dockerfile', 'Dockerfile.*', '.dockerignore', '**/docker-compose*.yml', '**/docker-compose*.yaml', '**/compose*.yml', '**/compose*.yaml', '**/Dockerfile*', '**/.dockerignore', 'next.config.*', 'vite.config.*', 'nuxt.config.*', 'remix.config.*', 'astro.config.*', 'tsconfig.json', 'jsconfig.json', 'tailwind.config.*', 'postcss.config.*', 'components.json', 'eslint.config.*', 'prettier.config.*', '.prettierrc', '.prettierrc.*', 'vitest.config.*', 'jest.config.*', 'playwright.config.*', 'cypress.config.*', 'nixpacks.toml', 'turbo.json', 'pnpm-workspace.yaml', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'],
+    allowedRoots: ['src/**', 'app/**', 'components/**', 'lib/**', 'pages/**', 'server/**', 'client/**', 'shared/**', 'features/**', 'modules/**', 'utils/**', 'hooks/**', 'services/**', 'styles/**', 'types/**', 'test/**', 'tests/**', '__tests__/**', 'e2e/**', 'playwright/**', 'cypress/**', 'prisma/**', 'scripts/**', 'bin/**', 'tools/**', 'ai/skills/**', 'operations/runbooks/**', 'operations/specs/**', 'operations/specs/video-orchestrator/**', 'projects/*', 'projects/*/**', 'projects/*/src/**', 'projects/probot/src/**', 'services/*/src/**', 'packages/*/src/**', 'specs/**', 'runbooks/**', '*.md', '*.mdx', 'docs/**', 'plans/**', 'notes/**', 'artifacts/**', 'public/**', '.buildflow/**', '.gitignore', '.graphifyignore', 'README.md', 'CHANGELOG.md', 'CLAUDE.md', 'decision-log.md', 'LICENSE', 'package.json', 'docker-compose.yml', 'docker-compose.yaml', 'docker-compose.*.yml', 'docker-compose.*.yaml', 'compose.yml', 'compose.yaml', 'compose.*.yml', 'compose.*.yaml', 'Dockerfile', 'Dockerfile.*', '.dockerignore', '**/docker-compose*.yml', '**/docker-compose*.yaml', '**/compose*.yml', '**/compose*.yaml', '**/Dockerfile*', '**/.dockerignore', 'next.config.*', 'vite.config.*', 'nuxt.config.*', 'remix.config.*', 'astro.config.*', 'tsconfig.json', 'jsconfig.json', 'tailwind.config.*', 'postcss.config.*', 'components.json', 'eslint.config.*', 'prettier.config.*', '.prettierrc', '.prettierrc.*', 'vitest.config.*', 'jest.config.*', 'playwright.config.*', 'cypress.config.*', 'nixpacks.toml', 'turbo.json', 'pnpm-workspace.yaml', '.env.example', '.env.sample', '.env.template', '.env.local.example', '.env.development.example', '.env.production.example'],
     blockedGlobs: ['.env', '.env.*', '**/*.pem', '**/*.key', '**/id_rsa', '**/id_ed25519', '.git/**', 'node_modules/**', '.next/**', 'dist/**', 'build/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**', 'ai/private/**', 'ai/secrets/**'],
     blockedWriteGlobs: ['.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**', '.vercel/**', '.npm/**', '.yarn/**', '.pnpm-store/**', 'generated/**', '.prisma/client/**', 'ai/private/**', 'ai/secrets/**'],
     generatedDeleteAllowedGlobs: ['tsconfig.tsbuildinfo', '.next/**', 'dist/**', 'build/**', 'out/**', 'coverage/**', '.cache/**', '.turbo/**'],
@@ -351,6 +362,8 @@ export function getDefaultWritePolicy(): WritePolicySummary {
 
 function isWithinAllowedRoots(normalized: string): boolean {
   if (!normalized) return false
+  if (isStaticAssetPath(normalized)) return false
+  if (normalized === 'public' || normalized.startsWith('public/')) return true
   if (!normalized.includes('/') && SAFE_ROOT_WRITE_FILES.has(normalized)) return true
   if (getDefaultWritePolicy().allowedRoots.some(pattern => matchesGlob(pattern, normalized))) return true
   if (normalized.endsWith('.md') || normalized.endsWith('.mdx') || normalized.endsWith('.txt') || normalized.endsWith('.json') || normalized.endsWith('.ts') || normalized.endsWith('.tsx') || normalized.endsWith('.js') || normalized.endsWith('.jsx') || normalized.endsWith('.mjs') || normalized.endsWith('.cjs') || normalized.endsWith('.cts') || normalized.endsWith('.mts') || normalized.endsWith('.css') || normalized.endsWith('.scss') || normalized.endsWith('.sass') || normalized.endsWith('.html') || normalized.endsWith('.sql') || normalized.endsWith('.prisma') || normalized.endsWith('.graphql') || normalized.endsWith('.gql') || normalized.endsWith('.yaml') || normalized.endsWith('.yml') || normalized.endsWith('.toml') || normalized.endsWith('.sh') || normalized.endsWith('.bash') || normalized.endsWith('.zsh')) return true

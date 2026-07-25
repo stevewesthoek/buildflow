@@ -7,6 +7,8 @@ import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
 import { listWorkbenchSources, getWorkbenchActiveContext, setWorkbenchActiveContext, unwrapActionError } from '@/lib/actions/gpt'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 import { getBuildSha, getBuildTimestamp } from '@/lib/env-compat'
+import { recordRuntimeResourceTelemetry } from '@/lib/actions/runtime-tunnel-telemetry'
+import { readCompactSloHealth, recordCompactStatusSloTelemetry } from '@/lib/actions/slo-health'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -14,7 +16,7 @@ export const revalidate = 0
 let activeRequests = 0
 const STATUS_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BYTE_LIMIT
 const WEB_PROCESS_STARTED_AT = new Date().toISOString()
-const WEB_PACKAGE_VERSION = process.env.npm_package_version || '1.2.13-beta'
+const WEB_PACKAGE_VERSION = process.env.WORKBENCH_PACKAGE_VERSION || process.env.npm_package_version || 'unknown'
 
 function readWebBuildId(): string | undefined {
   try {
@@ -43,6 +45,7 @@ function ensureSerializable(value: unknown): unknown {
 }
 
 export async function GET(request: NextRequest) {
+  const requestStartedAt = Date.now()
   activeRequests++
   try {
     const include = request.nextUrl.searchParams.get('include')
@@ -128,10 +131,16 @@ export async function GET(request: NextRequest) {
       }
 
       const mem = process.memoryUsage()
+      recordRuntimeResourceTelemetry({
+        heapBytes: mem.heapUsed,
+        rssBytes: mem.rss,
+        activeRequests
+      })
       payload.runtime = {
         activeRequests,
         heapUsedMb: Math.round(mem.heapUsed / 1_048_576),
         rssMb: Math.round(mem.rss / 1_048_576),
+        health: readCompactSloHealth(),
         service: {
           role: 'web',
           packageVersion: WEB_PACKAGE_VERSION,
@@ -144,7 +153,7 @@ export async function GET(request: NextRequest) {
       }
 
       payload.activity = {
-        version: '1.2.13-beta',
+        version: WEB_PACKAGE_VERSION,
         operationId: 'getWorkbenchStatus',
         phase: 'completed',
         actionLabel: 'Checked BuildFlow status',
@@ -157,6 +166,10 @@ export async function GET(request: NextRequest) {
 
       const safePayload = ensureSerializable(payload) as Record<string, unknown>
       const payloadBytes = Buffer.byteLength(JSON.stringify(safePayload), 'utf8')
+      recordCompactStatusSloTelemetry({
+        durationMs: Date.now() - requestStartedAt,
+        responseBytes: payloadBytes
+      })
 
       if (payloadBytes > STATUS_RESPONSE_BUDGET_BYTES) {
         return NextResponse.json({
@@ -168,7 +181,7 @@ export async function GET(request: NextRequest) {
             recovery: ['Retry with fewer sources', 'Use a narrower include parameter', 'Check local BuildFlow logs']
           },
           activity: {
-            version: '1.2.13-beta',
+            version: WEB_PACKAGE_VERSION,
             operationId: 'getWorkbenchStatus',
             phase: 'failed',
             actionLabel: 'BuildFlow status check failed',

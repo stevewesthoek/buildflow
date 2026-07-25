@@ -31,12 +31,12 @@ import { drainQueuedWorkbenchPackets, scheduleWorkbenchPacket } from './workbenc
 import { claimNextWorkbenchPacket, compactWorkbenchPacketLeaseRecord, controlWorkbenchPacketsForRun, getWorkbenchPacketRecord, listWorkbenchPacketRecords, recoverInterruptedWorkbenchPacket, recoverStaleWorkbenchPacketLeases, releaseWorkbenchPacketLease, renewWorkbenchPacketLease, reserveWorkbenchPacket } from './workbench-packet-store'
 import { getBuildSha, getBuildTimestamp } from '@workbench/shared'
 
-let cliVersion = '1.2.13-beta'
+let cliVersion = process.env.WORKBENCH_PACKAGE_VERSION || 'unknown'
 try {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf-8')) as { version?: string }
   if (pkg.version) cliVersion = pkg.version
 } catch {
-  // fallback to hardcoded version if package.json not found
+  // Preserve the lifecycle-provided version or fail closed to unknown.
 }
 const agentProcessStartedAt = new Date().toISOString()
 
@@ -533,74 +533,98 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: unknown }>('/api/commands/run', async (request, reply) => {
     try {
-      const { parseRunCommandRequest, toSafeCommandRequest } = await import('./run-command-request')
-      const parsed = parseRunCommandRequest(request.body)
-      if (parsed.ok === false) {
-        return reply.code(400).header('Cache-Control', 'no-store').send({ error: parsed.error })
+      const {
+        classifyParsedRunCommandRequest,
+        parseRunCommandRouteRequest,
+        toSafeCommandRequest
+      } = await import('./run-command-request')
+      const routed = parseRunCommandRouteRequest(request.body)
+      if (routed.ok === false) {
+        return reply.code(400).header('Cache-Control', 'no-store').send({ error: routed.error })
       }
+      const parsed = routed.command
 
-      const source = getSourcesSafe().find(item => item.id === parsed.sourceId)
-      if (!source || !source.enabled) {
-        return reply.code(404).header('Cache-Control', 'no-store').send({
-          error: `Source not found or disabled: ${parsed.sourceId}`
-        })
-      }
-
-      if (parsed.kind === 'validation_submit') {
-        const { submitWorkbenchValidationJob, scheduleWorkbenchValidationJob } = await import('./workbench-validation-jobs')
-        const submitted = submitWorkbenchValidationJob(parsed.request)
-        if ('code' in submitted) {
-          return reply.code(submitted.code === 'VALIDATION_JOB_STORE_BUSY' ? 409 : 400).header('Cache-Control', 'no-store').send(submitted)
+      const dispatch = async (): Promise<{ statusCode: number; body: unknown }> => {
+        const source = getSourcesSafe().find(item => item.id === parsed.sourceId)
+        if (!source || !source.enabled) {
+          return { statusCode: 404, body: { error: `Source not found or disabled: ${parsed.sourceId}` } }
         }
-        const schedule = submitted.job.status === 'queued'
-          ? scheduleWorkbenchValidationJob({
-              jobId: submitted.job.jobId,
-              sourceId: parsed.sourceId,
-              sourceRoot: source.path,
-              leaseMs: Math.max(30_000, Math.min((submitted.job.timeoutMs || 300_000) + 60_000, 960_000))
-            })
-          : undefined
-        return reply.header('Cache-Control', 'no-store').send({
-          status: schedule?.status === 'scheduled' ? 'running' : submitted.job.status,
-          validationJobOperation: 'submit',
-          created: submitted.created,
-          job: schedule?.status === 'scheduled'
-            ? { ...submitted.job, status: 'running', workerId: schedule.workerId }
-            : submitted.job,
-          schedule
-        })
-      }
 
-      if (parsed.kind === 'validation_status') {
-        const { getCompactWorkbenchValidationJob } = await import('./workbench-validation-jobs')
-        const job = getCompactWorkbenchValidationJob(parsed.validationJobId, parsed.sourceId)
-        if (!job) {
-          return reply.code(404).header('Cache-Control', 'no-store').send({
-            error: 'Validation job not found for the selected source.'
+        if (parsed.kind === 'validation_submit') {
+          const { submitWorkbenchValidationJob, scheduleWorkbenchValidationJob } = await import('./workbench-validation-jobs')
+          const submitted = submitWorkbenchValidationJob(parsed.request)
+          if ('code' in submitted) {
+            return { statusCode: submitted.code === 'VALIDATION_JOB_STORE_BUSY' ? 409 : 400, body: submitted }
+          }
+          const schedule = submitted.job.status === 'queued'
+            ? scheduleWorkbenchValidationJob({
+                jobId: submitted.job.jobId,
+                sourceId: parsed.sourceId,
+                sourceRoot: source.path,
+                leaseMs: Math.max(30_000, Math.min((submitted.job.timeoutMs || 300_000) + 60_000, 960_000))
+              })
+            : undefined
+          return {
+            statusCode: 200,
+            body: {
+              status: schedule?.status === 'scheduled' ? 'running' : submitted.job.status,
+              validationJobOperation: 'submit',
+              created: submitted.created,
+              job: schedule?.status === 'scheduled'
+                ? { ...submitted.job, status: 'running', workerId: schedule.workerId }
+                : submitted.job,
+              schedule
+            }
+          }
+        }
+
+        if (parsed.kind === 'validation_status') {
+          const { getCompactWorkbenchValidationJob } = await import('./workbench-validation-jobs')
+          const job = getCompactWorkbenchValidationJob(parsed.validationJobId, parsed.sourceId)
+          return job
+            ? { statusCode: 200, body: { status: job.status, validationJobOperation: 'status', job } }
+            : { statusCode: 404, body: { error: 'Validation job not found for the selected source.' } }
+        }
+
+        if (parsed.kind === 'migration') {
+          const { runControlledWorkflowMigrationCommand } = await import('./n8n-workflow-migration-command-adapter')
+          const result = await runControlledWorkflowMigrationCommand(parsed.request, {
+            getSources: getSourcesSafe,
+            getConfiguredGrants: () => loadConfig()?.controlledN8nWorkflowGrants
           })
+          return { statusCode: result.statusCode, body: result.body }
         }
-        return reply.header('Cache-Control', 'no-store').send({
-          status: job.status,
-          validationJobOperation: 'status',
-          job
-        })
+
+        const safeRequest = toSafeCommandRequest(parsed.request, source.path)
+        if (!getAllowedCommandKinds().includes(safeRequest.commandKind)) {
+          return { statusCode: 400, body: { error: 'commandKind is not allowlisted' } }
+        }
+        return { statusCode: 200, body: await runSafeCommand(safeRequest) }
       }
 
-      if (parsed.kind === 'migration') {
-        const { runControlledWorkflowMigrationCommand } = await import('./n8n-workflow-migration-command-adapter')
-        const result = await runControlledWorkflowMigrationCommand(parsed.request, {
-          getSources: getSourcesSafe,
-          getConfiguredGrants: () => loadConfig()?.controlledN8nWorkflowGrants
-        })
+      if (routed.mode === 'legacy') {
+        const result = await dispatch()
         return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.body)
       }
 
-      const safeRequest = toSafeCommandRequest(parsed.request, source.path)
-      if (!getAllowedCommandKinds().includes(safeRequest.commandKind)) {
-        return reply.code(400).header('Cache-Control', 'no-store').send({ error: 'commandKind is not allowlisted' })
+      const { executeWithWorkbenchAdmission } = await import('./workbench-admission-orchestrator')
+      const admitted = await executeWithWorkbenchAdmission({
+        requestId: `run-command-${crypto.randomUUID()}`,
+        sessionId: routed.sessionId,
+        sourceId: parsed.sourceId,
+        operation: classifyParsedRunCommandRequest(parsed),
+        operationKind: parsed.kind === 'direct' ? parsed.request.commandKind : parsed.kind,
+        execute: dispatch
+      })
+      if (admitted.ok === false) {
+        const statusCode = admitted.code === 'ADMISSION_BUDGET_REJECTED' || admitted.code === 'ADMISSION_REPOSITORY_REJECTED' ? 409 : 400
+        return reply.code(statusCode).header('Cache-Control', 'no-store').send({
+          ok: false,
+          status: 'blocked',
+          error: { code: admitted.code, message: admitted.message }
+        })
       }
-      const result = await runSafeCommand(safeRequest)
-      return reply.header('Cache-Control', 'no-store').send(result)
+      return reply.code(admitted.result.statusCode).header('Cache-Control', 'no-store').send(admitted.result.body)
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }

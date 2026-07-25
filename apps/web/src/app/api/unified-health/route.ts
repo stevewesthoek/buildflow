@@ -55,7 +55,7 @@ export async function GET() {
       },
       service: {
         role: 'web',
-        packageVersion: process.env.npm_package_version || '1.2.13-beta',
+        packageVersion: process.env.WORKBENCH_PACKAGE_VERSION || process.env.npm_package_version || 'unknown',
         gitCommit: getBuildSha(),
         buildTimestamp: getBuildTimestamp(),
         processStartedAt: WEB_PROCESS_STARTED_AT,

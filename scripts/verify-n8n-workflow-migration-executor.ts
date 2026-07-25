@@ -207,6 +207,15 @@ let nextProcessResult: any = {
   stderrTruncated: false
 }
 const processSpecifications: any[] = []
+const runtimeApiUrl = 'https://automation.example.test/api/v1'
+const runtimeApiKey = ['synthetic', 'runtime', 'credential'].join('-')
+const runtimeConfiguration = () => ({
+  environment: {
+    PATH: '/usr/bin:/bin', HOME: root, CI: '1', NO_COLOR: '1',
+    N8N_API_URL: runtimeApiUrl, N8N_API_KEY: runtimeApiKey
+  },
+  credentialValues: [runtimeApiKey]
+})
 
 function createExecutor(overrides: Record<string, unknown> = {}) {
   return createN8nWorkflowMigrationExecutor({
@@ -286,6 +295,32 @@ async function main() {
         'PATH', 'HOME', 'CI', 'NO_COLOR', 'N8N_CONFIG_FILE', 'N8N_API_URL', 'N8N_API_KEY'
       ].includes(key)).sort(),
       'the child environment must contain only the fixed allowlist'
+    )
+
+    processSpecifications.length = 0
+    result = await createExecutor({ loadRuntimeConfiguration: runtimeConfiguration })(invocation())
+    assert.equal(result.classification, 'succeeded')
+    assert.equal(processSpecifications.length, 1)
+    assert.equal(processSpecifications[0].env.N8N_API_URL, runtimeApiUrl)
+    assert.equal(processSpecifications[0].env.N8N_API_KEY, runtimeApiKey)
+    assert.equal(JSON.stringify(result).includes(runtimeApiKey), false)
+
+    await expectBlocked(
+      'runtime configuration unavailable',
+      invocation(),
+      'RUNTIME_CONFIGURATION_UNAVAILABLE',
+      createExecutor({ loadRuntimeConfiguration: () => { throw new Error('private fixture failure') } })
+    )
+    await expectBlocked(
+      'runtime credential missing from redaction values',
+      invocation(),
+      'RUNTIME_CONFIGURATION_UNAVAILABLE',
+      createExecutor({
+        loadRuntimeConfiguration: () => ({
+          environment: runtimeConfiguration().environment,
+          credentialValues: []
+        })
+      })
     )
 
     const mutableOperation = structuredClone(baseOperation)
@@ -481,7 +516,10 @@ async function main() {
       stdout: JSON.stringify({ contractVersion: 1, workflowId, classification: 'succeeded' }), stderr: '',
       stdoutTruncated: false, stderrTruncated: false
     }
-    const mutationResult = await createExecutor({ consumeMutationDispatch: () => ({ ok: true as const }) })(invocation(
+    const mutationResult = await createExecutor({
+      consumeMutationDispatch: () => ({ ok: true as const }),
+      loadRuntimeConfiguration: runtimeConfiguration
+    })(invocation(
       candidateEffect,
       { ...baseOperation, candidateUpdateRequests: 1 }
     ))
@@ -490,6 +528,9 @@ async function main() {
     assert.deepEqual(processSpecifications[0].args, ['update-workflow', workflowId, '-'])
     assert.equal(processSpecifications[0].shell, false)
     assert.equal(processSpecifications[0].stdin, candidateContent)
+    assert.equal(processSpecifications[0].env.N8N_API_URL, runtimeApiUrl)
+    assert.equal(processSpecifications[0].env.N8N_API_KEY, runtimeApiKey)
+    assert.equal(JSON.stringify(mutationResult).includes(runtimeApiKey), false)
     const replayBlocked = await createExecutor({ consumeMutationDispatch: () => ({ ok: false as const, code: 'MUTATION_DISPATCH_REPLAYED' }) })(invocation(
       candidateEffect,
       { ...baseOperation, candidateUpdateRequests: 1 }
@@ -506,6 +547,20 @@ async function main() {
     assert.equal(result.classification, 'definitively_failed')
     assert.equal(result.reasonCode, 'PROCESS_DEFINITIVE_FAILURE')
     assert.equal(result.exitCode, 7)
+    assert.equal(result.operationId, operationId)
+    assert.equal(result.workflowId, workflowId)
+    const definitiveFailureEvent = toControlledWorkflowMigrationEvent(result, '2026-07-14T10:30:00.000Z')
+    assert.equal(definitiveFailureEvent.type, 'precondition_readback')
+    if (definitiveFailureEvent.type !== 'precondition_readback') throw new Error('expected precondition readback event')
+    assert.equal(definitiveFailureEvent.executorClassification, 'definitively_failed')
+    assert.equal(definitiveFailureEvent.executorReasonCode, 'PROCESS_DEFINITIVE_FAILURE')
+    assert.equal(definitiveFailureEvent.executorExitCode, 7)
+    assert.equal(definitiveFailureEvent.executorOperationId, operationId)
+    assert.equal(definitiveFailureEvent.executorWorkflowId, workflowId)
+    const definitiveFailureTransition = advanceControlledWorkflowMigration({ operation: baseOperation, event: definitiveFailureEvent })
+    assert.equal(definitiveFailureTransition.reasonCode, 'PRECONDITION_UNAVAILABLE')
+    assert.equal(definitiveFailureTransition.operation.evidence?.executorReasonCode, 'PROCESS_DEFINITIVE_FAILURE')
+    assert.equal(definitiveFailureTransition.operation.evidence?.executorExitCode, 7)
     assert.equal(JSON.stringify(result).includes('bounded failure'), false)
 
     nextProcessResult = {
@@ -841,11 +896,26 @@ async function main() {
       '2026-07-14T11:01:30.000Z'
     )
     assert.equal(blockedPreconditionEvent.type, 'precondition_readback')
+    if (blockedPreconditionEvent.type !== 'precondition_readback') throw new Error('expected precondition readback event')
+    assert.equal(blockedPreconditionEvent.executorClassification, 'blocked')
+    assert.equal(blockedPreconditionEvent.executorReasonCode, 'SOURCE_ID_MISMATCH')
+    assert.equal(blockedPreconditionEvent.executorExitCode, null)
+    assert.equal(blockedPreconditionEvent.readPurpose, 'precondition')
+    assert.equal(blockedPreconditionEvent.executorOperationId, undefined)
+    assert.equal(blockedPreconditionEvent.executorWorkflowId, undefined)
     const blockedPreconditionTransition = advanceControlledWorkflowMigration({
       operation: baseOperation,
       event: blockedPreconditionEvent
     })
     assert.equal(blockedPreconditionTransition.operation.status, 'failed')
+    assert.equal(blockedPreconditionTransition.reasonCode, 'PRECONDITION_UNAVAILABLE')
+    assert.equal(blockedPreconditionTransition.operation.reasonCode, 'PRECONDITION_UNAVAILABLE')
+    assert.equal(blockedPreconditionTransition.operation.evidence?.executorClassification, 'blocked')
+    assert.equal(blockedPreconditionTransition.operation.evidence?.executorReasonCode, 'SOURCE_ID_MISMATCH')
+    assert.equal(blockedPreconditionTransition.operation.evidence?.executorExitCode, null)
+    assert.equal(blockedPreconditionTransition.operation.evidence?.readPurpose, 'precondition')
+    assert.equal(blockedPreconditionTransition.operation.evidence?.executorOperationId, undefined)
+    assert.equal(blockedPreconditionTransition.operation.evidence?.executorWorkflowId, undefined)
     assert.deepEqual(
       blockedPreconditionTransition.effects.map(effect => effect.type),
       ['persist_operation', 'release_lease']

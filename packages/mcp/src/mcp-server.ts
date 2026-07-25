@@ -28,7 +28,7 @@ export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: In
   const invoke = params.invoke ?? createWorkbenchClient()
   const scope = params.scope ?? loadWorkbenchMcpScope()
   const admittedToolNames = WORKBENCH_TOOL_NAMES.filter(name => scope.tools.has(name))
-  const server = new Server({ name: 'workbench', version: '1.3.1-beta' }, {
+  const server = new Server({ name: 'workbench', version: '1.3.3-beta' }, {
     capabilities: { tools: {} },
     instructions: 'Use only the admitted bounded Workbench actions. Workbench remains authoritative for source selection, policy, confirmation, grants, dispatch, audit, and execution. Never retry mutation-capable calls after ambiguous transport results.'
   })
@@ -72,7 +72,10 @@ export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: In
       })
     }
     if (contract.name === 'runWorkbenchCommand') {
-      const commandKind = parsed.value.commandKind
+      const command = parsed.value.command
+      const commandKind = command && typeof command === 'object' && !Array.isArray(command)
+        ? (command as Record<string, unknown>).commandKind
+        : undefined
       if (typeof commandKind !== 'string' || !scope.commandKinds.has(commandKind as never)) {
         return toolResponse({
           ok: false,

@@ -3,6 +3,9 @@ import { NextRequest } from 'next/server'
 import { dispatchWorkbenchCommand } from '../../lib/actions/gpt'
 import { POST as runCommand } from '../../app/api/actions/run-command/route'
 
+const sessionId = 'session-agent-example'
+const sessionCommand = (command: Record<string, unknown>) => ({ version: 2, sessionId, command })
+
 const exportRequest = {
   sourceId: 'brain',
   commandKind: 'n8n_workflow_export',
@@ -33,15 +36,18 @@ async function testN8nExportPassesTransportValidation() {
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }) as typeof fetch
 
-    const result = await dispatchWorkbenchCommand(exportRequest)
+    const result = await dispatchWorkbenchCommand(sessionCommand(exportRequest))
     assert.equal(result.commandKind, 'n8n_workflow_export')
     assert.equal(result.sourceId, 'brain')
     assert.equal(result.requiresConfirmation, true)
     assert.equal(result.confirmationToken, 'confirm:test-token')
-    assert.equal(requestBody?.commandKind, 'n8n_workflow_export')
-    assert.equal(requestBody?.sourceId, 'brain')
-    assert.equal(requestBody?.networkAccess, true)
-    assert.deepEqual(requestBody?.protectedPaths, exportRequest.protectedPaths)
+    assert.equal(requestBody?.version, 2)
+    assert.equal(requestBody?.sessionId, sessionId)
+    const command = requestBody?.command as Record<string, unknown>
+    assert.equal(command.commandKind, 'n8n_workflow_export')
+    assert.equal(command.sourceId, 'brain')
+    assert.equal(command.networkAccess, true)
+    assert.deepEqual(command.protectedPaths, exportRequest.protectedPaths)
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -65,17 +71,54 @@ async function testMigrationPassesStrictTransportAndPreservesConfirmationGate() 
       return new Response(JSON.stringify({
         status: 'needs_confirmation', sourceId: migrationRequest.sourceId,
         commandKind: 'n8n_workflow_migration', confirmationToken: 'confirmation-example',
-        operation: { operationId: 'operation-example', status: 'prepared' }
+        operation: {
+          operationId: 'operation-example',
+          status: 'prepared',
+          revision: 0,
+          binding: {
+            sourceId: migrationRequest.sourceId,
+            workflowId: 'workflow-example',
+            mode: 'apply',
+            candidatePath: 'artifacts/candidate.json',
+            candidateSha256: 'a'.repeat(64),
+            rollbackPath: 'artifacts/rollback.json',
+            rollbackSha256: 'b'.repeat(64),
+            manifestPath: 'artifacts/manifest.json',
+            manifestSha256: 'c'.repeat(64),
+            wrapperSha256: 'd'.repeat(64)
+          },
+          confirmationExpiresAt: '2026-07-19T19:30:00.000Z',
+          rollbackReady: true
+        }
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }) as typeof fetch
 
-    const result = await dispatchWorkbenchCommand(migrationRequest)
+    const result = await dispatchWorkbenchCommand(sessionCommand(migrationRequest))
     assert.equal(result.commandKind, 'n8n_workflow_migration')
     assert.equal(result.status, 'needs_confirmation')
     assert.equal(result.confirmationToken, 'confirmation-example')
+    const operation = result.operation as {
+      operationId?: string
+      status?: string
+      revision?: number
+      binding?: Record<string, unknown>
+      confirmationExpiresAt?: string
+      rollbackReady?: boolean
+    }
+    assert.equal(operation.operationId, 'operation-example')
+    assert.equal(operation.status, 'prepared')
+    assert.equal(operation.revision, 0)
+    assert.equal(operation.binding?.sourceId, migrationRequest.sourceId)
+    assert.equal(operation.binding?.workflowId, 'workflow-example')
+    assert.equal(operation.binding?.candidateSha256, 'a'.repeat(64))
+    assert.equal(operation.binding?.rollbackSha256, 'b'.repeat(64))
+    assert.equal(operation.binding?.manifestSha256, 'c'.repeat(64))
+    assert.equal(operation.binding?.wrapperSha256, 'd'.repeat(64))
+    assert.equal(operation.confirmationExpiresAt, '2026-07-19T19:30:00.000Z')
+    assert.equal(operation.rollbackReady, true)
     assert.equal((result.activity as { phase?: string }).phase, 'waiting_for_confirmation')
     assert.equal((result.activity as { requiresConfirmation?: boolean }).requiresConfirmation, true)
-    assert.deepEqual(requestBody, migrationRequest)
+    assert.deepEqual(requestBody, sessionCommand(migrationRequest))
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -96,11 +139,15 @@ async function testUnsupportedCommandKindsRemainRejected() {
     }) as typeof fetch
 
     await assert.rejects(
-      () => dispatchWorkbenchCommand({ sourceId: 'brain', commandKind: 'unsupported_command' }),
+      () => dispatchWorkbenchCommand(sessionCommand({ sourceId: 'brain', commandKind: 'unsupported_command' })),
       /Invalid runWorkbenchCommand request/
     )
     await assert.rejects(
-      () => dispatchWorkbenchCommand({ sourceId: 'brain', commandKind: 'git_status_short', args: ['status'] }),
+      () => dispatchWorkbenchCommand(sessionCommand({ sourceId: 'brain', commandKind: 'git_status_short', args: ['status'] })),
+      /Invalid runWorkbenchCommand request/
+    )
+    await assert.rejects(
+      () => dispatchWorkbenchCommand({ sourceId: 'brain', commandKind: 'git_status_short' }),
       /Invalid runWorkbenchCommand request/
     )
 
@@ -110,11 +157,23 @@ async function testUnsupportedCommandKindsRemainRejected() {
         authorization: 'Bearer test-action-token',
         'content-type': 'application/json'
       },
-      body: JSON.stringify({ sourceId: 'brain', commandKind: 'git_status_short', args: ['status'] })
+      body: JSON.stringify(sessionCommand({ sourceId: 'brain', commandKind: 'git_status_short', args: ['status'] }))
     }))
     const payload = await response.json()
     assert.equal(response.status, 400)
     assert.equal(payload.error?.code, 'INVALID_WORKBENCH_COMMAND_REQUEST')
+
+    const legacyResponse = await runCommand(new NextRequest('http://127.0.0.1:3054/api/actions/run-command', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-action-token',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ sourceId: 'brain', commandKind: 'git_status_short' })
+    }))
+    const legacyPayload = await legacyResponse.json()
+    assert.equal(legacyResponse.status, 400)
+    assert.equal(legacyPayload.error?.code, 'INVALID_WORKBENCH_COMMAND_REQUEST')
     assert.equal(fetchCalls, 0, 'invalid command shapes must be rejected before transport')
   } finally {
     globalThis.fetch = originalFetch
@@ -147,7 +206,7 @@ async function testRunCommandRoutePreservesConfirmationGate() {
         authorization: 'Bearer test-action-token',
         'content-type': 'application/json'
       },
-      body: JSON.stringify(exportRequest)
+      body: JSON.stringify(sessionCommand(exportRequest))
     }))
     const payload = await response.json()
     assert.equal(response.status, 200)
@@ -164,13 +223,102 @@ async function testRunCommandRoutePreservesConfirmationGate() {
   }
 }
 
+async function testRunCommandRoutePreservesMigrationOperation() {
+  const originalFetch = globalThis.fetch
+  const originalToken = process.env.WORKBENCH_ACTION_TOKEN
+  const originalMode = process.env.WORKBENCH_BACKEND_MODE
+  const migrationRequest = {
+    sourceId: 'migration-example-source',
+    commandKind: 'n8n_workflow_migration',
+    migration: {
+      mode: 'apply', phase: 'prepare', workflowId: 'workflow-example',
+      candidatePath: 'artifacts/candidate.json', rollbackPath: 'artifacts/rollback.json',
+      manifestPath: 'artifacts/manifest.json', networkAccess: true
+    }
+  }
+
+  try {
+    process.env.WORKBENCH_ACTION_TOKEN = 'test-action-token'
+    process.env.WORKBENCH_BACKEND_MODE = 'direct-agent'
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      status: 'needs_confirmation',
+      sourceId: migrationRequest.sourceId,
+      commandKind: migrationRequest.commandKind,
+      migrationMode: 'apply',
+      migrationPhase: 'prepare',
+      confirmationToken: 'confirmation-example',
+      operation: {
+        operationId: 'operation-example',
+        status: 'prepared',
+        revision: 0,
+        binding: {
+          sourceId: migrationRequest.sourceId,
+          workflowId: 'workflow-example',
+          mode: 'apply',
+          candidatePath: 'artifacts/candidate.json',
+          candidateSha256: 'a'.repeat(64),
+          rollbackPath: 'artifacts/rollback.json',
+          rollbackSha256: 'b'.repeat(64),
+          manifestPath: 'artifacts/manifest.json',
+          manifestSha256: 'c'.repeat(64),
+          wrapperSha256: 'd'.repeat(64)
+        },
+        confirmationExpiresAt: '2026-07-19T19:30:00.000Z',
+        rollbackReady: true
+      }
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch
+
+    const response = await runCommand(new NextRequest('http://127.0.0.1:3054/api/actions/run-command', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-action-token',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(sessionCommand(migrationRequest))
+    }))
+    const payload = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(payload.sourceId, migrationRequest.sourceId)
+    assert.equal(payload.commandKind, migrationRequest.commandKind)
+    assert.equal(payload.migrationMode, 'apply')
+    assert.equal(payload.migrationPhase, 'prepare')
+    assert.equal(payload.confirmationToken, 'confirmation-example')
+    assert.equal(payload.operation?.operationId, 'operation-example')
+    assert.equal(payload.operation?.status, 'prepared')
+    assert.equal(payload.operation?.revision, 0)
+    assert.equal(payload.operation?.binding?.sourceId, migrationRequest.sourceId)
+    assert.equal(payload.operation?.binding?.workflowId, 'workflow-example')
+    assert.equal(payload.operation?.binding?.mode, 'apply')
+    assert.equal(payload.operation?.binding?.candidatePath, 'artifacts/candidate.json')
+    assert.equal(payload.operation?.binding?.candidateSha256, 'a'.repeat(64))
+    assert.equal(payload.operation?.binding?.rollbackPath, 'artifacts/rollback.json')
+    assert.equal(payload.operation?.binding?.rollbackSha256, 'b'.repeat(64))
+    assert.equal(payload.operation?.binding?.manifestPath, 'artifacts/manifest.json')
+    assert.equal(payload.operation?.binding?.manifestSha256, 'c'.repeat(64))
+    assert.equal(payload.operation?.binding?.wrapperSha256, 'd'.repeat(64))
+    assert.equal(payload.operation?.confirmationExpiresAt, '2026-07-19T19:30:00.000Z')
+    assert.equal(payload.operation?.rollbackReady, true)
+    assert.notEqual(payload.activity?.operationId, payload.operation?.operationId)
+    assert.equal(payload.activity?.operationId, 'runWorkbenchCommand')
+    assert.equal(payload.activity?.phase, 'waiting_for_confirmation')
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalToken === undefined) delete process.env.WORKBENCH_ACTION_TOKEN
+    else process.env.WORKBENCH_ACTION_TOKEN = originalToken
+    if (originalMode === undefined) delete process.env.WORKBENCH_BACKEND_MODE
+    else process.env.WORKBENCH_BACKEND_MODE = originalMode
+  }
+}
+
 async function main() {
   await testN8nExportPassesTransportValidation()
   await testMigrationPassesStrictTransportAndPreservesConfirmationGate()
   await testUnsupportedCommandKindsRemainRejected()
   await testRunCommandRoutePreservesConfirmationGate()
+  await testRunCommandRoutePreservesMigrationOperation()
   console.log('✓ n8n_workflow_export passes transport validation and preserves confirmation gating')
   console.log('✓ n8n_workflow_migration preserves strict nested transport and confirmation gating')
+  console.log('✓ run-command route preserves the controlled migration operation separately from activity metadata')
   console.log('✓ run-command preserves the backend confirmation token and source ID')
   console.log('✓ Unsupported command kinds remain rejected before transport')
 }

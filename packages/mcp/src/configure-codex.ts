@@ -5,9 +5,32 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse, stringify } from 'smol-toml'
 import { deriveWorkbenchMcpCredential } from '@workbench/shared/workbench-mcp-auth'
+import { loadWorkbenchOwnerConfig } from '@workbench/shared/workbench-owner-config'
+import {
+  WORKBENCH_MCP_PROFILES,
+  WORKBENCH_CREDENTIAL_FILE_NAME,
+  WORKBENCH_ENTRYPOINT_SUFFIX,
+  BRAIN_PROFILE_ALLOWED_TOOLS,
+  BRAIN_PROFILE_ALLOWED_COMMAND_KINDS,
+  PROFILE_AVAILABILITY,
+  buildWorkbenchMcpServerSpec,
+  canonicalProjectRoot,
+  canonicalNodeExecutable,
+  parseConfigureCliArgs,
+  type WorkbenchMcpProfile
+} from './configure-core.js'
+
+export {
+  WORKBENCH_MCP_PROFILES,
+  BRAIN_PROFILE_ALLOWED_TOOLS,
+  BRAIN_PROFILE_ALLOWED_COMMAND_KINDS,
+  PROFILE_AVAILABILITY,
+  parseConfigureCliArgs,
+  type WorkbenchMcpProfile
+}
 
 const SERVER_NAME = 'workbench'
-const TOKEN_FILE_NAME = 'codex-workbench-mcp.token'
+const TOKEN_FILE_NAME = WORKBENCH_CREDENTIAL_FILE_NAME
 
 type TomlDocument = Record<string, any>
 
@@ -16,9 +39,14 @@ export type ConfigureOptions = {
   targetProjectRoot?: string
   codexHome?: string
   homeDir?: string
-  env?: NodeJS.ProcessEnv
   now?: Date
   nodeExecutable?: string
+  profile?: WorkbenchMcpProfile
+}
+
+export type ConfigureHooks = {
+  afterCredentialWrite?: () => void
+  afterProjectConfigWrite?: () => void
 }
 
 export type CodexRegistrationStatus = {
@@ -34,6 +62,10 @@ export type CodexRegistrationStatus = {
   cwd?: string
   globalConfigUnchanged: boolean
   duplicateCount: number
+  globalMatchCount: number
+  projectMatchCount: number
+  profile: WorkbenchMcpProfile
+  availability: 'required' | 'optional'
 }
 
 function mode(file: string): string | undefined {
@@ -60,68 +92,18 @@ function atomicWrite(file: string, content: string, fileMode = 0o600): void {
   fs.chmodSync(file, fileMode)
 }
 
-function parseEnvValue(raw: string): string {
-  const trimmed = raw.trim()
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed.slice(1, -1)
-  }
-  return trimmed
-}
-
-function tokenFromEnvFile(file: string): string | undefined {
-  if (!fs.existsSync(file)) return undefined
-  const stat = fs.lstatSync(file)
-  const expectedUid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 ||
-      (expectedUid !== undefined && stat.uid !== expectedUid)) {
-    throw new Error('apps/web/.env.local must be an owner-only regular file before reading its Workbench action credential.')
-  }
-  const values = new Map<string, string>()
-  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const separator = trimmed.indexOf('=')
-    if (separator <= 0) continue
-    values.set(trimmed.slice(0, separator).trim(), parseEnvValue(trimmed.slice(separator + 1)))
-  }
-  const canonical = values.get('WORKBENCH_ACTION_TOKEN')
-  const legacy = values.get('BUILDFLOW_ACTION_TOKEN')
-  if (canonical && legacy && canonical !== legacy) throw new Error('Conflicting Workbench action credential variables.')
-  return canonical || legacy
-}
-
-function validateToken(bearerValue: string | undefined): string {
-  if (!bearerValue || bearerValue.length < 16 || bearerValue.length > 4096 || /[\r\n\0]/.test(bearerValue)) {
-    throw new Error('A valid WORKBENCH_ACTION_TOKEN is required through the process environment or apps/web/.env.local.')
-  }
-  return bearerValue
-}
-
-function resolveToken(options: ConfigureOptions, workbenchRepoRoot: string): string {
-  const env = options.env ?? process.env
-  if (env.WORKBENCH_ACTION_TOKEN && env.BUILDFLOW_ACTION_TOKEN && env.WORKBENCH_ACTION_TOKEN !== env.BUILDFLOW_ACTION_TOKEN) {
-    throw new Error('Conflicting Workbench action credential variables.')
-  }
-  return validateToken(
-    env.WORKBENCH_ACTION_TOKEN ||
-    env.BUILDFLOW_ACTION_TOKEN ||
-    tokenFromEnvFile(path.join(workbenchRepoRoot, 'apps', 'web', '.env.local'))
-  )
-}
-
-function expectedServer(repoRoot: string, credentialFile: string, nodeExecutable: string): TomlDocument {
+function expectedServer(repoRoot: string, credentialFile: string, nodeExecutable: string, profile: WorkbenchMcpProfile = 'workbench'): TomlDocument {
+  const spec = buildWorkbenchMcpServerSpec(repoRoot, credentialFile, nodeExecutable, profile)
   return {
-    command: nodeExecutable,
-    args: [path.join(repoRoot, 'packages', 'mcp', 'dist', 'server.js')],
-    cwd: repoRoot,
+    command: spec.command,
+    args: spec.args,
+    cwd: spec.cwd,
     enabled: true,
-    required: true,
+    required: spec.availability === 'required',
     startup_timeout_sec: 10,
     tool_timeout_sec: 30,
     default_tools_approval_mode: 'writes',
-    env: {
-      WORKBENCH_MCP_CREDENTIAL_FILE: credentialFile
-    }
+    env: spec.env
   }
 }
 
@@ -131,8 +113,6 @@ function serverEntries(document: TomlDocument): Array<[string, TomlDocument]> {
   return Object.entries(servers).filter((entry): entry is [string, TomlDocument] =>
     !!entry[1] && typeof entry[1] === 'object' && !Array.isArray(entry[1]))
 }
-
-const WORKBENCH_ENTRYPOINT_SUFFIX = path.join('packages', 'mcp', 'dist', 'server.js')
 
 function canonicalExistingPath(value: string, label: string): string {
   const resolved = path.resolve(value)
@@ -222,22 +202,11 @@ function definitionsMatch(actual: TomlDocument, expected: TomlDocument): boolean
 }
 
 function requireSafeProjectRoot(value: string, description: string): string {
-  if (!path.isAbsolute(value)) throw new Error(`${description} must be an absolute path.`)
-  const resolved = path.resolve(value)
-  if (!fs.existsSync(resolved)) throw new Error(`${description} does not exist: ${resolved}`)
-  const stat = fs.lstatSync(resolved)
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error(`${description} must be a non-symlink directory: ${resolved}`)
-  }
-  return resolved
+  return canonicalProjectRoot(value, description)
 }
 
 function requireSafeNodeExecutable(value: string): string {
-  if (!path.isAbsolute(value)) throw new Error('Node executable must be an absolute path.')
-  const resolved = fs.realpathSync(value)
-  const stat = fs.statSync(resolved)
-  if (!stat.isFile() || (stat.mode & 0o111) === 0) throw new Error('Node executable must be an executable regular file.')
-  return resolved
+  return canonicalNodeExecutable(value)
 }
 
 function projectConfigPath(targetProjectRoot: string): string {
@@ -266,7 +235,7 @@ function resolveRoots(options: ConfigureOptions) {
 
 function configPaths(options: ConfigureOptions) {
   const roots = resolveRoots(options)
-  const homeDir = options.homeDir ?? os.homedir()
+  const homeDir = options.homeDir ?? os.userInfo().homedir
   const codexHome = options.codexHome ?? process.env.CODEX_HOME ?? path.join(homeDir, '.codex')
   return {
     ...roots,
@@ -281,13 +250,14 @@ function configPaths(options: ConfigureOptions) {
 }
 
 export function inspectCodexRegistration(options: ConfigureOptions): CodexRegistrationStatus {
+  const profile: WorkbenchMcpProfile = options.profile ?? 'workbench'
   const paths = configPaths(options)
   const globalDocument = readToml(paths.globalConfigPath)
   const projectDocument = fs.existsSync(paths.projectConfigPath) ? readToml(paths.projectConfigPath) : {}
   const globalDefinitions = serverEntries(globalDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
   const projectDefinitions = serverEntries(projectDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
   const definition = projectDefinitions.find(([name]) => name === SERVER_NAME)?.[1]
-  const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable)
+  const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable, profile)
   const configured = !!definition && definitionsMatch(definition, expected)
   return {
     configured,
@@ -301,11 +271,16 @@ export function inspectCodexRegistration(options: ConfigureOptions): CodexRegist
     args: Array.isArray(definition?.args) ? definition.args : undefined,
     cwd: typeof definition?.cwd === 'string' ? definition.cwd : undefined,
     globalConfigUnchanged: true,
-    duplicateCount: globalDefinitions.length + projectDefinitions.length
+    duplicateCount: globalDefinitions.length + projectDefinitions.length,
+    globalMatchCount: globalDefinitions.length,
+    projectMatchCount: projectDefinitions.length,
+    profile,
+    availability: PROFILE_AVAILABILITY[profile]
   }
 }
 
-export function configureCodex(options: ConfigureOptions): CodexRegistrationStatus & { backupPath: string } {
+export function configureCodex(options: ConfigureOptions, hooks?: ConfigureHooks): CodexRegistrationStatus & { backupPath: string } {
+  const profile: WorkbenchMcpProfile = options.profile ?? 'workbench'
   const paths = configPaths(options)
   if (!fs.existsSync(paths.globalConfigPath)) throw new Error(`Codex global config not found: ${paths.globalConfigPath}`)
   if (mode(paths.globalConfigPath) !== '0600') throw new Error('Codex global config must have mode 0600 before registration.')
@@ -317,20 +292,23 @@ export function configureCodex(options: ConfigureOptions): CodexRegistrationStat
 
   const projectConfigExisted = fs.existsSync(paths.projectConfigPath)
   const projectBeforeText = projectConfigExisted ? fs.readFileSync(paths.projectConfigPath, 'utf8') : ''
+  const projectModeBefore = projectConfigExisted ? fs.statSync(paths.projectConfigPath).mode & 0o777 : 0o600
   const projectDocument = projectConfigExisted ? readToml(paths.projectConfigPath) : {}
   const projectDefinitions = serverEntries(projectDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
   if (projectDefinitions.length > 1 || (projectDefinitions.length === 1 && projectDefinitions[0][0] !== SERVER_NAME)) {
     throw new Error('Duplicate or conflicting Workbench MCP definitions found in project config.')
   }
 
-  const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable)
+  const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable, profile)
   if (projectDefinitions.length === 1 && !definitionsMatch(projectDefinitions[0][1], expected)) {
     throw new Error('Existing Workbench MCP definition does not match the repository-supported configuration.')
   }
   const credentialExisted = fs.existsSync(paths.credentialFile)
   const credentialBefore = credentialExisted ? fs.readFileSync(paths.credentialFile) : undefined
   const credentialModeBefore = credentialExisted ? fs.statSync(paths.credentialFile).mode & 0o777 : 0o600
-  const bearerValue = deriveWorkbenchMcpCredential(resolveToken(options, paths.workbenchRepoRoot))
+  const bearerValue = deriveWorkbenchMcpCredential(
+    loadWorkbenchOwnerConfig({ homeDir: paths.homeDir }).actionToken
+  )
 
   projectDocument.mcp_servers = projectDocument.mcp_servers && typeof projectDocument.mcp_servers === 'object'
     ? projectDocument.mcp_servers
@@ -345,21 +323,149 @@ export function configureCodex(options: ConfigureOptions): CodexRegistrationStat
   atomicWrite(backupPath, projectBeforeText, 0o600)
   try {
     atomicWrite(paths.credentialFile, `${bearerValue}\n`, 0o600)
+    hooks?.afterCredentialWrite?.()
     atomicWrite(paths.projectConfigPath, serialized, 0o600)
+    hooks?.afterProjectConfigWrite?.()
 
     if (fs.readFileSync(paths.globalConfigPath, 'utf8') !== globalBeforeText) {
       throw new Error('Global Codex config changed unexpectedly.')
     }
     const status = inspectCodexRegistration(options)
     if (!status.configured || status.duplicateCount !== 1 || status.configMode !== '0600' || status.credentialMode !== '0600') {
-      throw new Error('Workbench MCP registration validation failed.')
+      throw new Error(`Workbench MCP registration validation failed (profile: ${profile}).`)
     }
     return { ...status, backupPath }
   } catch (error) {
-    if (projectConfigExisted) atomicWrite(paths.projectConfigPath, projectBeforeText, 0o600)
+    if (projectConfigExisted) atomicWrite(paths.projectConfigPath, projectBeforeText, projectModeBefore)
     else if (fs.existsSync(paths.projectConfigPath)) fs.unlinkSync(paths.projectConfigPath)
     if (credentialExisted && credentialBefore) atomicWrite(paths.credentialFile, credentialBefore.toString('utf8'), credentialModeBefore)
     else if (fs.existsSync(paths.credentialFile)) fs.unlinkSync(paths.credentialFile)
+    throw error
+  }
+}
+
+export type CodexConfigurePreview = CodexRegistrationStatus & {
+  backupPath: string
+  changed: boolean
+}
+
+export type CodexRemovePreview = CodexRegistrationStatus & {
+  backupPath?: string
+  changed: boolean
+}
+
+export type RemoveHooks = {
+  afterProjectConfigWrite?: () => void
+}
+
+export function resolveCodexRegistrationPaths(options: ConfigureOptions): ReturnType<typeof configPaths> {
+  return configPaths(options)
+}
+
+function codexBackupPath(options: ConfigureOptions, backupDir: string): string {
+  const timestamp = (options.now ?? new Date()).toISOString().replace(/[:.]/g, '-')
+  return path.join(backupDir, `project-config.toml.${timestamp}.workbench-mcp.bak`)
+}
+
+export function previewCodexConfiguration(options: ConfigureOptions): CodexConfigurePreview {
+  const profile: WorkbenchMcpProfile = options.profile ?? 'workbench'
+  const paths = configPaths(options)
+  if (!fs.existsSync(paths.globalConfigPath)) throw new Error(`Codex global config not found: ${paths.globalConfigPath}`)
+  if (mode(paths.globalConfigPath) !== '0600') throw new Error('Codex global config must have mode 0600 before registration.')
+
+  const globalDocument = readToml(paths.globalConfigPath)
+  const globalDefinitions = serverEntries(globalDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
+  if (globalDefinitions.length > 0) throw new Error('A Workbench MCP definition already exists in the global Codex config.')
+
+  const projectConfigExisted = fs.existsSync(paths.projectConfigPath)
+  const projectDocument = projectConfigExisted ? readToml(paths.projectConfigPath) : {}
+  const projectDefinitions = serverEntries(projectDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
+  if (projectDefinitions.length > 1 || (projectDefinitions.length === 1 && projectDefinitions[0][0] !== SERVER_NAME)) {
+    throw new Error('Duplicate or conflicting Workbench MCP definitions found in project config.')
+  }
+  const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable, profile)
+  if (projectDefinitions.length === 1 && !definitionsMatch(projectDefinitions[0][1], expected)) {
+    throw new Error('Existing Workbench MCP definition does not match the repository-supported configuration.')
+  }
+
+  deriveWorkbenchMcpCredential(loadWorkbenchOwnerConfig({ homeDir: paths.homeDir }).actionToken)
+  projectDocument.mcp_servers = projectDocument.mcp_servers && typeof projectDocument.mcp_servers === 'object'
+    ? projectDocument.mcp_servers
+    : {}
+  projectDocument.mcp_servers[SERVER_NAME] = expected
+  parse(stringify(projectDocument))
+
+  const status = inspectCodexRegistration(options)
+  return {
+    ...status,
+    backupPath: codexBackupPath(options, paths.backupDir),
+    changed: !status.configured || status.duplicateCount !== 1 || status.configMode !== '0600' || status.credentialMode !== '0600'
+  }
+}
+
+export function previewCodexRemoval(options: ConfigureOptions): CodexRemovePreview {
+  const profile: WorkbenchMcpProfile = options.profile ?? 'workbench'
+  const paths = configPaths(options)
+  if (!fs.existsSync(paths.globalConfigPath)) throw new Error(`Codex global config not found: ${paths.globalConfigPath}`)
+  if (mode(paths.globalConfigPath) !== '0600') throw new Error('Codex global config must have mode 0600 before removal.')
+
+  const globalDocument = readToml(paths.globalConfigPath)
+  const globalDefinitions = serverEntries(globalDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
+  if (globalDefinitions.length > 0) throw new Error('A Workbench MCP definition already exists in the global Codex config.')
+  if (!fs.existsSync(paths.projectConfigPath)) return { ...inspectCodexRegistration(options), changed: false }
+
+  const projectDocument = readToml(paths.projectConfigPath)
+  const projectDefinitions = serverEntries(projectDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
+  if (projectDefinitions.length > 1 || (projectDefinitions.length === 1 && projectDefinitions[0][0] !== SERVER_NAME)) {
+    throw new Error('Duplicate or conflicting Workbench MCP definitions found in project config.')
+  }
+  if (projectDefinitions.length === 0) return { ...inspectCodexRegistration(options), changed: false }
+
+  const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable, profile)
+  if (!definitionsMatch(projectDefinitions[0][1], expected)) {
+    throw new Error('Existing Workbench MCP definition does not match the selected profile.')
+  }
+  return {
+    ...inspectCodexRegistration(options),
+    backupPath: codexBackupPath(options, paths.backupDir),
+    changed: true
+  }
+}
+
+export function removeCodex(options: ConfigureOptions, hooks?: RemoveHooks): CodexRegistrationStatus & { backupPath?: string } {
+  const preview = previewCodexRemoval(options)
+  if (!preview.changed) {
+    const { changed: _changed, ...status } = preview
+    return status
+  }
+
+  const paths = configPaths(options)
+  const globalBeforeText = fs.readFileSync(paths.globalConfigPath, 'utf8')
+  const projectBeforeText = fs.readFileSync(paths.projectConfigPath, 'utf8')
+  const projectModeBefore = fs.statSync(paths.projectConfigPath).mode & 0o777
+  const projectDocument = readToml(paths.projectConfigPath)
+  delete (projectDocument.mcp_servers as Record<string, unknown>)[SERVER_NAME]
+  const serialized = stringify(projectDocument)
+  parse(serialized)
+  const backupPath = preview.backupPath!
+  atomicWrite(backupPath, projectBeforeText, 0o600)
+
+  try {
+    atomicWrite(paths.projectConfigPath, serialized, 0o600)
+    hooks?.afterProjectConfigWrite?.()
+    if (fs.readFileSync(paths.globalConfigPath, 'utf8') !== globalBeforeText) {
+      throw new Error('Global Codex config changed unexpectedly.')
+    }
+    const status = inspectCodexRegistration(options)
+    if (status.globalMatchCount !== 0 || status.projectMatchCount !== 0 || status.configured) {
+      throw new Error('Workbench MCP Codex removal validation failed.')
+    }
+    if (status.configMode !== '0600') {
+      throw new Error(`Workbench MCP Codex removal validation failed: config mode ${status.configMode ?? 'missing'} (expected 0600).`)
+    }
+    return { ...status, backupPath }
+  } catch (error) {
+    atomicWrite(paths.projectConfigPath, projectBeforeText, projectModeBefore)
     throw error
   }
 }
@@ -381,9 +487,11 @@ export function parseProjectRootArgument(argv: string[]): string | undefined {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
+    const { projectRoot, profile } = parseConfigureCliArgs(process.argv.slice(2))
     const result = configureCodex({
       workbenchRepoRoot: defaultWorkbenchRepoRoot(),
-      targetProjectRoot: parseProjectRootArgument(process.argv.slice(2))
+      targetProjectRoot: projectRoot,
+      profile
     })
     process.stdout.write(`${JSON.stringify({
       configured: result.configured,
@@ -393,7 +501,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       backupPath: result.backupPath,
       credentialMode: result.credentialMode,
       globalConfigUnchanged: result.globalConfigUnchanged,
-      duplicateCount: result.duplicateCount
+      duplicateCount: result.duplicateCount,
+      profile: result.profile
     }, null, 2)}\n`)
   } catch (error) {
     process.stderr.write(`Workbench MCP configuration failed: ${error instanceof Error ? error.message : 'unknown error'}\n`)

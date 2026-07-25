@@ -14,6 +14,9 @@ export const DEFAULT_REPO_DISCOVERY_INTERVAL_MINUTES = 30
 export const MIN_REPO_DISCOVERY_INTERVAL_MINUTES = 10
 export const MAX_REPO_DISCOVERY_INTERVAL_MINUTES = 60
 const GIT_METADATA_TIMEOUT_MS = 1500
+const GIT_METADATA_CACHE_TTL_MS = 5 * 60_000
+
+const gitMetadataCache = new Map<string, { data: Partial<KnowledgeSource>; expiresAt: number }>()
 
 export function normalizeAutoIndexIntervalMinutes(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value)
@@ -166,7 +169,15 @@ function hashRepoGroupId(commonDir: string): string {
 
 function getGitSourceMetadata(sourcePath: string): Pick<KnowledgeSource, 'repoGroupId' | 'repoRoot' | 'branchName' | 'availableBranches' | 'isGitWorktree'> {
   const expanded = expandTilde(sourcePath)
-  if (!expanded || !fs.existsSync(expanded)) return {}
+  if (!expanded) return {}
+
+  const now = Date.now()
+  const cached = gitMetadataCache.get(expanded)
+  if (cached && now < cached.expiresAt) {
+    return cached.data
+  }
+
+  if (!fs.existsSync(expanded)) return {}
   try {
     if (!fs.statSync(expanded).isDirectory()) return {}
   } catch {
@@ -174,12 +185,18 @@ function getGitSourceMetadata(sourcePath: string): Pick<KnowledgeSource, 'repoGr
   }
 
   const insideWorkTree = runGit(expanded, ['rev-parse', '--is-inside-work-tree'])
-  if (insideWorkTree !== 'true') return {}
+  if (insideWorkTree !== 'true') {
+    gitMetadataCache.set(expanded, { data: {}, expiresAt: now + GIT_METADATA_CACHE_TTL_MS })
+    return {}
+  }
 
   const gitDir = resolveGitPath(expanded, runGit(expanded, ['rev-parse', '--git-dir']))
   const commonDir = resolveGitPath(expanded, runGit(expanded, ['rev-parse', '--git-common-dir']))
   const repoRoot = resolveGitPath(expanded, runGit(expanded, ['rev-parse', '--show-toplevel']))
-  if (!commonDir || !repoRoot) return {}
+  if (!commonDir || !repoRoot) {
+    gitMetadataCache.set(expanded, { data: {}, expiresAt: now + GIT_METADATA_CACHE_TTL_MS })
+    return {}
+  }
 
   const branchName = runGit(expanded, ['branch', '--show-current']) || runGit(expanded, ['rev-parse', '--short', 'HEAD'])
   const branchesOutput = runGit(expanded, ['branch', '--format=%(refname:short)'])
@@ -187,13 +204,16 @@ function getGitSourceMetadata(sourcePath: string): Pick<KnowledgeSource, 'repoGr
     ? Array.from(new Set(branchesOutput.split('\n').map(item => item.trim()).filter(Boolean))).slice(0, 200)
     : undefined
 
-  return {
+  const result = {
     repoGroupId: hashRepoGroupId(commonDir),
     repoRoot,
     ...(branchName ? { branchName } : {}),
     ...(availableBranches && availableBranches.length > 0 ? { availableBranches } : {}),
     isGitWorktree: Boolean(gitDir && path.resolve(gitDir) !== path.resolve(commonDir))
   }
+
+  gitMetadataCache.set(expanded, { data: result, expiresAt: now + GIT_METADATA_CACHE_TTL_MS })
+  return result
 }
 
 function withSourceGitMetadata(source: KnowledgeSource): KnowledgeSource {

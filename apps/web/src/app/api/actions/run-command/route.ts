@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { runWorkbenchCommandRequestSchema } from '@workbench/shared'
+import { sessionAwareRunWorkbenchCommandRequestSchema } from '@workbench/shared'
 import { checkActionAuth } from '@/lib/actionAuth'
 import { dispatchWorkbenchCommand, sourceSelectionRequired, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
+import {
+  jsonResponseBytes,
+  recordRunCommandTelemetry,
+  type RunCommandTelemetryInput
+} from '@/lib/actions/run-command-telemetry'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -33,7 +38,23 @@ function suggestedNextAction(commandKind: string): string {
   return 'Use a narrower command or inspect the partial stdout/stderr.'
 }
 
+function jsonWithRunCommandTelemetry(
+  payload: unknown,
+  init: ResponseInit | undefined,
+  telemetry: Omit<RunCommandTelemetryInput, 'responseBytes'>
+) {
+  recordRunCommandTelemetry({
+    ...telemetry,
+    responseBytes: jsonResponseBytes(payload)
+  })
+  return NextResponse.json(payload, init)
+}
+
 export async function POST(request: NextRequest) {
+  const requestStartedAt = Date.now()
+  let telemetrySourceId: string | undefined
+  let telemetryCommandKind: string | undefined
+
   return withGptActionDeadline({
     operationId: 'runBuildFlowCommand',
     route: '/api/actions/run-command',
@@ -47,35 +68,48 @@ export async function POST(request: NextRequest) {
 
     deadline.setPhase('parse_body')
     const rawBody = await request.json()
-    const parsed = runWorkbenchCommandRequestSchema.safeParse(rawBody)
+    const parsed = sessionAwareRunWorkbenchCommandRequestSchema.safeParse(rawBody)
     if (!parsed.success) {
-      return NextResponse.json({
+      const payload = {
         ok: false,
         connected: true,
         status: 'blocked',
         error: {
           code: 'INVALID_WORKBENCH_COMMAND_REQUEST',
-          message: 'The runWorkbenchCommand request failed strict validation.',
+          message: 'The session-aware runWorkbenchCommand request failed strict validation.',
           issues: parsed.error.issues.slice(0, 10).map(issue => ({
             path: issue.path.join('.') || 'request',
             message: issue.message
           }))
         },
         diagnostics: deadline.diagnostics({ phase: 'invalid_command_request' })
-      }, { status: 400, headers: { 'Cache-Control': 'no-store' } })
+      }
+      return jsonWithRunCommandTelemetry(payload, { status: 400, headers: { 'Cache-Control': 'no-store' } }, {
+        disposition: 'rejected',
+        reasonCode: 'invalid_request',
+        requestDurationMs: Date.now() - requestStartedAt
+      })
     }
-    const body = parsed.data
+    const sessionId = parsed.data.sessionId
+    const body = parsed.data.command
     const sourceSelection = sourceSelectionRequired(body.sourceId)
     if (sourceSelection) {
-      return NextResponse.json({
+      const payload = {
         ok: false,
         connected: true,
         status: 'blocked',
         error: sourceSelection,
         sourceId: body.sourceId,
         diagnostics: deadline.diagnostics({ phase: 'source_selection_required' })
-      }, { status: 400 })
+      }
+      return jsonWithRunCommandTelemetry(payload, { status: 400 }, {
+        disposition: 'rejected',
+        reasonCode: 'source_selection_required',
+        requestDurationMs: Date.now() - requestStartedAt
+      })
     }
+    telemetrySourceId = body.sourceId
+    telemetryCommandKind = body.commandKind
     const commandKind = body.commandKind
     const validationJobOperation = 'validationJobOperation' in body ? body.validationJobOperation : undefined
     const requestedTimeoutMs = 'timeoutMs' in body ? body.timeoutMs : undefined
@@ -86,8 +120,8 @@ export async function POST(request: NextRequest) {
       paths: 'paths' in body && Array.isArray(body.paths) ? body.paths.slice(0, 10) : undefined
     })
     deadline.setPhase('run_command')
-    const dispatchBody = commandKind === 'n8n_workflow_migration' ? body : { ...body, timeoutMs }
-    const data = await dispatchWorkbenchCommand(dispatchBody, auth.bearerToken, {
+    const command = commandKind === 'n8n_workflow_migration' ? body : { ...body, timeoutMs }
+    const data = await dispatchWorkbenchCommand({ version: 2, sessionId, command }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(11_750),
       diagnostics: deadline.diagnostics({
@@ -99,7 +133,7 @@ export async function POST(request: NextRequest) {
     const clean = stripBloat(data) as Record<string, unknown>
 
     if (clean.status === 'timed_out' && validationJobOperation === undefined) {
-      return NextResponse.json({
+      const payload = {
         ok: false,
         connected: true,
         status: 'timeout',
@@ -151,7 +185,15 @@ export async function POST(request: NextRequest) {
           suggestedNextAction: suggestedNextAction(commandKind)
         }),
         activity: clean.activity
-      }, { headers: { 'Cache-Control': 'no-store' } })
+      }
+      return jsonWithRunCommandTelemetry(payload, { headers: { 'Cache-Control': 'no-store' } }, {
+        disposition: 'timed_out',
+        reasonCode: 'command_timed_out',
+        requestDurationMs: Date.now() - requestStartedAt,
+        sourceId: telemetrySourceId,
+        commandKind: telemetryCommandKind,
+        commandDurationMs: typeof clean.durationMs === 'number' ? clean.durationMs : undefined
+      })
     }
 
     const job = clean.job && typeof clean.job === 'object' ? clean.job as Record<string, unknown> : undefined
@@ -172,8 +214,12 @@ export async function POST(request: NextRequest) {
       ? clean.outputTruncated
       : typeof job?.outputTruncated === 'boolean' ? job.outputTruncated : undefined
 
-    return NextResponse.json({
-      ok: clean.status === 'completed' && resolvedExitCode === 0,
+    const terminalSucceeded = clean.status === 'completed' && resolvedExitCode === 0
+    const terminalRejected = clean.requiresConfirmation === true || clean.status === 'blocked'
+    const terminalDisposition = terminalRejected ? 'rejected' as const : terminalSucceeded ? 'success' as const : 'failure' as const
+    const terminalReason = terminalRejected ? 'command_rejected' as const : terminalSucceeded ? 'command_completed' as const : 'command_failed' as const
+    const payload = {
+      ok: terminalSucceeded,
       status: clean.status,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       commandKind,
@@ -208,17 +254,38 @@ export async function POST(request: NextRequest) {
       protectedPathsChanged: clean.protectedPathsChanged ?? job?.protectedPathsChanged,
       requiresConfirmation: clean.requiresConfirmation,
       confirmationToken: clean.confirmationToken,
+      migrationMode: clean.migrationMode,
+      migrationPhase: clean.migrationPhase,
+      operation: clean.operation,
       reason: clean.reason,
       terminatedByInfrastructure: clean.terminatedByInfrastructure ?? job?.terminatedByInfrastructure,
       terminationReason: clean.terminationReason ?? job?.terminationReason ?? null,
       activity: clean.activity
-    }, { headers: { 'Cache-Control': 'no-store' } })
+    }
+    const commandDurationMs = typeof clean.durationMs === 'number'
+      ? clean.durationMs
+      : typeof job?.durationMs === 'number' ? job.durationMs : undefined
+    return jsonWithRunCommandTelemetry(payload, { headers: { 'Cache-Control': 'no-store' } }, {
+      disposition: terminalDisposition,
+      reasonCode: terminalReason,
+      requestDurationMs: Date.now() - requestStartedAt,
+      sourceId: telemetrySourceId,
+      commandKind: telemetryCommandKind,
+      commandDurationMs
+    })
   }).catch((err) => {
     const { error, status } = unwrapActionError(err, 'run-command error')
-    return NextResponse.json(error && typeof error === 'object' ? error : buildActionErrorEnvelope({
+    const payload = error && typeof error === 'object' ? error : buildActionErrorEnvelope({
       code: 'BUILDFLOW_COMMAND_ERROR',
       message: String(error),
       status: 'error'
-    }), { status, headers: { 'Cache-Control': 'no-store' } })
+    })
+    return jsonWithRunCommandTelemetry(payload, { status, headers: { 'Cache-Control': 'no-store' } }, {
+      disposition: 'failure',
+      reasonCode: 'transport_error',
+      requestDurationMs: Date.now() - requestStartedAt,
+      sourceId: telemetrySourceId,
+      commandKind: telemetryCommandKind
+    })
   })
 }

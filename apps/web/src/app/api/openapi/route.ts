@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server'
 
 const bearer = { bearerAuth: [] }
+const exampleSessionId = 'session-agent-00000000-0000-4000-8000-000000000000'
+
+const sessionAwareCommandExample = (command: Record<string, unknown>) => ({
+  version: 2,
+  sessionId: exampleSessionId,
+  command
+})
 
 const openapi = {
   openapi: '3.1.0',
@@ -201,7 +208,7 @@ const openapi = {
       post: {
         operationId: 'commitWorkbenchChanges',
         summary: 'Diff, stage explicit paths, and commit within 10s',
-        description: 'Three-step operation: git diff → git add paths → git commit. Always use specific paths (1-10 typical); never commit everything at once. Normally completes in <5s for small commits. Confirmation-gated operations may require a second prompt with the returned token.',
+        description: 'Three-step operation inside an active Workbench run session: git diff → git add paths → git commit. Use the exact sessionId returned by the run lifecycle and specific paths only; never commit everything at once. Confirmation-gated operations may require a second prompt with the returned token.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -212,13 +219,14 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
+                  sessionId: { type: 'string', minLength: 1, maxLength: 200, description: 'Exact active session ID returned by create_run, resume_run, or active_run. Never infer it from sourceId.' },
                   sourceId: { type: 'string', description: 'Required exact enabled source ID returned by getWorkbenchStatus with include=sources. Never use placeholder values such as default, workspace, current, or repo.' },
                   paths: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 50, description: 'Specific files to stage — never commit everything at once' },
                   message: { type: 'string', description: 'Commit message, e.g. "fix: normalize path in read-context route"' },
                   confirmedByUser: { type: 'boolean', description: 'Only set true when committing a confirmation-gated exact-path change the user explicitly approved.' },
                   confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated commits.' }
                 },
-                required: ['sourceId', 'paths', 'message']
+                required: ['sessionId', 'sourceId', 'paths', 'message']
               }
             }
           }
@@ -235,7 +243,7 @@ const openapi = {
       post: {
         operationId: 'runWorkbenchCommand',
         summary: 'Run or track allowlisted command with a 12s GPT cap',
-        description: 'Run allowlisted commands or persisted validation jobs. If no source is locked, call getWorkbenchStatus(include=sources); use one exact returned sourceId. Never use default, workspace, current, or repo. Controlled workflow operations require a configured grant.',
+        description: 'Run allowlisted commands or validation jobs in an active Workbench session. Use the exact sessionId from create_run, resume_run, or active_run and its locked sourceId. Never infer session authority from sourceId. Controlled workflow operations require a configured grant.',
         'x-openai-isConsequential': false,
         security: [bearer],
         requestBody: {
@@ -246,11 +254,17 @@ const openapi = {
                 type: 'object',
                 additionalProperties: false,
                 properties: {
-                  sourceId: { type: 'string', minLength: 1, pattern: '^(?!default$|workspace$|current$|repo$).+', examples: ['workbench-example-source', 'migration-example-source'], description: 'Required exact enabled source ID returned by getWorkbenchStatus with include=sources. Never use placeholder values such as default, workspace, current, or repo. Controlled workflow operations require Workbench-owned grants.' },
-                  commandKind: {
-                    type: 'string',
-                    enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance', 'run_exact_command', 'n8n_workflow_export', 'n8n_workflow_migration']
-                  },
+                  version: { type: 'integer', enum: [2], description: 'Strict session-aware command envelope version.' },
+                  sessionId: { type: 'string', minLength: 1, maxLength: 200, description: 'Exact active session ID returned by the Workbench run lifecycle. Never derive it from sourceId or invent one.' },
+                  command: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      sourceId: { type: 'string', minLength: 1, pattern: '^(?!default$|workspace$|current$|repo$).+', examples: ['workbench-example-source', 'migration-example-source'], description: 'Required exact enabled source ID locked to sessionId. Never use placeholder values such as default, workspace, current, or repo. Controlled workflow operations require Workbench-owned grants.' },
+                      commandKind: {
+                        type: 'string',
+                        enum: ['git_status_short', 'git_diff_stat', 'git_diff_name_only', 'git_diff', 'git_log_latest', 'git_branch_current', 'type_check_web', 'type_check_cli', 'git_diff_cached_stat', 'git_diff_cached_name_only', 'git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'diagnose_performance', 'run_exact_command', 'n8n_workflow_export', 'n8n_workflow_migration']
+                      },
                   validationJobOperation: { type: 'string', enum: ['submit', 'status'], description: 'Submit an allowlisted persisted validation job or check an existing job without resubmitting it.' },
                   validationJobId: { type: 'string', description: 'Stable persisted validation job ID returned by submit and reused for status checks.' },
                   validationJobTimeoutMs: { type: 'integer', minimum: 1000, maximum: 900000, description: 'Bounded persisted validation runtime. This is independent from the short GPT-facing HTTP timeout.' },
@@ -296,22 +310,25 @@ const openapi = {
                   packageDir: { type: 'string', description: 'Required for run_package_script, run_package_test, and run_package_test_marker. Use "." for the selected source root.' },
                   confirmedByUser: { type: 'boolean', description: 'Only use when the user explicitly confirmed a confirmation-gated safe command.' },
                   confirmationToken: { type: 'string', description: 'Backend-issued confirmation token for confirmation-gated safe commands.' },
-                  timeoutMs: { type: 'integer', minimum: 1000, maximum: 12000, description: 'GPT-facing command timeout. Defaults to 5-8s and is capped well below the external action timeout.' }
+                      timeoutMs: { type: 'integer', minimum: 1000, maximum: 12000, description: 'GPT-facing command timeout. Defaults to 5-8s and is capped well below the external action timeout.' }
+                    },
+                    required: ['sourceId', 'commandKind']
+                  }
                 },
-                required: ['sourceId', 'commandKind']
+                required: ['version', 'sessionId', 'command']
               },
               examples: {
                 repositoryStatusCheck: {
                   summary: 'Run a bounded command against an explicitly selected source',
-                  value: {
+                  value: sessionAwareCommandExample({
                     sourceId: 'workbench-example-source',
                     commandKind: 'git_status_short',
                     timeoutMs: 5000
-                  }
+                  })
                 },
                 workflowExportConfirmation: {
                   summary: 'Request confirmation for a grant-bound workflow export using synthetic values',
-                  value: {
+                  value: sessionAwareCommandExample({
                     sourceId: 'workflow-example-source',
                     commandKind: 'n8n_workflow_export',
                     workflowId: 'workflow-example',
@@ -319,11 +336,11 @@ const openapi = {
                     networkAccess: true,
                     protectedPaths: ['tools/workflow-wrapper.sh', 'artifacts/workflow-example.json'],
                     timeoutMs: 12000
-                  }
+                  })
                 },
                 controlledMigrationPrepare: {
                   summary: 'Prepare a grant-bound controlled migration using synthetic example values',
-                  value: {
+                  value: sessionAwareCommandExample({
                     sourceId: 'migration-example-source',
                     commandKind: 'n8n_workflow_migration',
                     migration: {
@@ -331,21 +348,21 @@ const openapi = {
                       candidatePath: 'artifacts/candidate.json', rollbackPath: 'artifacts/rollback.json',
                       manifestPath: 'artifacts/manifest.json', networkAccess: true
                     }
-                  }
+                  })
                 },
                 controlledMigrationExecute: {
                   summary: 'Execute a prepared migration with a synthetic confirmation token',
-                  value: {
+                  value: sessionAwareCommandExample({
                     sourceId: 'migration-example-source', commandKind: 'n8n_workflow_migration',
                     migration: { mode: 'apply', phase: 'execute', operationId: 'operation-example', confirmationToken: 'confirmation-example' }
-                  }
+                  })
                 },
                 controlledMigrationStatus: {
                   summary: 'Read a prepared migration status using a synthetic operation ID',
-                  value: {
+                  value: sessionAwareCommandExample({
                     sourceId: 'migration-example-source', commandKind: 'n8n_workflow_migration',
                     migration: { mode: 'apply', phase: 'status', operationId: 'operation-example' }
-                  }
+                  })
                 }
               }
             }

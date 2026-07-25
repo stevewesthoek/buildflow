@@ -2,6 +2,19 @@ import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
+import { evaluateResumeWorkflow } from './resume-workflow'
+import { synchronizeWorkbenchRunSession, workbenchSessionIdForRun } from './workbench-run-session'
+import {
+  createRunExecutionBudget,
+  normalizeRunExecutionBudget,
+  narrowRunExecutionBudget,
+  consumeRunPacketCycle,
+  consumeRunRepairAttempt,
+  evaluateRunExecutionBudget,
+  synchronizeRunRepairAttempts,
+  type RunExecutionBudget,
+  type RunExecutionBudgetLimits
+} from './run-budget'
 
 export const WORKBENCH_RUN_SCHEMA_VERSION = 1 as const
 
@@ -81,6 +94,7 @@ export type AgentJob = {
   completedPacketIds: string[]
   resumeState: WorkbenchRunResumeState
   metrics: WorkbenchRunMetrics
+  executionBudget: RunExecutionBudget
   status: AgentJobStatus
   createdAt: string
   updatedAt: string
@@ -98,12 +112,44 @@ export type AgentJob = {
   roadmapPhases: AgentJobPhase[]
   activeTaskId?: string
   completedTaskCount: number
+  lastAcceptedTaskDelta: number
   nextActions: string[]
   summary: string
   handoffPath: string
   resumeInstructions: string[]
   fallbackPrompt?: string
   lastKnownGitStatus?: string
+}
+
+export type CompactProgress = {
+  percent: number
+  bar: string
+  accessibleLabel: string
+  confidence: 'exact' | 'low'
+}
+
+export type CompactStatusProjection = {
+  repository: string
+  runId: string
+  status: AgentJobStatus
+  phaseId?: string
+  phaseTitle?: string
+  taskId?: string
+  taskTitle?: string
+  overall: CompactProgress
+  phase: CompactProgress
+  task: CompactProgress
+  deltaCount: number
+  deltaPercent: number
+  currentPosition: string
+  blocker?: string
+  nextAction?: string
+  executionProfile: {
+    engine: 'direct'
+    autonomy: AgentAutonomyLevel
+  }
+  text: string
+  narrowText: string
 }
 
 export type CompactAgentJob = Pick<
@@ -116,6 +162,7 @@ export type CompactAgentJob = Pick<
   | 'activeTaskId'
   | 'activePacketId'
   | 'completedTaskCount'
+  | 'lastAcceptedTaskDelta'
   | 'nextActions'
   | 'summary'
   | 'handoffPath'
@@ -142,6 +189,7 @@ export type CompactAgentJob = Pick<
     completedTasks: number
     totalTasks: number
   }>
+  compactStatus: CompactStatusProjection
 }
 
 const jobs = new Map<string, AgentJob>()
@@ -376,6 +424,7 @@ function coerceJob(raw: unknown): AgentJob | null {
       repairAttempts: Math.max(0, Number(item.metrics?.repairAttempts || 0)),
       userSupervisionEvents: Math.max(0, Number(item.metrics?.userSupervisionEvents || 0))
     },
+    executionBudget: normalizeRunExecutionBudget(item.executionBudget, String(item.createdAt)),
     status,
     createdAt: String(item.createdAt),
     updatedAt: String(item.updatedAt || item.createdAt),
@@ -393,6 +442,7 @@ function coerceJob(raw: unknown): AgentJob | null {
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
+    lastAcceptedTaskDelta: Math.max(0, Math.floor(Number(item.lastAcceptedTaskDelta || 0))),
     nextActions: continuationCleared
       ? []
       : Array.isArray(item.nextActions)
@@ -434,6 +484,31 @@ function persistJobs(): void {
   const temporaryPath = `${JOB_STORE_PATH}.tmp`
   fs.writeFileSync(temporaryPath, JSON.stringify(payload), 'utf8')
   fs.renameSync(temporaryPath, JOB_STORE_PATH)
+}
+
+function requireWorkbenchRunSession(job: AgentJob): void {
+  const synchronized = synchronizeWorkbenchRunSession(job)
+  if (synchronized.ok === true) return
+
+  throw new Error(`Workbench run session synchronization failed: ${synchronized.code}: ${synchronized.message}`)
+}
+
+function persistJobTransition(previous: AgentJob | undefined, next: AgentJob): void {
+  jobs.set(next.id, next)
+  try {
+    persistJobs()
+    requireWorkbenchRunSession(next)
+    return
+  } catch (error) {
+    if (previous) jobs.set(previous.id, previous)
+    else jobs.delete(next.id)
+    try {
+      persistJobs()
+    } catch {
+      // Keep the original transition failure; the in-memory snapshot is already restored.
+    }
+    throw error
+  }
 }
 
 function buildResumeInstructions(documentationPath: string): string[] {
@@ -479,7 +554,7 @@ function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'document
 
 loadJobsFromDisk()
 
-export function startAgentJob(params: { sourceId: string; goal: string; maxIterations?: number; autonomyLevel?: AgentAutonomyLevel; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean }): AgentJob {
+export function startAgentJob(params: { sourceId: string; goal: string; maxIterations?: number; autonomyLevel?: AgentAutonomyLevel; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean; executionBudget?: RunExecutionBudgetLimits }): AgentJob {
   const sourceId = String(params.sourceId || '').trim()
   if (!sourceId) throw new Error('sourceId is required')
   const goal = sanitizeGoal(params.goal)
@@ -512,6 +587,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
       repairAttempts: 0,
       userSupervisionEvents: 0
     },
+    executionBudget: createRunExecutionBudget(params.executionBudget, now),
     status: 'running',
     createdAt: now,
     updatedAt: now,
@@ -528,13 +604,13 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
+    lastAcceptedTaskDelta: 0,
     nextActions: buildLoopNextActions(documentationPath, roadmapPhases, activeTaskId),
     summary: 'Sequential job started with persistent roadmap state. Continue the active task, update the handoff, validate, repair, and commit task-by-task until the bounded batch is complete or a hard blocker is reached.',
     handoffPath: documentationPath,
     resumeInstructions
   }
-  jobs.set(job.id, job)
-  persistJobs()
+  persistJobTransition(undefined, job)
   return job
 }
 
@@ -555,6 +631,7 @@ export type AgentJobUpdate = Partial<Pick<AgentJob,
   | 'roadmapPhases'
   | 'activeTaskId'
   | 'completedTaskCount'
+  | 'lastAcceptedTaskDelta'
   | 'planVersion'
   | 'startingCommit'
   | 'currentCommit'
@@ -562,13 +639,15 @@ export type AgentJobUpdate = Partial<Pick<AgentJob,
   | 'completedPacketIds'
   | 'resumeState'
   | 'metrics'
->>
+>> & {
+  executionBudget?: RunExecutionBudgetLimits
+}
 
 export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
   const job = getAgentJob(jobId)
   if (!job) throw new Error(`Agent job not found: ${jobId}`)
   const roadmapPhases = normalizeRoadmapPhases(patch.roadmapPhases || job.roadmapPhases, job.goal)
-  const status = patch.status || job.status
+  let status = patch.status || job.status
   const continuationCleared = clearsContinuationState(status)
   const requestedActiveTaskId = Object.prototype.hasOwnProperty.call(patch, 'activeTaskId') ? patch.activeTaskId : job.activeTaskId
   const activeTaskId = continuationCleared ? undefined : findActiveTaskId(roadmapPhases, requestedActiveTaskId)
@@ -592,11 +671,20 @@ export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
             : resumeInstructions
       }
   const metrics: WorkbenchRunMetrics = {
-    completedPackets: Math.max(0, Number(patch.metrics?.completedPackets ?? completedPacketIds.length ?? job.metrics.completedPackets)),
-    failedPackets: Math.max(0, Number(patch.metrics?.failedPackets ?? job.metrics.failedPackets)),
-    repairAttempts: Math.max(0, Number(patch.metrics?.repairAttempts ?? job.metrics.repairAttempts)),
-    userSupervisionEvents: Math.max(0, Number(patch.metrics?.userSupervisionEvents ?? job.metrics.userSupervisionEvents))
+    completedPackets: Math.max(job.metrics.completedPackets, completedPacketIds.length, Number(patch.metrics?.completedPackets ?? 0)),
+    failedPackets: Math.max(job.metrics.failedPackets, Number(patch.metrics?.failedPackets ?? 0)),
+    repairAttempts: Math.max(job.metrics.repairAttempts, Number(patch.metrics?.repairAttempts ?? 0)),
+    userSupervisionEvents: Math.max(job.metrics.userSupervisionEvents, Number(patch.metrics?.userSupervisionEvents ?? 0))
   }
+  const updatedAt = new Date().toISOString()
+  let executionBudget = patch.executionBudget
+    ? narrowRunExecutionBudget(job.executionBudget, patch.executionBudget, updatedAt)
+    : job.executionBudget
+  executionBudget = synchronizeRunRepairAttempts(executionBudget, metrics.repairAttempts, updatedAt)
+  if (executionBudget.exhausted && (status === 'running' || status === 'queued')) status = 'paused'
+  const budgetReason = executionBudget.exhausted && executionBudget.reasonCode
+    ? `Run budget exhausted: ${executionBudget.reasonCode}`
+    : undefined
   const base: AgentJob = {
     ...job,
     ...patch,
@@ -605,15 +693,21 @@ export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
     completedPacketIds,
     resumeState,
     metrics,
+    executionBudget,
+    status,
+    blockedReason: budgetReason || (Object.prototype.hasOwnProperty.call(patch, 'blockedReason') ? patch.blockedReason : job.blockedReason),
     roadmapPhases,
     activeTaskId,
     completedTaskCount,
+    lastAcceptedTaskDelta: Math.max(0, Math.floor(Number(patch.lastAcceptedTaskDelta ?? job.lastAcceptedTaskDelta ?? 0))),
     nextActions: Array.isArray(patch.nextActions)
       ? patch.nextActions
-      : continuationCleared
-        ? []
-        : buildLoopNextActions(job.documentationPath, roadmapPhases, activeTaskId),
-    updatedAt: new Date().toISOString(),
+      : budgetReason
+        ? [budgetReason]
+        : continuationCleared
+          ? []
+          : buildLoopNextActions(job.documentationPath, roadmapPhases, activeTaskId),
+    updatedAt,
     resumeInstructions,
     handoffPath: job.handoffPath || job.documentationPath
   }
@@ -622,9 +716,74 @@ export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
     ...base,
     fallbackPrompt: shouldRefreshFallback ? buildFallbackPrompt(base) : base.fallbackPrompt
   }
-  jobs.set(jobId, updated)
-  persistJobs()
+  persistJobTransition(job, updated)
   return updated
+}
+
+export type WorkbenchRunBudgetDecision = {
+  allowed: boolean
+  reasonCode?: RunExecutionBudget['reasonCode']
+  advisoryTargetReached: boolean
+  run: AgentJob
+}
+
+function persistRunBudgetState(job: AgentJob, budget: RunExecutionBudget, reasonCode?: RunExecutionBudget['reasonCode']): AgentJob {
+  const shouldPause = Boolean(reasonCode) && (job.status === 'running' || job.status === 'queued')
+  const blockedReason = reasonCode ? `Run budget exhausted: ${reasonCode}` : job.blockedReason
+  const updated: AgentJob = {
+    ...job,
+    executionBudget: budget,
+    status: shouldPause ? 'paused' : job.status,
+    blockedReason,
+    nextActions: reasonCode ? [blockedReason!] : job.nextActions,
+    updatedAt: new Date().toISOString()
+  }
+  persistJobTransition(job, updated)
+  return updated
+}
+
+export function evaluateWorkbenchRunBudget(params: {
+  runId: string
+  now: string
+  operation?: 'continue' | 'repair'
+  roadmapProgressDelta?: number
+}): WorkbenchRunBudgetDecision {
+  const job = getAgentJob(params.runId)
+  if (!job) throw new Error(`Agent job not found: ${params.runId}`)
+  const evaluation = evaluateRunExecutionBudget(job.executionBudget, {
+    now: params.now,
+    operation: params.operation,
+    roadmapProgressDelta: params.roadmapProgressDelta
+  })
+  const run = evaluation.exhausted
+    ? persistRunBudgetState(job, evaluation.budget, evaluation.reasonCode)
+    : job
+  return {
+    allowed: !evaluation.exhausted,
+    reasonCode: evaluation.reasonCode,
+    advisoryTargetReached: evaluation.advisoryTargetReached,
+    run
+  }
+}
+
+export function recordWorkbenchRunRepairAttempt(runId: string, now: string): AgentJob {
+  const job = getAgentJob(runId)
+  if (!job) throw new Error(`Agent job not found: ${runId}`)
+  const budget = consumeRunRepairAttempt(job.executionBudget, now)
+  const metrics = {
+    ...job.metrics,
+    repairAttempts: Math.max(job.metrics.repairAttempts, budget.consumedRepairAttempts)
+  }
+  const updated: AgentJob = { ...job, executionBudget: budget, metrics, updatedAt: new Date().toISOString() }
+  persistJobTransition(job, updated)
+  return updated
+}
+
+function recordWorkbenchRunPacketCycle(runId: string, packetId: string, now: string): AgentJob {
+  const job = getAgentJob(runId)
+  if (!job) throw new Error(`Agent job not found: ${runId}`)
+  const budget = consumeRunPacketCycle(job.executionBudget, packetId, now)
+  return persistRunBudgetState(job, budget, budget.reasonCode)
 }
 
 export function advanceWorkbenchRunAfterPacket(params: {
@@ -638,11 +797,13 @@ export function advanceWorkbenchRunAfterPacket(params: {
 
   const completedAt = new Date().toISOString()
   let matchedTask = false
+  let newlyAcceptedTaskCount = 0
   const roadmapPhases = job.roadmapPhases.map(phase => ({
     ...phase,
     tasks: phase.tasks.map(task => {
       if (task.id !== params.taskId) return task
       matchedTask = true
+      if (task.status !== 'completed' && task.status !== 'skipped') newlyAcceptedTaskCount = 1
       return {
         ...task,
         status: 'completed' as const,
@@ -672,9 +833,10 @@ export function advanceWorkbenchRunAfterPacket(params: {
       ? [`Continue roadmap task ${nextTaskId}.`]
       : []
 
-  return updateAgentJob(params.runId, {
+  updateAgentJob(params.runId, {
     roadmapPhases: normalized,
     activeTaskId: nextTaskId,
+    lastAcceptedTaskDelta: newlyAcceptedTaskCount,
     currentIteration: Math.min(job.maxIterations, job.currentIteration + 1),
     completedPacketIds: Array.from(new Set([...job.completedPacketIds, params.packetId])),
     currentCommit: params.commitHash || job.currentCommit,
@@ -699,6 +861,7 @@ export function advanceWorkbenchRunAfterPacket(params: {
       ? `Packet ${params.packetId} completed task ${params.taskId}; all roadmap tasks are complete.`
       : `Packet ${params.packetId} completed task ${params.taskId}; next task is ${nextTaskId}.`
   })
+  return recordWorkbenchRunPacketCycle(params.runId, params.packetId, completedAt)
 }
 
 export function listAgentJobs(): AgentJob[] {
@@ -715,6 +878,98 @@ function compactList(values: string[], limit = 4): string[] {
   return values.slice(0, limit).map(value => compactText(value, COMPACT_LIST_ITEM_LIMIT) || '')
 }
 
+function boundedPercent(completed: number, total: number): number {
+  if (!Number.isFinite(total) || total <= 0) return 0
+  return Math.min(100, Math.max(0, Math.round((Math.max(0, completed) / total) * 100)))
+}
+
+export function tenCellProgressBar(percent: number): string {
+  const bounded = Math.min(100, Math.max(0, Number.isFinite(percent) ? percent : 0))
+  const filled = Math.min(10, Math.max(0, Math.round(bounded / 10)))
+  return `${'●'.repeat(filled)}${'○'.repeat(10 - filled)}`
+}
+
+function progressValue(label: string, percent: number, confidence: CompactProgress['confidence']): CompactProgress {
+  const bounded = Math.min(100, Math.max(0, Math.round(percent)))
+  return {
+    percent: bounded,
+    bar: tenCellProgressBar(bounded),
+    accessibleLabel: `${label} progress ${bounded} percent${confidence === 'low' ? ', low-confidence estimate' : ''}`,
+    confidence
+  }
+}
+
+function taskProgress(status: AgentTaskStatus | undefined): CompactProgress {
+  if (status === 'completed' || status === 'skipped') return progressValue('Task', 100, 'exact')
+  if (status === 'running') return progressValue('Task', 50, 'low')
+  if (status === 'blocked' || status === 'failed') return progressValue('Task', 0, 'low')
+  return progressValue('Task', 0, 'exact')
+}
+
+export function buildCompactStatusProjection(job: AgentJob): CompactStatusProjection {
+  const allTasks = job.roadmapPhases.flatMap(phase => phase.tasks)
+  const activePhase = job.roadmapPhases.find(phase => phase.tasks.some(task => task.id === job.activeTaskId))
+    || job.roadmapPhases.find(phase => phase.tasks.some(task => task.status === 'running' || task.status === 'pending'))
+    || job.roadmapPhases[job.roadmapPhases.length - 1]
+  const activeTask = activePhase?.tasks.find(task => task.id === job.activeTaskId)
+    || activePhase?.tasks.find(task => task.status === 'running' || task.status === 'pending')
+    || activePhase?.tasks[activePhase.tasks.length - 1]
+  const completedOverall = allTasks.filter(task => task.status === 'completed' || task.status === 'skipped').length
+  const completedPhase = activePhase?.tasks.filter(task => task.status === 'completed' || task.status === 'skipped').length || 0
+  const overall = progressValue('Overall', boundedPercent(completedOverall, allTasks.length), 'exact')
+  const phase = progressValue('Phase', boundedPercent(completedPhase, activePhase?.tasks.length || 0), 'exact')
+  const task = taskProgress(activeTask?.status)
+  const deltaCount = Math.max(0, Math.floor(job.lastAcceptedTaskDelta || 0))
+  const deltaPercent = boundedPercent(deltaCount, allTasks.length)
+  const blocker = compactText(job.blockedReason || job.confirmationReason, 240)
+  const nextAction = compactText(job.nextActions[0], 180)
+  const phaseTitle = compactText(activePhase?.title, 120)
+  const taskTitle = compactText(activeTask?.title, 140)
+  const currentPosition = compactText(
+    phaseTitle && taskTitle ? `${phaseTitle} → ${taskTitle}` : taskTitle || phaseTitle || 'No active task',
+    240
+  ) || 'No active task'
+  const header = `${job.sourceId} · ${job.id} · ${job.status}`
+  const deltaLabel = deltaCount > 0 ? ` (+${deltaPercent})` : ''
+  const text = [
+    header,
+    `Overall  ${overall.bar} ${overall.percent}%${deltaLabel}`,
+    `Phase    ${phase.bar} ${phase.percent}%`,
+    `Task     ${task.bar} ${task.percent}%${task.confidence === 'low' ? ' (estimate)' : ''}`,
+    `Current position: ${currentPosition}`,
+    blocker ? `Blocker: ${blocker}` : undefined,
+    nextAction ? `Next action: ${nextAction}` : undefined,
+    `Execution: direct/${job.autonomyLevel}`
+  ].filter(Boolean).join('\n')
+  const narrowText = [
+    header,
+    `O ${overall.percent}% · P ${phase.percent}% · T ${task.percent}%${task.confidence === 'low' ? '~' : ''}${deltaCount > 0 ? ` · Δ+${deltaPercent}` : ''}`,
+    currentPosition,
+    blocker ? `Blocked: ${blocker}` : nextAction ? `Next: ${nextAction}` : undefined
+  ].filter(Boolean).join('\n')
+
+  return {
+    repository: job.sourceId,
+    runId: job.id,
+    status: job.status,
+    phaseId: activePhase?.id,
+    phaseTitle,
+    taskId: activeTask?.id,
+    taskTitle,
+    overall,
+    phase,
+    task,
+    deltaCount,
+    deltaPercent,
+    currentPosition,
+    blocker,
+    nextAction,
+    executionProfile: { engine: 'direct', autonomy: job.autonomyLevel },
+    text: compactText(text, 1200) || '',
+    narrowText: compactText(narrowText, 520) || ''
+  }
+}
+
 export function compactAgentJob(job: AgentJob): CompactAgentJob {
   const tasks = job.roadmapPhases.flatMap(phase => phase.tasks.map(task => ({ phase, task })))
   const active = tasks.find(item => item.task.id === job.activeTaskId)
@@ -728,6 +983,7 @@ export function compactAgentJob(job: AgentJob): CompactAgentJob {
     activeTaskId: job.activeTaskId,
     activePacketId: job.activePacketId,
     completedTaskCount: job.completedTaskCount,
+    lastAcceptedTaskDelta: job.lastAcceptedTaskDelta,
     totalTaskCount: tasks.length,
     nextActions: compactList(job.nextActions, 3),
     summary: compactText(job.summary) || '',
@@ -752,7 +1008,8 @@ export function compactAgentJob(job: AgentJob): CompactAgentJob {
       status: phase.status,
       completedTasks: phase.tasks.filter(task => task.status === 'completed' || task.status === 'skipped').length,
       totalTasks: phase.tasks.length
-    }))
+    })),
+    compactStatus: buildCompactStatusProjection(job)
   }
 }
 
@@ -803,10 +1060,12 @@ export function getActiveWorkbenchRun(sourceId: string): Record<string, unknown>
     job.sourceId === normalizedSourceId && !['completed', 'failed', 'cancelled'].includes(job.status)
   )
   if (!active) return undefined
+  requireWorkbenchRunSession(active)
   const compact = compactAgentJob(active)
   return {
     runVersion: active.runVersion,
     id: active.id,
+    sessionId: workbenchSessionIdForRun(active.id),
     sourceId: active.sourceId,
     goal: compactText(active.goal, 500),
     status: active.status,
@@ -845,7 +1104,10 @@ export function createWorkbenchRun(params: Parameters<typeof startAgentJob>[0]):
     job.sourceId === sourceId && !['completed', 'failed', 'cancelled'].includes(job.status)
   )
   if (existing) {
-    if (existing.goal.trim() === String(params.goal || '').trim()) return { run: existing, created: false }
+    if (existing.goal.trim() === String(params.goal || '').trim()) {
+      requireWorkbenchRunSession(existing)
+      return { run: existing, created: false }
+    }
     throw new Error(`Source already has an active Workbench run: ${existing.id}`)
   }
   return { run: startAgentJob(params), created: true }
@@ -857,19 +1119,25 @@ export function resumeWorkbenchRun(params: { sourceId: string; runId?: string })
   const run = params.runId
     ? getAgentJob(params.runId)
     : listAgentJobs().find(job => job.sourceId === sourceId && !['completed', 'failed', 'cancelled'].includes(job.status))
-  if (!run || run.sourceId !== sourceId) throw new Error('Active Workbench run not found for source')
-  if (['completed', 'failed', 'cancelled'].includes(run.status)) throw new Error(`Workbench run cannot resume from ${run.status}`)
-  if (run.status === 'blocked' || run.status === 'needs_confirmation') {
-    throw new Error(`Workbench run requires resolution before resume: ${run.status}`)
+  const decision = evaluateResumeWorkflow({
+    lockedSourceId: sourceId,
+    run,
+    now: new Date().toISOString()
+  })
+  if (!decision.eligible || !run) {
+    throw new Error(`Workbench run cannot resume: ${decision.reason || 'not_eligible'}; ${decision.nextAction}`)
   }
-  if (run.status === 'running') return run
+  if (run.status === 'running') {
+    requireWorkbenchRunSession(run)
+    return run
+  }
   return updateAgentJob(run.id, {
     status: 'running',
     metrics: {
       ...run.metrics,
       userSupervisionEvents: run.metrics.userSupervisionEvents + 1
     },
-    summary: `Workbench run resumed. Continue task ${run.resumeState.nextTaskId || run.activeTaskId || 'from the persisted handoff'}.`
+    summary: `Workbench run resumed from projection ${decision.projection?.contentHash || 'rebuilt'}. ${decision.nextAction}`
   })
 }
 

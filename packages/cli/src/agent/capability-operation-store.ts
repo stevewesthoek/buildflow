@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { getConfigDir } from '../utils/paths'
+import { recordGitLockTelemetry } from './git-lock-telemetry'
 import {
   isControlledWorkflowMigrationStateTransition,
   type ControlledWorkflowMigrationEvidence,
@@ -238,9 +239,15 @@ function withExclusiveStoreLock<T>(options: CapabilityOperationStoreOptions | un
   const filePath = storePath(options)
   const fileLockPath = lockPath(options)
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const startedAt = Date.now()
   let descriptor: number | undefined
   try {
     descriptor = fs.openSync(fileLockPath, 'wx', 0o600)
+    recordGitLockTelemetry({
+      storeKind: 'capability_operations',
+      waitMs: Date.now() - startedAt,
+      contended: false
+    })
     const store = readStore(options)
     if ('ok' in store) return store
     const result = callback(store)
@@ -250,7 +257,14 @@ function withExclusiveStoreLock<T>(options: CapabilityOperationStoreOptions | un
     const code = error && typeof error === 'object' && 'code' in error
       ? String((error as { code?: unknown }).code)
       : ''
-    if (code === 'EEXIST') return undefined
+    if (code === 'EEXIST') {
+      recordGitLockTelemetry({
+        storeKind: 'capability_operations',
+        waitMs: Date.now() - startedAt,
+        contended: true
+      })
+      return undefined
+    }
     throw error
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor)

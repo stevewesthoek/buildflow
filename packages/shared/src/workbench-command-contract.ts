@@ -139,7 +139,9 @@ export const directRunWorkbenchCommandRequestSchema = z.discriminatedUnion('comm
   commandSchema('git_commit', {
     paths: optionalPathListSchema.optional(),
     message: z.string().trim().min(1).max(200).refine(value => !/[\r\n]/.test(value), 'message must be single-line'),
-    body: z.string().trim().max(2000).optional()
+    body: z.string().trim().max(2000).optional(),
+    confirmedByUser: z.boolean().optional(),
+    confirmationToken: confirmationTokenSchema.optional()
   }),
   commandSchema('git_push', {
     remote: remoteSchema.optional(),
@@ -242,6 +244,12 @@ export const runWorkbenchCommandRequestSchema = z.union([
   directRunWorkbenchCommandRequestSchema
 ])
 
+export const sessionAwareRunWorkbenchCommandRequestSchema = z.object({
+  version: z.literal(2),
+  sessionId: shortIdSchema,
+  command: runWorkbenchCommandRequestSchema
+}).strict()
+
 export const controlledWorkflowTopologyManifestMetadataSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal('n8n-controlled-topology-migration'),
@@ -257,5 +265,6 @@ export const controlledWorkflowTopologyManifestMetadataSchema = z.object({
 export type RunWorkbenchDirectCommandKind = typeof RUN_WORKBENCH_DIRECT_COMMAND_KINDS[number]
 export type PersistedValidationCommandKind = typeof PERSISTED_VALIDATION_COMMAND_KINDS[number]
 export type RunWorkbenchCommandRequest = z.infer<typeof runWorkbenchCommandRequestSchema>
+export type SessionAwareRunWorkbenchCommandRequest = z.infer<typeof sessionAwareRunWorkbenchCommandRequestSchema>
 export type DirectRunWorkbenchCommandRequest = z.infer<typeof directRunWorkbenchCommandRequestSchema>
 export type N8nWorkflowMigrationRequest = z.infer<typeof n8nWorkflowMigrationSchema>

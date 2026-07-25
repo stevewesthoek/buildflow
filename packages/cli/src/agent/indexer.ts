@@ -6,6 +6,7 @@ import fg from 'fast-glob'
 import { getEnabledSources } from './config'
 import { getConfigDir, getIndexPath, getIndexDir, getSourceIndexPath } from '../utils/paths'
 import { IndexedDoc } from '@workbench/shared'
+import { recordIndexTelemetry } from './index-graph-telemetry'
 
 const DEFAULT_IGNORE_PATTERNS = [
   '**/.git/**',
@@ -94,13 +95,26 @@ export class Indexer {
   }
 
   async buildIndexForSource(sourceId: string, sourcePath?: string, patterns: string[] = ['**/*'], ignorePatterns: string[] = DEFAULT_IGNORE_PATTERNS): Promise<number> {
+    const startedAt = Date.now()
     const source = getEnabledSources().find(item => item.id === sourceId)
     if (!source && !sourcePath) {
+      recordIndexTelemetry({
+        sourceId,
+        durationMs: Date.now() - startedAt,
+        outcome: 'failure',
+        reasonCode: 'source_not_found'
+      })
       throw new Error(`Source not found or disabled: ${sourceId}`)
     }
 
     const rootPath = sourcePath || source?.path
     if (!rootPath) {
+      recordIndexTelemetry({
+        sourceId,
+        durationMs: Date.now() - startedAt,
+        outcome: 'failure',
+        reasonCode: 'source_path_missing'
+      })
       throw new Error(`Source path missing for: ${sourceId}`)
     }
 
@@ -180,6 +194,12 @@ export class Indexer {
         }
       }
     } catch (err) {
+      recordIndexTelemetry({
+        sourceId,
+        durationMs: Date.now() - startedAt,
+        outcome: 'failure',
+        reasonCode: 'index_failed'
+      })
       console.warn(`Failed to index source ${sourceId}:`, err)
       throw err
     }
@@ -187,6 +207,13 @@ export class Indexer {
     this.docs = nextDocs
     this.saveSourceToDisk(sourceId, sourceDocs)
     this.saveManifestToDisk()
+    recordIndexTelemetry({
+      sourceId,
+      durationMs: Date.now() - startedAt,
+      indexedFileCount: indexedFiles,
+      outcome: 'success',
+      reasonCode: 'index_completed'
+    })
     return indexedFiles
   }
 

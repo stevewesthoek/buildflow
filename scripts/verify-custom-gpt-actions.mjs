@@ -171,7 +171,13 @@ function ensureSchemaRules(schema) {
 
   const runCommand = ops.find(op => op.operationId === 'runWorkbenchCommand')
   const commandContent = runCommand?.requestBody?.content?.['application/json']
-  const commandProps = commandContent?.schema?.properties || {}
+  const envelopeSchema = commandContent?.schema || {}
+  const envelopeProps = envelopeSchema.properties || {}
+  const commandProps = envelopeProps.command?.properties || {}
+  assert((envelopeSchema.required || []).includes('version'), 'runWorkbenchCommand must require envelope version')
+  assert((envelopeSchema.required || []).includes('sessionId'), 'runWorkbenchCommand must require sessionId')
+  assert((envelopeSchema.required || []).includes('command'), 'runWorkbenchCommand must require nested command')
+  assert(envelopeProps.version?.enum?.length === 1 && envelopeProps.version.enum[0] === 2, 'runWorkbenchCommand envelope version must be exactly 2')
   assert(commandProps.timeoutMs?.maximum <= 12000, 'runWorkbenchCommand timeoutMs must be capped at 12000')
   assert((commandProps.commandKind?.enum || []).includes('n8n_workflow_export'), 'Generated schema must expose n8n_workflow_export')
   assert((commandProps.commandKind?.enum || []).includes('n8n_workflow_migration'), 'Generated schema must expose n8n_workflow_migration')
@@ -179,20 +185,22 @@ function ensureSchemaRules(schema) {
   assert(commandProps.outputPath, 'Generated schema must expose outputPath')
   assert(commandProps.networkAccess?.type === 'boolean', 'Generated schema networkAccess must be boolean')
   const sourceDescription = commandProps.sourceId?.description || ''
-  for (const required of ['getWorkbenchStatus', 'include=sources', 'default', 'workspace', 'current', 'repo']) {
+  for (const required of ['sessionId', 'default', 'workspace', 'current', 'repo']) {
     assert(sourceDescription.includes(required), `runWorkbenchCommand sourceId guidance missing ${required}`)
   }
   const examples = commandContent?.examples || {}
-  assert(examples.repositoryStatusCheck?.value?.sourceId === 'workbench-example-source', 'Generated schema must include the explicit generic source example')
-  assert(examples.repositoryStatusCheck?.value?.commandKind === 'git_status_short', 'Generic source example must use git_status_short')
-  assert(examples.workflowExportConfirmation?.value?.sourceId === 'workflow-example-source', 'Generated schema must include a synthetic workflow source example')
-  assert(examples.workflowExportConfirmation?.value?.commandKind === 'n8n_workflow_export', 'Workflow example must use n8n_workflow_export')
-  assert(examples.controlledMigrationPrepare?.value?.sourceId === 'migration-example-source', 'Migration example must use a synthetic source ID')
-  assert(examples.controlledMigrationPrepare?.value?.commandKind === 'n8n_workflow_migration', 'Migration example must use n8n_workflow_migration')
-  assert(examples.controlledMigrationPrepare?.value?.migration?.phase === 'prepare', 'Migration example must use prepare phase')
-  assert(examples.controlledMigrationPrepare?.value?.migration?.networkAccess === true, 'Migration prepare example must explicitly require network access')
-  assert(examples.controlledMigrationExecute?.value?.migration?.phase === 'execute', 'Migration execute example must use execute phase')
-  assert(examples.controlledMigrationStatus?.value?.migration?.phase === 'status', 'Migration status example must use status phase')
+  assert(examples.repositoryStatusCheck?.value?.version === 2, 'Generated examples must use the strict v2 envelope')
+  assert(typeof examples.repositoryStatusCheck?.value?.sessionId === 'string', 'Generated examples must use a run-bound session ID')
+  assert(examples.repositoryStatusCheck?.value?.command?.sourceId === 'workbench-example-source', 'Generated schema must include the explicit generic source example')
+  assert(examples.repositoryStatusCheck?.value?.command?.commandKind === 'git_status_short', 'Generic source example must use git_status_short')
+  assert(examples.workflowExportConfirmation?.value?.command?.sourceId === 'workflow-example-source', 'Generated schema must include a synthetic workflow source example')
+  assert(examples.workflowExportConfirmation?.value?.command?.commandKind === 'n8n_workflow_export', 'Workflow example must use n8n_workflow_export')
+  assert(examples.controlledMigrationPrepare?.value?.command?.sourceId === 'migration-example-source', 'Migration example must use a synthetic source ID')
+  assert(examples.controlledMigrationPrepare?.value?.command?.commandKind === 'n8n_workflow_migration', 'Migration example must use n8n_workflow_migration')
+  assert(examples.controlledMigrationPrepare?.value?.command?.migration?.phase === 'prepare', 'Migration example must use prepare phase')
+  assert(examples.controlledMigrationPrepare?.value?.command?.migration?.networkAccess === true, 'Migration prepare example must explicitly require network access')
+  assert(examples.controlledMigrationExecute?.value?.command?.migration?.phase === 'execute', 'Migration execute example must use execute phase')
+  assert(examples.controlledMigrationStatus?.value?.command?.migration?.phase === 'status', 'Migration status example must use status phase')
   assert(Array.isArray(commandProps.migration?.oneOf) && commandProps.migration.oneOf.length === 3, 'Generated schema must expose strict prepare, execute, and status migration schemas')
   const migrationPhaseProperties = commandProps.migration.oneOf.flatMap(phase => Object.keys(phase.properties || {}))
   for (const forbidden of ['executable', 'args', 'shell', 'environment', 'wrapperOperation', 'confirmationDigest', 'dispatchAuthorization', 'leaseProof', 'credential']) {
@@ -200,7 +208,7 @@ function ensureSchemaRules(schema) {
   }
   const placeholderSources = new Set(['default', 'workspace', 'current', 'repo'])
   for (const [name, example] of Object.entries(examples)) {
-    const sourceId = typeof example?.value?.sourceId === 'string' ? example.value.sourceId.toLowerCase() : ''
+    const sourceId = typeof example?.value?.command?.sourceId === 'string' ? example.value.command.sourceId.toLowerCase() : ''
     assert(!placeholderSources.has(sourceId), `Generated schema example ${name} uses forbidden placeholder sourceId ${sourceId}`)
   }
 }
@@ -314,11 +322,11 @@ function ensureSourceDeadlineLayer() {
     assert(gptActionsText.includes(placeholder), `Source-selection helper must reject ${placeholder}`)
   }
   const openapiText = fs.readFileSync(files.openapi, 'utf8')
-  for (const required of ['repositoryStatusCheck', "sourceId: 'workbench-example-source'", 'workflowExportConfirmation', "sourceId: 'workflow-example-source'", 'controlledMigrationPrepare', 'controlledMigrationExecute', 'controlledMigrationStatus', 'migration-example-source', 'getWorkbenchStatus(include=sources)']) {
+  for (const required of ['repositoryStatusCheck', "sourceId: 'workbench-example-source'", 'workflowExportConfirmation', "sourceId: 'workflow-example-source'", 'controlledMigrationPrepare', 'controlledMigrationExecute', 'controlledMigrationStatus', 'migration-example-source', 'sessionAwareCommandExample', 'sessionId']) {
     assert(openapiText.includes(required), `OpenAPI source must include ${required}`)
   }
   const generatorText = fs.readFileSync(files.schemaGenerator, 'utf8')
-  for (const required of ['n8n_workflow_export', 'n8n_workflow_migration', 'workflowId', 'outputPath', 'migration', 'include=sources', 'repositoryStatusCheck', 'workflowExportConfirmation', 'controlledMigrationPrepare', 'current', 'repo', 'fs.renameSync']) {
+  for (const required of ['n8n_workflow_export', 'n8n_workflow_migration', 'workflowId', 'outputPath', 'migration', 'sessionId', 'repositoryStatusCheck', 'workflowExportConfirmation', 'controlledMigrationPrepare', 'current', 'repo', 'fs.renameSync']) {
     assert(generatorText.includes(required), `Schema generator must validate or atomically write ${required}`)
   }
   const localStackText = fs.readFileSync(files.localStack, 'utf8')

@@ -33,13 +33,12 @@ If a call cannot finish safely, follow structured timeout, unavailable, confirma
 
 ## Source Lock
 
-On the first repo-related request, call `getWorkbenchStatus?include=sources`.
+First repo request: call `getWorkbenchStatus?include=sources`; lock the named source or ask.
 
-- If the user named a repo, select and lock that `sourceId`.
-- Otherwise show available sources and ask which to use.
-- Pass explicit `sourceId` on every repo action.
-- Never rely on global active context for repo scope.
-- Change source only when the user explicitly requests it.
+- Pass `sourceId` everywhere; change it only on explicit request.
+- Get `sessionId` from `create_run`, `resume_run`, or `active_run`.
+- Send `{ "version":2,"sessionId":"...","command":{...} }`; commit uses that ID.
+- Source must match. Never invent or reuse IDs. Follow returned recovery; do not retry.
 
 
 ## Automatic Mode Selection

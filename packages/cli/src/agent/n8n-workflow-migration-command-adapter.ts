@@ -12,6 +12,7 @@ import {
   type ControlledMigrationSource
 } from './n8n-workflow-migration-capability'
 import { createNodeN8nWorkflowMigrationExecutor } from './n8n-workflow-migration-executor'
+import { createOwnerLocalN8nRuntimeConfigurationSnapshot } from './n8n-runtime-config'
 
 type PublicMigrationFailureCode = ControlledMigrationFailure['error']['code'] | 'mutation_blocked'
 
@@ -74,10 +75,12 @@ export async function runControlledWorkflowMigrationCommand(
   const grants = loadedGrants.grants
   const getSource = (sourceId: string) => sourceId === source.sourceId ? source : undefined
   const createExecutor = dependencies.createExecutor || createNodeN8nWorkflowMigrationExecutor
+  const loadRuntimeConfiguration = createOwnerLocalN8nRuntimeConfigurationSnapshot()
   const executor: ControlledMigrationExecutor = async input => createExecutor({
     sourceRoot: source.rootPath,
     sourceId: source.sourceId,
     sourceRootFingerprint: source.rootFingerprint,
+    loadRuntimeConfiguration,
     ...(input.consumeMutationDispatch ? { consumeMutationDispatch: input.consumeMutationDispatch } : {})
   })(input)
   const capabilityDependencies = { getSource, getGrants: () => grants as ControlledN8nWorkflowGrant[], executor }

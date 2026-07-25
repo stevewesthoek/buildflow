@@ -9,8 +9,14 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createWorkbenchMcpServer } from '../mcp-server.js'
 import { loadWorkbenchMcpScope } from '../scope.js'
+import { PERSISTED_VALIDATION_COMMAND_KINDS, RUN_WORKBENCH_DIRECT_COMMAND_KINDS, sessionAwareRunWorkbenchCommandRequestSchema } from '@workbench/shared'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
+const sessionCommand = (command: Record<string, unknown>) => ({
+  version: 2,
+  sessionId: 'session-agent-example',
+  command
+})
 
 async function connectedPair(invoke?: Parameters<typeof createWorkbenchMcpServer>[0]['invoke']) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
@@ -38,6 +44,46 @@ test('initializes, advertises instructions, and lists exactly five bounded tools
     ])
     assert.equal(listed.tools[0].annotations?.readOnlyHint, true)
     assert.equal(listed.tools[2].annotations?.destructiveHint, true)
+    const runWorkbenchCommand = listed.tools.find(tool => tool.name === 'runWorkbenchCommand')
+    assert(runWorkbenchCommand)
+    const inputSchema = runWorkbenchCommand?.inputSchema || {}
+    assert.equal(inputSchema.type, 'object')
+    assert.equal(Array.isArray((inputSchema as { anyOf?: unknown[] }).anyOf), false)
+    const properties = (inputSchema as { properties?: Record<string, unknown> }).properties || {}
+    const command = properties.command as { properties?: Record<string, unknown> }
+    const commandProperties = command.properties || {}
+    assert(Object.keys(properties).length > 0)
+    assert.equal(properties.version !== undefined, true)
+    assert.equal(properties.sessionId !== undefined, true)
+    assert.equal(properties.command !== undefined, true)
+    for (const name of [
+      'sourceId', 'commandKind', 'migration', 'validationJobOperation', 'executable', 'args', 'packageDir',
+      'scriptName', 'marker', 'patternSet', 'paths', 'message', 'body', 'remote', 'branch', 'timeoutMs',
+      'validationJobTimeoutMs', 'validationJobId', 'runId', 'packetId', 'taskId', 'confirmedByUser',
+      'nodeVersion', 'policy', 'protectedPaths', 'requiredBranch', 'networkAccess'
+    ]) assert.equal(commandProperties[name] !== undefined, true, name)
+    for (const name of ['shell', 'environment', 'credentials', 'headers']) assert(!Object.hasOwn(commandProperties, name))
+    const commandKinds = [...((commandProperties.commandKind as { enum?: string[] }).enum ?? [])].sort()
+    assert.deepEqual(
+      commandKinds,
+      [...new Set([...RUN_WORKBENCH_DIRECT_COMMAND_KINDS, ...PERSISTED_VALIDATION_COMMAND_KINDS, 'n8n_workflow_migration'])].sort()
+    )
+    const migration = commandProperties.migration as { type?: string; properties?: Record<string, { enum?: string[] }> }
+    assert.equal(migration.type, 'object')
+    assert.equal(migration.properties?.mode !== undefined, true)
+    assert.equal(migration.properties?.phase !== undefined, true)
+    assert.equal(migration.properties?.workflowId !== undefined, true)
+    assert.equal(migration.properties?.candidatePath !== undefined, true)
+    assert.equal(migration.properties?.rollbackPath !== undefined, true)
+    assert.equal(migration.properties?.manifestPath !== undefined, true)
+    assert.equal(migration.properties?.operationId !== undefined, true)
+    assert.equal(migration.properties?.confirmationToken !== undefined, true)
+    assert.equal(migration.properties?.networkAccess !== undefined, true)
+    assert.deepEqual([...(migration.properties?.phase?.enum ?? [])].sort(), ['execute', 'prepare', 'status'])
+    assert.deepEqual([...(migration.properties?.mode?.enum ?? [])].sort(), ['apply', 'rollback'])
+    const serialized = JSON.stringify(inputSchema)
+    assert(Buffer.byteLength(serialized, 'utf8') < 20_000)
+    assert.equal(serialized.includes('"anyOf"'), false)
   } finally {
     await client.close()
     await server.close()
@@ -68,10 +114,26 @@ test('advertises and enforces an installation-admitted tool and nested-command s
     )
     const denied = await client.callTool({
       name: 'runWorkbenchCommand',
-      arguments: { sourceId: 'brain', commandKind: 'git_status_short' }
+      arguments: sessionCommand({ sourceId: 'brain', commandKind: 'git_status_short' })
     })
     assert.equal(denied.isError, true)
     assert(JSON.stringify(denied).includes('mcp_scope_denied'))
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
+test('serialization keeps non-command tool contracts intact', async () => {
+  const { client, server } = await connectedPair()
+  try {
+    const listed = await client.listTools()
+    for (const tool of listed.tools.filter(item => item.name !== 'runWorkbenchCommand')) {
+      const schema = tool.inputSchema as { type?: string; properties?: Record<string, unknown>; additionalProperties?: boolean }
+      assert.equal(schema.type, 'object')
+      assert.equal(schema.additionalProperties, false)
+      assert(Object.keys(schema.properties || {}).length >= 0)
+    }
   } finally {
     await client.close()
     await server.close()
@@ -91,13 +153,119 @@ test('invokes a validated tool and returns structured content', async () => {
   try {
     const result = await client.callTool({
       name: 'runWorkbenchCommand',
-      arguments: { sourceId: 'workbench-example-source', commandKind: 'git_status_short' }
+      arguments: sessionCommand({ sourceId: 'workbench-example-source', commandKind: 'git_status_short' })
     })
     assert.equal(result.isError, false)
     assert.deepEqual(result.structuredContent, {
       status: 'ok',
-      input: { sourceId: 'workbench-example-source', commandKind: 'git_status_short' }
+      input: sessionCommand({ sourceId: 'workbench-example-source', commandKind: 'git_status_short' })
     })
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
+test('preserves prepared migration operation through tools/call and supports strict follow-up requests', async () => {
+  const preparedResult = {
+    status: 'needs_confirmation',
+    sourceId: 'brain',
+    commandKind: 'n8n_workflow_migration',
+    migrationMode: 'apply',
+    migrationPhase: 'prepare',
+    confirmationToken: 'confirmation-example',
+    operation: {
+      operationId: 'cap-op-example',
+      status: 'prepared',
+      revision: 0,
+      binding: {
+        sourceId: 'brain',
+        workflowId: 'workflow-example',
+        mode: 'apply',
+        candidatePath: 'artifacts/candidate.json',
+        candidateSha256: 'a'.repeat(64),
+        rollbackPath: 'artifacts/rollback.json',
+        rollbackSha256: 'b'.repeat(64),
+        manifestPath: 'artifacts/manifest.json',
+        manifestSha256: 'c'.repeat(64),
+        wrapperSha256: 'd'.repeat(64)
+      },
+      confirmationExpiresAt: '2026-07-19T19:30:00.000Z',
+      rollbackReady: true
+    },
+    activity: {
+      operationId: 'runWorkbenchCommand',
+      phase: 'waiting_for_confirmation'
+    }
+  }
+  const { client, server } = await connectedPair(async () => ({ ok: true, result: preparedResult }))
+  try {
+    const response = await client.callTool({
+      name: 'runWorkbenchCommand',
+      arguments: sessionCommand({
+        sourceId: 'brain',
+        commandKind: 'n8n_workflow_migration',
+        migration: {
+          mode: 'apply',
+          phase: 'prepare',
+          workflowId: 'workflow-example',
+          candidatePath: 'artifacts/candidate.json',
+          rollbackPath: 'artifacts/rollback.json',
+          manifestPath: 'artifacts/manifest.json',
+          networkAccess: true
+        }
+      })
+    })
+    assert.equal(response.isError, false)
+    const structured = response.structuredContent as typeof preparedResult
+    assert.equal(structured.confirmationToken, 'confirmation-example')
+    assert.equal(structured.operation.operationId, 'cap-op-example')
+    assert.equal(structured.operation.status, 'prepared')
+    assert.equal(structured.operation.revision, 0)
+    assert.equal(structured.operation.binding.sourceId, 'brain')
+    assert.equal(structured.operation.binding.workflowId, 'workflow-example')
+    assert.equal(structured.operation.binding.mode, 'apply')
+    assert.equal(structured.operation.binding.candidatePath, 'artifacts/candidate.json')
+    assert.equal(structured.operation.binding.candidateSha256, 'a'.repeat(64))
+    assert.equal(structured.operation.binding.rollbackPath, 'artifacts/rollback.json')
+    assert.equal(structured.operation.binding.rollbackSha256, 'b'.repeat(64))
+    assert.equal(structured.operation.binding.manifestPath, 'artifacts/manifest.json')
+    assert.equal(structured.operation.binding.manifestSha256, 'c'.repeat(64))
+    assert.equal(structured.operation.binding.wrapperSha256, 'd'.repeat(64))
+    assert.equal(structured.operation.confirmationExpiresAt, '2026-07-19T19:30:00.000Z')
+    assert.equal(structured.operation.rollbackReady, true)
+    assert.equal(structured.activity.operationId, 'runWorkbenchCommand')
+    assert.notEqual(structured.activity.operationId, structured.operation.operationId)
+    const content = response.content as Array<{ type: string; text?: string }>
+    assert.equal(content[0]?.type, 'text')
+    const text = content[0]?.text
+    assert.equal(typeof text, 'string')
+    const textPayload = JSON.parse(text as string) as typeof preparedResult
+    assert.equal(textPayload.confirmationToken, structured.confirmationToken)
+    assert.equal(textPayload.operation.operationId, structured.operation.operationId)
+
+    const execute = sessionAwareRunWorkbenchCommandRequestSchema.safeParse(sessionCommand({
+      sourceId: structured.sourceId,
+      commandKind: 'n8n_workflow_migration',
+      migration: {
+        mode: structured.migrationMode,
+        phase: 'execute',
+        operationId: structured.operation.operationId,
+        confirmationToken: structured.confirmationToken
+      }
+    }))
+    assert.equal(execute.success, true)
+
+    const status = sessionAwareRunWorkbenchCommandRequestSchema.safeParse(sessionCommand({
+      sourceId: structured.sourceId,
+      commandKind: 'n8n_workflow_migration',
+      migration: {
+        mode: structured.migrationMode,
+        phase: 'status',
+        operationId: structured.operation.operationId
+      }
+    }))
+    assert.equal(status.success, true)
   } finally {
     await client.close()
     await server.close()
@@ -109,7 +277,7 @@ test('rejects malformed, unknown, and oversized tool calls', async () => {
   try {
     const malformed = await client.callTool({
       name: 'runWorkbenchCommand',
-      arguments: { sourceId: 'workbench-example-source', commandKind: 'git_status_short', shell: 'bash' }
+      arguments: sessionCommand({ sourceId: 'workbench-example-source', commandKind: 'git_status_short', shell: 'bash' })
     })
     assert.equal(malformed.isError, true)
     assert(JSON.stringify(malformed).includes('invalid_mcp_request'))
@@ -177,6 +345,26 @@ test('runs the fixed stdio entrypoint, lists tools, and closes cleanly', async (
     'runWorkbenchCommand'
   ])
   await client.close()
+})
+
+test('repeated cold initialize and tools/list complete within justified budget', async () => {
+  const ITERATIONS = 3
+  const BUDGET_MS = 5_000  // 25x the measured 194ms cold-start; justified by startup_timeout_sec = 10
+  for (let i = 0; i < ITERATIONS; i++) {
+    const start = Date.now()
+    const transport = new StdioClientTransport({
+      command: '/opt/homebrew/bin/node',
+      args: [path.join(repoRoot, 'packages', 'mcp', 'dist', 'server.js')],
+      cwd: repoRoot
+    })
+    const client = new Client({ name: `workbench-cold-${i}`, version: '1.0.0' })
+    await client.connect(transport)
+    const listed = await client.listTools()
+    assert.equal(listed.tools.length, 5, `Cold start ${i + 1}: expected 5 tools`)
+    await client.close()
+    const elapsed = Date.now() - start
+    assert.ok(elapsed < BUDGET_MS, `Cold start ${i + 1} took ${elapsed}ms, exceeds ${BUDGET_MS}ms justified budget`)
+  }
 })
 
 test('rejects an oversized newline-delimited stdio message', async () => {

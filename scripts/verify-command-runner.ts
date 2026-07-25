@@ -39,10 +39,19 @@ async function verifyStaticAssetGitPaths() {
     git(['config', 'user.name', 'BuildFlow Test'])
     put('src/app/prochat-memory/page.tsx', 'export default function Page() { return null }\n')
     put('README.md', '# seed\n')
-    git(['add', '--', 'src/app/prochat-memory/page.tsx', 'README.md'])
+    put('public/package.json', '{"name":"public-template","version":"1.0.0"}\n')
+    git(['add', '--', 'src/app/prochat-memory/page.tsx', 'README.md', 'public/package.json'])
     git(['commit', '-m', 'test: seed static asset repo'])
 
     put('src/app/prochat-memory/page.tsx', 'export default function Page() { return <main>Memory</main> }\n')
+    put('public/package.json', '{"name":"public-template","version":"1.0.1"}\n')
+    let result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/package.json'] })
+    assert.equal(result.status, 'completed')
+    assert.deepEqual(cachedPaths(), ['public/package.json'])
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['public/package.json'], message: 'test: commit tracked public source' })
+    assert.equal(result.status, 'completed')
+    assert.deepEqual(git(['show', '--pretty=format:', '--name-only', 'HEAD']).trim().split('\n').filter(Boolean), ['public/package.json'])
+
     put('public/prochat-memory/assets/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Logo</title></svg>\n')
     put('public/prochat-memory/assets/hero.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Hero</title></svg>\n')
     put('public/other-assets/raw.bin', Buffer.from([0, 1, 2, 3]))
@@ -51,7 +60,7 @@ async function verifyStaticAssetGitPaths() {
     await expectReject('git_add_paths requires confirmation for existing untracked static assets', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'] }))
     assert.deepEqual(cachedPaths(), [])
 
-    let result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmedByUser: true })
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmedByUser: true })
     assert.equal(result.status, 'completed')
     let details = result.details as {
       requestedPaths: string[]
@@ -840,8 +849,8 @@ for (const token of ['git_add_paths', 'git_commit', 'git_push', 'validate_json_f
 }
 assert(openapiRoute.includes("enum: ['node', 'pnpm', 'rg']"), 'OpenAPI exact-command executable enum must include direct rg')
 const gptActions = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
-assert(gptActions.includes('runWorkbenchCommandRequestSchema'), 'GPT command dispatcher must import the shared strict parser')
-assert(gptActions.includes('runWorkbenchCommandRequestSchema.safeParse(body)'), 'GPT command dispatcher must use the shared strict parser')
+assert(gptActions.includes('sessionAwareRunWorkbenchCommandRequestSchema'), 'GPT command dispatcher must import the shared session-aware strict parser')
+assert(gptActions.includes('sessionAwareRunWorkbenchCommandRequestSchema.safeParse(body)'), 'GPT command dispatcher must use the shared session-aware strict parser')
 assert(gptActions.includes("executeAction('/api/commands/run', requestBody"), 'GPT command dispatcher must forward the parsed request body')
 
 const commandRunnerSource = fs.readFileSync(path.join(process.cwd(), 'packages/cli/src/agent/command-runner.ts'), 'utf8')
@@ -866,8 +875,8 @@ for (const [label, pattern] of [
 }
 
 const runCommandRoute = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/actions/run-command/route.ts'), 'utf8')
-assert(runCommandRoute.includes("import { runWorkbenchCommandRequestSchema } from '@workbench/shared'"), 'run-command route must import the shared strict parser')
-assert(runCommandRoute.includes('runWorkbenchCommandRequestSchema.safeParse(rawBody)'), 'run-command route must use the shared strict parser')
+assert(runCommandRoute.includes("import { sessionAwareRunWorkbenchCommandRequestSchema } from '@workbench/shared'"), 'run-command route must import the shared session-aware strict parser')
+assert(runCommandRoute.includes('sessionAwareRunWorkbenchCommandRequestSchema.safeParse(rawBody)'), 'run-command route must use the shared session-aware strict parser')
 assert(
   runCommandRoute.includes("if (clean.status === 'timed_out' && validationJobOperation === undefined)"),
   'run-command route must normalize only synchronous timed_out results'

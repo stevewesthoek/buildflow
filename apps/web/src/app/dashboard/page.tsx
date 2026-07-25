@@ -42,6 +42,24 @@ type AgentDashboardJob = {
   }
   blockedReason?: string
   confirmationReason?: string
+  compactStatus: {
+    repository: string
+    runId: string
+    status: string
+    phaseTitle?: string
+    taskTitle?: string
+    overall: { percent: number; bar: string; accessibleLabel: string; confidence: 'exact' | 'low' }
+    phase: { percent: number; bar: string; accessibleLabel: string; confidence: 'exact' | 'low' }
+    task: { percent: number; bar: string; accessibleLabel: string; confidence: 'exact' | 'low' }
+    deltaCount: number
+    deltaPercent: number
+    currentPosition: string
+    blocker?: string
+    nextAction?: string
+    executionProfile: { engine: 'direct'; autonomy: 'supervised' | 'hands_off_safe' }
+    text: string
+    narrowText: string
+  }
 }
 
 type AgentRuntimeEvent = {
@@ -777,10 +795,7 @@ function ActiveRunObservabilityPanel({ jobs }: { jobs: AgentDashboardJob[] }) {
 
   const observedJob = activeJob as AgentDashboardJob & { packets?: AgentPacketSummary[] }
   const latestPacket = observedJob.packets?.[0]
-  const progress = activeJob.totalTaskCount > 0
-    ? Math.round((activeJob.completedTaskCount / activeJob.totalTaskCount) * 100)
-    : 0
-  const blocker = activeJob.blockedReason || activeJob.confirmationReason
+  const projection = activeJob.compactStatus
   const updatedLabel = activeJob.updatedAt
     ? new Date(activeJob.updatedAt).toLocaleString()
     : 'Unknown'
@@ -793,23 +808,30 @@ function ActiveRunObservabilityPanel({ jobs }: { jobs: AgentDashboardJob[] }) {
           <p className="mt-0.5 font-medium text-gray-800 dark:text-gray-100">{activeJob.status}</p>
         </div>
         <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-          {activeJob.completedTaskCount}/{activeJob.totalTaskCount}
+          {projection.overall.percent}%{projection.deltaCount > 0 ? ` · +${projection.deltaPercent}` : ''}
         </span>
       </div>
 
       <div className="mt-3 space-y-2">
         <div>
-          <p className="text-[10px] uppercase tracking-wide text-gray-400">Task</p>
-          <p className="mt-0.5 text-gray-700 dark:text-gray-200">
-            {activeJob.activeTask
-              ? `${activeJob.activeTask.phaseTitle}: ${activeJob.activeTask.title}`
-              : 'No active task'}
+          <p className="text-[10px] uppercase tracking-wide text-gray-400">Current position</p>
+          <p className="mt-0.5 text-gray-700 dark:text-gray-200">{projection.currentPosition}</p>
+          <p className="mt-0.5 font-mono text-[10px] text-gray-500 dark:text-gray-400">
+            {projection.executionProfile.engine}/{projection.executionProfile.autonomy}
           </p>
         </div>
 
-        <div>
-          <p className="text-[10px] uppercase tracking-wide text-gray-400">Summary</p>
-          <p className="mt-0.5 text-gray-600 dark:text-gray-300">{activeJob.summary || activeJob.id}</p>
+        <div className="grid gap-1.5" aria-label="Run progress">
+          {[['Overall', projection.overall], ['Phase', projection.phase], ['Task', projection.task]].map(([label, item]) => {
+            const progressItem = item as AgentDashboardJob['compactStatus']['overall']
+            return (
+              <div key={label as string} className="grid grid-cols-[3.25rem_minmax(0,1fr)_3rem] items-center gap-2 text-[10px]">
+                <span className="uppercase tracking-wide text-gray-400">{label as string}</span>
+                <span className="truncate font-mono text-gray-600 dark:text-gray-300" aria-label={progressItem.accessibleLabel}>{progressItem.bar}</span>
+                <span className="text-right text-gray-600 dark:text-gray-300">{progressItem.percent}%{progressItem.confidence === 'low' ? '~' : ''}</span>
+              </div>
+            )
+          })}
         </div>
 
         {latestPacket && (
@@ -843,21 +865,24 @@ function ActiveRunObservabilityPanel({ jobs }: { jobs: AgentDashboardJob[] }) {
           </div>
         )}
 
-        {blocker && (
+        {projection.blocker && (
           <div>
             <p className="text-[10px] uppercase tracking-wide text-amber-500">Blocker</p>
-            <p className="mt-0.5 text-amber-700 dark:text-amber-300">{blocker}</p>
+            <p className="mt-0.5 text-amber-700 dark:text-amber-300">{projection.blocker}</p>
           </div>
         )}
 
-        <div className="h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
-          <div className="h-full rounded-full bg-gray-700 dark:bg-gray-300" style={{ width: `${progress}%` }} />
-        </div>
+        {projection.nextAction && (
+          <div>
+            <p className="text-[10px] uppercase tracking-wide text-gray-400">Next action</p>
+            <p className="mt-0.5 text-gray-700 dark:text-gray-200">{projection.nextAction}</p>
+          </div>
+        )}
 
         <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-gray-500 dark:text-gray-400">
           <div>
             <dt className="uppercase tracking-wide">Source</dt>
-            <dd className="mt-0.5 truncate font-mono text-gray-700 dark:text-gray-300">{activeJob.sourceId}</dd>
+            <dd className="mt-0.5 truncate font-mono text-gray-700 dark:text-gray-300">{projection.repository}</dd>
           </div>
           <div>
             <dt className="uppercase tracking-wide">Updated</dt>
@@ -870,20 +895,23 @@ function ActiveRunObservabilityPanel({ jobs }: { jobs: AgentDashboardJob[] }) {
 }
 
 function AgentJobCard({ job, busyJobId, onControl }: { job: AgentDashboardJob; busyJobId: string | null; onControl: (job: AgentDashboardJob, action: 'pause' | 'resume' | 'cancel') => void }) {
-  const progress = job.totalTaskCount > 0 ? Math.round((job.completedTaskCount / job.totalTaskCount) * 100) : 0
+  const projection = job.compactStatus
   const tone: StatusTone = job.status === 'failed' || job.status === 'blocked' ? 'bad' : job.status === 'needs_confirmation' || job.status === 'paused' ? 'warn' : job.status === 'completed' ? 'good' : 'neutral'
   return (
     <div className={`rounded-lg px-2.5 py-2 text-xs ${toneBg(tone)}`}>
       <div className="flex items-center justify-between gap-1">
-        <span className="font-medium">Agent: {job.status}</span>
-        <span className="font-mono text-[10px] opacity-60">{job.completedTaskCount}/{job.totalTaskCount}</span>
+        <span className="font-medium">{projection.repository}: {projection.status}</span>
+        <span className="font-mono text-[10px] opacity-60">{projection.overall.percent}%{projection.deltaCount > 0 ? ` · +${projection.deltaPercent}` : ''}</span>
       </div>
-      <p className="mt-0.5 truncate opacity-75">{job.activeTask ? `${job.activeTask.phaseTitle}: ${job.activeTask.title}` : job.summary || job.id}</p>
-      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
-        <div className="h-full rounded-full bg-current opacity-50" style={{ width: `${progress}%` }} />
-      </div>
-      {(job.blockedReason || job.confirmationReason) && (
-        <p className="mt-1 opacity-75">{job.blockedReason || job.confirmationReason}</p>
+      <p className="mt-0.5 truncate opacity-75">{projection.currentPosition}</p>
+      <p className="mt-1 truncate font-mono text-[10px] opacity-70" aria-label={projection.overall.accessibleLabel}>
+        {projection.overall.bar} {projection.overall.percent}%
+      </p>
+      {projection.blocker && (
+        <p className="mt-1 opacity-75">{projection.blocker}</p>
+      )}
+      {!projection.blocker && projection.nextAction && (
+        <p className="mt-1 truncate opacity-75">Next: {projection.nextAction}</p>
       )}
       <div className="mt-1.5 flex gap-1">
         <MiniButton onClick={() => onControl(job, 'pause')} disabled={busyJobId === job.id || !['queued', 'running'].includes(job.status)}>Pause</MiniButton>

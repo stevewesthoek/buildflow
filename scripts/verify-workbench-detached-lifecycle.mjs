@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
   inspectDetachedService,
+  injectOwnerActionToken,
   readProcessMetadata,
   requireSustainedHealth,
   startDetachedService,
@@ -40,6 +41,7 @@ function fakeSpec(root, service, resultPath, maxLogBytes = 1024 * 1024) {
     executable: process.execPath,
     args: [SCRIPT_PATH, 'fake-child'],
     commandMarkers: ['verify-workbench-detached-lifecycle.mjs fake-child'],
+    ownershipScope: root,
     maxLogBytes,
     env: {
       HOME: process.env.HOME || root,
@@ -147,6 +149,20 @@ async function verify() {
   assert.match(stackScript, /if ! node "\$SERVICE_MANAGER" start web/, 'web manager failure must stop restart')
   assert.match(stackScript, /if ! node "\$SERVICE_MANAGER" status-all/, 'ownership status failure must stop restart')
   assert.match(stackScript, /if ! node "\$SERVICE_MANAGER" sustain/, 'sustained health failure must stop restart')
+  assert.match(stackScript, /node "\$SERVICE_MANAGER" validate-auth/, 'restart must validate owner-local authentication')
+  assert.match(stackScript, /node "\$SERVICE_MANAGER" verify-auth/, 'restart must verify authenticated status')
+  assert.match(stackScript, /userInfo\(\)\.homedir/, 'owner paths must ignore caller-controlled HOME')
+  assert.match(stackScript, /RUN_DIR="\$OWNER_HOME\/\.config\/workbench\/runtime-state"/, 'runtime ownership must be worktree-independent')
+  const startBlock = stackScript.slice(stackScript.indexOf('start_stack_clean()'), stackScript.indexOf('case "${1:-restart}"'))
+  assert(startBlock.indexOf('preflight_action_auth') < startBlock.indexOf('stop_stack'), 'authentication preflight must run before stopping live services')
+
+  const injected = injectOwnerActionToken({
+    PATH: '/usr/bin:/bin',
+    WORKBENCH_ACTION_TOKEN: 'ambient-canonical-override',
+    BUILDFLOW_ACTION_TOKEN: 'ambient-legacy-override'
+  }, SECRET_SENTINEL)
+  assert.equal(injected.WORKBENCH_ACTION_TOKEN, SECRET_SENTINEL)
+  assert.equal(injected.BUILDFLOW_ACTION_TOKEN, undefined)
 
   const createdRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-detached-lifecycle-'))
   const root = fs.realpathSync(createdRoot)
@@ -164,6 +180,11 @@ async function verify() {
     assert.equal(agentLive.pid, agentLaunch.state.pid)
     assert.notEqual(agentLive.pid, agentLaunch.launcherPid, 'service PID must not track the launcher process')
     assert.equal(agentLive.pid, agentLive.pgid, 'detached service must lead its own process group')
+    const alternateCwd = path.join(root, 'alternate-worktree')
+    fs.mkdirSync(alternateCwd)
+    const alternateAgentSpec = { ...agentSpec, cwd: alternateCwd }
+    assert.equal(inspectDetachedService(alternateAgentSpec).live, true, 'same-repository alternate worktree must recognize owned service')
+    assert.equal(inspectDetachedService({ ...alternateAgentSpec, ownershipScope: path.join(root, 'other-repository') }).status, 'invalid_state')
 
     fs.mkdirSync(webSpec.runDir, { recursive: true })
     fs.writeFileSync(path.join(webSpec.runDir, 'web.log'), 'x'.repeat(1024 * 1024 + 1))
@@ -213,7 +234,7 @@ async function verify() {
     assert(inspectDetachedService(agentSpec).live, 'failed-attempt cleanup must not stop another attempt')
     assert(inspectDetachedService(webSpec).live, 'one service cleanup must not stop another process group')
 
-    const agentStop = await stopDetachedService(agentSpec, { launchId: 'attempt-agent' })
+    const agentStop = await stopDetachedService(alternateAgentSpec, { launchId: 'attempt-agent' })
     assert.equal(agentStop.status, 'stopped')
     assert(!readProcessMetadata(agentLive.pid) || readProcessMetadata(agentLive.pid).zombie, 'recorded agent process group must stop')
     assert(inspectDetachedService(webSpec).live, 'stopping agent must not stop web')
@@ -235,11 +256,13 @@ async function verify() {
     const agentStatePath = path.join(root, 'run', 'agent.state.json')
     const agentPidPath = path.join(root, 'run', 'agent.pid')
     fs.writeFileSync(agentStatePath, JSON.stringify({
-      version: 1,
+      version: 2,
       service: 'agent',
       pid: process.pid,
       pgid: process.pid,
       startIdentity: 'not-the-current-process-start',
+      cwd: root,
+      ownershipScope: root,
       launchId: 'stale'
     }))
     fs.writeFileSync(agentPidPath, `${process.pid}\n`)
@@ -249,11 +272,13 @@ async function verify() {
     fs.rmSync(agentPidPath, { force: true })
 
     fs.writeFileSync(agentStatePath, JSON.stringify({
-      version: 1,
+      version: 2,
       service: 'agent',
       pid: 999999,
       pgid: 999999,
       startIdentity: 'dead-process',
+      cwd: root,
+      ownershipScope: root,
       launchId: 'stale'
     }))
     fs.writeFileSync(agentPidPath, '999999\n')
@@ -291,7 +316,8 @@ async function verify() {
       runtimeVersionEnvironmentPreserved: true,
       secretValuesAbsentFromStateAndLogs: true,
       sustainedHealthRequired: true,
-      criticalLauncherFailuresPropagate: true
+      criticalLauncherFailuresPropagate: true,
+      worktreeIndependentOwnership: true
     }, null, 2))
   } finally {
     for (const spec of [

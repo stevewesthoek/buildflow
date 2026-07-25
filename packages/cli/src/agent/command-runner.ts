@@ -277,6 +277,19 @@ function isTextLikeStaticStagePath(relativePath: string): boolean {
   return TEXT_LIKE_STATIC_STAGE_EXTENSIONS.has(path.extname(relativePath).toLowerCase())
 }
 
+function isExplicitRequestedPath(request: SafeCommandRequest, relativePath: string): boolean {
+  return (request.paths || []).some(requested => !requested.includes('*') && normalizeRepoPath(requested) === relativePath)
+}
+
+function isTrackedTextSourceUnderStaticRoot(request: SafeCommandRequest, sourceRoot: string, relativePath: string): boolean {
+  const extension = path.extname(relativePath).toLowerCase()
+  return isExplicitRequestedPath(request, relativePath)
+    && isStaticStageRootPath(relativePath)
+    && hasTrackedIndexEntry(sourceRoot, relativePath)
+    && !STATIC_STAGE_EXTENSIONS.has(extension)
+    && !BINARY_EXTENSIONS.has(extension)
+}
+
 function hasTrackedIndexEntry(sourceRoot: string, relativePath: string): boolean {
   try {
     execFileSync('git', ['ls-files', '--error-unmatch', '--', relativePath], { cwd: sourceRoot, stdio: 'ignore', env: gitLiteralEnv() })
@@ -490,7 +503,9 @@ function assertStagePathAllowed(request: SafeCommandRequest, sourceRoot: string,
     assertStaticStageAllowed(request, sourceRoot, relativePath)
     return
   }
-  if (isStaticStageRootPath(relativePath)) throw new Error('Static asset type or root is unsupported: ' + relativePath)
+  if (isStaticStageRootPath(relativePath) && !isTrackedTextSourceUnderStaticRoot(request, sourceRoot, relativePath)) {
+    throw new Error('Static asset type or root is unsupported: ' + relativePath)
+  }
   if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error('Binary path is blocked: ' + relativePath)
   assertExtensionlessGitTextPath(sourceRoot, relativePath)
   assertGitWriteAllowed(request, sourceRoot, relativePath, 'patch')
@@ -508,7 +523,9 @@ function assertCommitPathAllowed(request: SafeCommandRequest, sourceRoot: string
     assertStaticStageAllowed(request, sourceRoot, item.path, item.status)
     return
   }
-  if (isStaticStageRootPath(item.path)) throw new Error('Static asset type or root is unsupported: ' + item.path)
+  if (isStaticStageRootPath(item.path) && !isTrackedTextSourceUnderStaticRoot(request, sourceRoot, item.path)) {
+    throw new Error('Static asset type or root is unsupported: ' + item.path)
+  }
   if (BINARY_EXTENSIONS.has(path.extname(item.path).toLowerCase())) throw new Error('Binary path is blocked: ' + item.path)
   assertExtensionlessGitTextPath(sourceRoot, item.path)
   assertGitWriteAllowed(request, sourceRoot, item.path, 'patch')

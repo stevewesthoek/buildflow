@@ -155,7 +155,25 @@ if (migration.ok && migration.kind === 'migration') {
 }
 
   const phaseSource = () => [{ id: 'migration-source', label: 'Migration source', path: '/srv/migration-source', enabled: true }]
-  const projectedOperation = { operationId: 'cap-op-example', status: 'prepared', mode: 'apply' }
+  const projectedOperation = {
+    operationId: 'cap-op-example',
+    status: 'prepared',
+    revision: 0,
+    binding: {
+      sourceId: 'migration-source',
+      workflowId: 'workflow-id',
+      mode: 'apply',
+      candidatePath: 'artifacts/candidate.json',
+      candidateSha256: 'a'.repeat(64),
+      rollbackPath: 'artifacts/rollback.json',
+      rollbackSha256: 'b'.repeat(64),
+      manifestPath: 'artifacts/manifest.json',
+      manifestSha256: 'c'.repeat(64),
+      wrapperSha256: 'd'.repeat(64)
+    },
+    confirmationExpiresAt: '2026-07-19T19:30:00.000Z',
+    rollbackReady: true
+  }
   const phaseDependencies = {
     getSources: phaseSource,
     getConfiguredGrants: () => undefined,
@@ -189,6 +207,22 @@ if (migration.ok && migration.kind === 'migration') {
     assert.equal(response.statusCode, 200)
     assert.equal(response.body.migrationPhase, parsed.request.migration.phase)
     assert.equal(response.body.commandKind, 'n8n_workflow_migration')
+    if (parsed.request.migration.phase === 'prepare') {
+      assert.equal(response.body.confirmationToken, 'opaque-confirmation-token')
+      const operation = response.body.operation as typeof projectedOperation
+      assert.equal(operation.operationId, 'cap-op-example')
+      assert.equal(operation.status, 'prepared')
+      assert.equal(operation.revision, 0)
+      assert.equal(operation.binding.sourceId, 'migration-source')
+      assert.equal(operation.binding.workflowId, 'workflow-id')
+      assert.equal(operation.binding.candidateSha256, 'a'.repeat(64))
+      assert.equal(operation.binding.rollbackSha256, 'b'.repeat(64))
+      assert.equal(operation.binding.manifestSha256, 'c'.repeat(64))
+      assert.equal(operation.binding.wrapperSha256, 'd'.repeat(64))
+      assert.equal(operation.confirmationExpiresAt, '2026-07-19T19:30:00.000Z')
+      assert.equal(operation.rollbackReady, true)
+      assert.equal(Object.hasOwn(response.body, 'operationRecord'), false)
+    }
   }
   if (prepare.ok && prepare.kind === 'migration') {
     const blocked = await runControlledWorkflowMigrationCommand(prepare.request, {

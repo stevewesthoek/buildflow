@@ -11,6 +11,12 @@
       "@workbench/shared": [
         "../../packages/shared/src/index.ts"
       ],
+      "@workbench/cli/telemetry-store": [
+        "../../packages/cli/src/agent/telemetry-store.ts"
+      ],
+      "@workbench/cli/slo-health": [
+        "../../packages/cli/src/agent/slo-health.ts"
+      ],
       "@workbench/bridge/request-audit": [
         "../../packages/bridge/src/storage/request-audit.ts"
       ]

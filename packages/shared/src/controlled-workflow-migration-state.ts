@@ -107,13 +107,81 @@ export type ControlledWorkflowMigrationBinding = {
   apiOriginFingerprint?: string
 }
 
-export type ControlledWorkflowMigrationEvidence = {
+export type ControlledWorkflowMigrationExecutorClassification =
+  | 'succeeded'
+  | 'definitively_failed'
+  | 'ambiguous'
+  | 'timed_out'
+  | 'blocked'
+
+export type ControlledWorkflowMigrationExecutorReasonCode =
+  | 'READ_SUCCEEDED'
+  | 'INVALID_INVOCATION'
+  | 'CALLER_PROCESS_CONFIGURATION_REJECTED'
+  | 'EFFECT_NOT_SUPPORTED'
+  | 'EFFECT_NOT_LEGAL'
+  | 'SOURCE_ID_MISMATCH'
+  | 'SOURCE_ROOT_FINGERPRINT_MISMATCH'
+  | 'GRANT_DISABLED'
+  | 'GRANT_IDENTITY_MISMATCH'
+  | 'WORKFLOW_BINDING_MISMATCH'
+  | 'WRAPPER_BINDING_MISMATCH'
+  | 'CANONICALIZATION_VERSION_MISMATCH'
+  | 'CANDIDATE_BINDING_MISMATCH'
+  | 'ROLLBACK_BINDING_MISMATCH'
+  | 'MANIFEST_BINDING_MISMATCH'
+  | 'API_ORIGIN_MISMATCH'
+  | 'ARTIFACT_PATH_OUTSIDE_GRANT'
+  | 'ARTIFACT_HASH_MISMATCH'
+  | 'ARTIFACT_INVALID'
+  | 'MANIFEST_INVALID'
+  | 'MANIFEST_EXPANDS_GRANT'
+  | 'WRAPPER_NOT_EXECUTABLE'
+  | 'MUTATION_ALREADY_REQUESTED'
+  | 'MUTATION_COMMAND_UNPROVEN'
+  | 'MUTATION_DISPATCH_NOT_RESERVED'
+  | 'MUTATION_DISPATCH_REPLAYED'
+  | 'PROCESS_DEFINITIVE_FAILURE'
+  | 'PROCESS_AMBIGUOUS'
+  | 'PROCESS_TIMED_OUT'
+  | 'PROCESS_OUTPUT_TRUNCATED'
+  | 'MALFORMED_RESPONSE'
+  | 'RESPONSE_WORKFLOW_ID_MISMATCH'
+  | 'PROTECTED_DOMAIN_MISMATCH'
+  | 'CREDENTIAL_MATERIAL_DETECTED'
+  | 'CREDENTIAL_SOURCE_UNAVAILABLE'
+  | 'RUNTIME_CONFIGURATION_UNAVAILABLE'
+  | 'CANONICALIZATION_FAILED'
+  | 'INTERNAL_EXECUTOR_FAILURE'
+
+export type ControlledWorkflowMigrationReadPurpose =
+  | 'precondition'
+  | 'candidate_readback'
+  | 'rollback_readback'
+  | 'reconciliation'
+
+export type ControlledWorkflowMigrationExecutorDiagnostic = {
+  executorClassification?: ControlledWorkflowMigrationExecutorClassification
+  executorReasonCode?: ControlledWorkflowMigrationExecutorReasonCode
+  executorExitCode?: number | null
+  readPurpose?: ControlledWorkflowMigrationReadPurpose
+  executorOperationId?: string
+  executorWorkflowId?: string
+}
+
+export type ControlledWorkflowMigrationEvidence = ControlledWorkflowMigrationExecutorDiagnostic & {
   observedCanonicalSha256?: string
   protectedDomains?: 'unchanged' | 'unverified'
   mutationResult?: ControlledWorkflowMutationResult
   readbackResult?: ControlledWorkflowReadbackResult
   rollbackResult?: ControlledWorkflowRollbackResult
   durationMs?: number
+  executorClassification?: ControlledWorkflowMigrationExecutorClassification
+  executorReasonCode?: ControlledWorkflowMigrationExecutorReasonCode
+  executorExitCode?: number | null
+  readPurpose?: ControlledWorkflowMigrationReadPurpose
+  executorOperationId?: string
+  executorWorkflowId?: string
 }
 
 /**
@@ -226,13 +294,13 @@ export type ControlledWorkflowMigrationEvent =
       result: 'acquired' | 'conflict'
       at: string
     }
-  | {
+  | ({
       type: 'precondition_readback'
       result: ControlledWorkflowReadbackResult
       observedCanonicalSha256?: string
       protectedDomains?: 'unchanged' | 'unverified'
       at: string
-    }
+    } & ControlledWorkflowMigrationExecutorDiagnostic)
   | {
       type: 'candidate_dispatch_reserved'
       result: 'reserved' | 'conflict' | 'replayed' | 'store_corrupt'
@@ -253,13 +321,13 @@ export type ControlledWorkflowMigrationEvent =
       result: ControlledWorkflowRollbackResult
       at: string
     }
-  | {
+  | ({
       type: 'readback_result'
       result: ControlledWorkflowReadbackResult
       observedCanonicalSha256?: string
       protectedDomains?: 'unchanged' | 'unverified'
       at: string
-    }
+    } & ControlledWorkflowMigrationExecutorDiagnostic)
   | {
       type: 'lease_expired'
       at: string
@@ -376,6 +444,12 @@ export type ControlledWorkflowMigrationStatusProjection = {
   readbackResult?: ControlledWorkflowReadbackResult
   rollbackResult?: ControlledWorkflowRollbackResult
   durationMs?: number
+  executorClassification?: ControlledWorkflowMigrationExecutorClassification
+  executorReasonCode?: ControlledWorkflowMigrationExecutorReasonCode
+  executorExitCode?: number | null
+  readPurpose?: ControlledWorkflowMigrationReadPurpose
+  executorOperationId?: string
+  executorWorkflowId?: string
 }
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -653,10 +727,20 @@ function handlePreconditionReadback(
   if (operation.status !== 'running' || operation.candidateUpdateRequests !== 0 || operation.rollbackUpdateRequests !== 0) {
     return noChange(operation, 'INVALID_TRANSITION')
   }
+  if ((event.executorOperationId && event.executorOperationId !== operation.operationId)
+    || (event.executorWorkflowId && event.executorWorkflowId !== operation.binding.workflowId)) {
+    return noChange(operation, 'INVALID_TRANSITION')
+  }
   const evidence = operationEvidence(operation, {
     readbackResult: event.result,
     protectedDomains: event.protectedDomains === 'unchanged' ? 'unchanged' : 'unverified',
-    ...(isSha256(event.observedCanonicalSha256) ? { observedCanonicalSha256: event.observedCanonicalSha256 } : {})
+    ...(isSha256(event.observedCanonicalSha256) ? { observedCanonicalSha256: event.observedCanonicalSha256 } : {}),
+    ...(event.executorClassification ? { executorClassification: event.executorClassification } : {}),
+    ...(event.executorReasonCode ? { executorReasonCode: event.executorReasonCode } : {}),
+    ...(typeof event.executorExitCode === 'number' && Number.isInteger(event.executorExitCode) ? { executorExitCode: Math.max(-255, Math.min(255, event.executorExitCode)) } : event.executorExitCode === null ? { executorExitCode: null } : {}),
+    ...(event.readPurpose ? { readPurpose: event.readPurpose } : {}),
+    ...(event.executorOperationId ? { executorOperationId: event.executorOperationId } : {}),
+    ...(event.executorWorkflowId ? { executorWorkflowId: event.executorWorkflowId } : {})
   })
   if (event.result !== 'matches_pre_mutation') {
     const reasonCode = event.result === 'unavailable' ? 'PRECONDITION_UNAVAILABLE' : 'PRECONDITION_MISMATCH'
@@ -803,10 +887,20 @@ function handleReadbackResult(
   if (operation.status !== 'reconciling' && operation.status !== 'rolling_back') {
     return noChange(operation, 'INVALID_TRANSITION')
   }
+  if ((event.executorOperationId && event.executorOperationId !== operation.operationId)
+    || (event.executorWorkflowId && event.executorWorkflowId !== operation.binding.workflowId)) {
+    return noChange(operation, 'INVALID_TRANSITION')
+  }
   const evidence = operationEvidence(operation, {
     readbackResult: event.result,
     protectedDomains: event.protectedDomains === 'unchanged' ? 'unchanged' : 'unverified',
-    ...(isSha256(event.observedCanonicalSha256) ? { observedCanonicalSha256: event.observedCanonicalSha256 } : {})
+    ...(isSha256(event.observedCanonicalSha256) ? { observedCanonicalSha256: event.observedCanonicalSha256 } : {}),
+    ...(event.executorClassification ? { executorClassification: event.executorClassification } : {}),
+    ...(event.executorReasonCode ? { executorReasonCode: event.executorReasonCode } : {}),
+    ...(typeof event.executorExitCode === 'number' && Number.isInteger(event.executorExitCode) ? { executorExitCode: Math.max(-255, Math.min(255, event.executorExitCode)) } : event.executorExitCode === null ? { executorExitCode: null } : {}),
+    ...(event.readPurpose ? { readPurpose: event.readPurpose } : {}),
+    ...(event.executorOperationId ? { executorOperationId: event.executorOperationId } : {}),
+    ...(event.executorWorkflowId ? { executorWorkflowId: event.executorWorkflowId } : {})
   })
 
   if (operation.status === 'rolling_back') {
@@ -995,6 +1089,14 @@ export function projectControlledWorkflowMigrationStatus(
     ...(evidence.mutationResult ? { mutationResult: evidence.mutationResult } : {}),
     ...(evidence.readbackResult ? { readbackResult: evidence.readbackResult } : {}),
     ...(evidence.rollbackResult ? { rollbackResult: evidence.rollbackResult } : {}),
+    ...(evidence.executorClassification ? { executorClassification: evidence.executorClassification } : {}),
+    ...(evidence.executorReasonCode ? { executorReasonCode: evidence.executorReasonCode } : {}),
+    ...(typeof evidence.executorExitCode === 'number' && Number.isInteger(evidence.executorExitCode)
+      ? { executorExitCode: Math.max(-255, Math.min(255, evidence.executorExitCode)) }
+      : evidence.executorExitCode === null ? { executorExitCode: null } : {}),
+    ...(evidence.readPurpose ? { readPurpose: evidence.readPurpose } : {}),
+    ...(evidence.executorOperationId === operation.operationId ? { executorOperationId: evidence.executorOperationId } : {}),
+    ...(evidence.executorWorkflowId === operation.binding.workflowId ? { executorWorkflowId: evidence.executorWorkflowId } : {}),
     ...(durationMs === undefined ? {} : { durationMs })
   }
 }

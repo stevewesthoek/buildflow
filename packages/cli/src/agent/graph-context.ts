@@ -2,6 +2,7 @@ import { execFile } from 'child_process'
 import { promises as fsp } from 'fs'
 import path from 'path'
 import { getSourcesSafe } from './config'
+import { recordGraphifyTelemetry } from './index-graph-telemetry'
 
 type GraphContextBody = {
   sourceId: string
@@ -296,11 +297,21 @@ export async function handleGraphContext(body: GraphContextBody): Promise<GraphC
 
   try {
     if (!sourceId || typeof sourceId !== 'string') {
+      recordGraphifyTelemetry({
+        durationMs: Date.now() - startedAt,
+        outcome: 'rejected',
+        reasonCode: 'invalid_source'
+      })
       return { statusCode: 400, payload: { error: 'sourceId is required' } }
     }
 
     const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
     if (!source) {
+      recordGraphifyTelemetry({
+        durationMs: Date.now() - startedAt,
+        outcome: 'rejected',
+        reasonCode: 'source_not_found'
+      })
       return { statusCode: 404, payload: { error: `Source not found or disabled: ${sourceId}` } }
     }
 
@@ -312,6 +323,12 @@ export async function handleGraphContext(body: GraphContextBody): Promise<GraphC
     const graphAvailable = artifacts.some(artifact => artifact.exists)
 
     if (!graphAvailable) {
+      recordGraphifyTelemetry({
+        sourceId,
+        durationMs: Date.now() - startedAt,
+        outcome: 'degraded',
+        reasonCode: 'missing_graph_artifacts'
+      })
       return {
         statusCode: 200,
         payload: {
@@ -360,6 +377,12 @@ export async function handleGraphContext(body: GraphContextBody): Promise<GraphC
       limit
     })
 
+    recordGraphifyTelemetry({
+      sourceId,
+      durationMs: Date.now() - startedAt,
+      outcome: 'success',
+      reasonCode: 'graphify_completed'
+    })
     return {
       statusCode: 200,
       payload: {
@@ -387,6 +410,12 @@ export async function handleGraphContext(body: GraphContextBody): Promise<GraphC
       }
     }
   } catch (err) {
+    recordGraphifyTelemetry({
+      sourceId: typeof sourceId === 'string' ? sourceId : undefined,
+      durationMs: Date.now() - startedAt,
+      outcome: 'failure',
+      reasonCode: 'graphify_failed'
+    })
     return {
       statusCode: 400,
       payload: {

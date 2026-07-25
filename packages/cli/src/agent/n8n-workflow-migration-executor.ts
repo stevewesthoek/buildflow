@@ -19,6 +19,10 @@ import {
   type ControlledN8nWorkflowGrant
 } from './capability-grants'
 import type { MutationDispatchKind } from './capability-mutation-dispatch-store'
+import {
+  loadOwnerLocalN8nRuntimeConfiguration,
+  type N8nRuntimeConfiguration
+} from './n8n-runtime-config'
 
 export const N8N_WORKFLOW_MIGRATION_EXECUTOR_LIMITS = Object.freeze({
   maxWrapperBytes: 1_000_000,
@@ -70,6 +74,7 @@ type ExecutorHost = {
   apiOriginFingerprint?: string
   executeFixedProcess: (specification: FixedProcessSpecification) => Promise<FixedProcessResult>
   readConfiguredCredentialValues?: () => string[]
+  loadRuntimeConfiguration?: () => N8nRuntimeConfiguration
   /** Host-owned bridge: it holds the single plaintext dispatch authorization. */
   consumeMutationDispatch?: (binding: {
     operationId: string; sourceId: string; workflowId: string; kind: MutationDispatchKind; artifactSha256: string; wrapperSha256: string
@@ -120,6 +125,7 @@ export type N8nWorkflowMigrationExecutorReasonCode =
   | 'PROTECTED_DOMAIN_MISMATCH'
   | 'CREDENTIAL_MATERIAL_DETECTED'
   | 'CREDENTIAL_SOURCE_UNAVAILABLE'
+  | 'RUNTIME_CONFIGURATION_UNAVAILABLE'
   | 'CANONICALIZATION_FAILED'
   | 'INTERNAL_EXECUTOR_FAILURE'
 
@@ -202,6 +208,7 @@ const REASON_MESSAGES: Record<N8nWorkflowMigrationExecutorReasonCode, string> = 
   PROTECTED_DOMAIN_MISMATCH: 'A protected workflow domain differs from the approved unchanged snapshot.',
   CREDENTIAL_MATERIAL_DETECTED: 'The wrapper response contained credential-like or authorization material.',
   CREDENTIAL_SOURCE_UNAVAILABLE: 'Configured credential values could not be loaded for secret-safe validation.',
+  RUNTIME_CONFIGURATION_UNAVAILABLE: 'The guarded runtime configuration is unavailable or invalid.',
   CANONICALIZATION_FAILED: 'The bounded workflow response could not be canonicalized.',
   INTERNAL_EXECUTOR_FAILURE: 'The executor failed closed before returning approved evidence.'
 }
@@ -541,6 +548,39 @@ function configuredCredentialValues(host: ExecutorHost): string[] {
   return [...new Set(values.filter(value => typeof value === 'string' && value.length >= 4))].slice(0, 100)
 }
 
+function configuredRuntimeConfiguration(host: ExecutorHost): N8nRuntimeConfiguration {
+  if (!host.loadRuntimeConfiguration) {
+    return {
+      environment: minimalN8nEnvironment(),
+      credentialValues: configuredCredentialValues(host)
+    }
+  }
+  try {
+    const configuration = host.loadRuntimeConfiguration()
+    if (!configuration
+      || !isRecord(configuration.environment)
+      || !Array.isArray(configuration.credentialValues)
+      || typeof configuration.environment.N8N_API_URL !== 'string'
+      || typeof configuration.environment.N8N_API_KEY !== 'string') {
+      return fail('RUNTIME_CONFIGURATION_UNAVAILABLE', 'runtimeConfiguration')
+    }
+    const allowed = new Set(['PATH', 'HOME', 'CI', 'NO_COLOR', 'N8N_API_URL', 'N8N_API_KEY'])
+    if (Object.keys(configuration.environment).some(key => !allowed.has(key))) {
+      return fail('RUNTIME_CONFIGURATION_UNAVAILABLE', 'runtimeConfiguration')
+    }
+    if (!configuration.credentialValues.includes(configuration.environment.N8N_API_KEY)) {
+      return fail('RUNTIME_CONFIGURATION_UNAVAILABLE', 'runtimeConfiguration')
+    }
+    return {
+      environment: { ...configuration.environment },
+      credentialValues: [...new Set(configuration.credentialValues.filter(value => typeof value === 'string' && value.length >= 4))].slice(0, 100)
+    }
+  } catch (error) {
+    if (error instanceof ExecutorValidationError) throw error
+    return fail('RUNTIME_CONFIGURATION_UNAVAILABLE', 'runtimeConfiguration')
+  }
+}
+
 function containsCredentialMaterial(raw: string, configuredValues: string[]): boolean {
   if (CREDENTIAL_ASSIGNMENT_PATTERN.test(raw)) return true
   if (/\bBearer\s+[A-Za-z0-9._~+\/-]{8,}/i.test(raw)) return true
@@ -851,8 +891,8 @@ function blockedMutation(invocation: ParsedInvocation, reasonCode: 'MUTATION_DIS
   return baseResult({ effect: invocation.effect.type, classification: 'blocked', operationId: invocation.operation.operationId, workflowId: invocation.operation.binding.workflowId, durationMs: 0, reasonCode, field: invocation.effect.type })
 }
 
-async function executeMutation(params: { invocation: ParsedInvocation; validated: ReturnType<typeof validateBinding>; host: ExecutorHost; nowMs: () => number }): Promise<N8nWorkflowMigrationExecutorResult> {
-  const { invocation, validated, host, nowMs } = params
+async function executeMutation(params: { invocation: ParsedInvocation; validated: ReturnType<typeof validateBinding>; host: ExecutorHost; runtimeEnvironment: NodeJS.ProcessEnv; nowMs: () => number }): Promise<N8nWorkflowMigrationExecutorResult> {
+  const { invocation, validated, host, runtimeEnvironment, nowMs } = params
   const effect = invocation.effect
   if (effect.type !== 'apply_candidate' && effect.type !== 'apply_rollback') return blockedMutation(invocation, 'MUTATION_DISPATCH_NOT_RESERVED')
   if (!parseControlledN8nWrapperContract(CONTROLLED_N8N_WRAPPER_CONTRACT_V1).ok) return blockedMutation(invocation, 'MUTATION_DISPATCH_NOT_RESERVED')
@@ -867,7 +907,7 @@ async function executeMutation(params: { invocation: ParsedInvocation; validated
   const startedAt = nowMs()
   let process: FixedProcessResult
   try {
-    process = await host.executeFixedProcess({ executable: validated.wrapperPath, executableSha256: invocation.operation.binding.wrapperSha256, args: ['update-workflow', invocation.operation.binding.workflowId, '-'], cwd: validated.sourceRoot, env: minimalN8nEnvironment(), stdin: payload.raw, shell: false, timeoutMs: Math.min(validated.timeoutMs, CONTROLLED_N8N_WRAPPER_CONTRACT_V1.limits.maximumTotalTimeoutSeconds * 1000), stdoutLimitBytes: CONTROLLED_N8N_WRAPPER_CONTRACT_V1.limits.maximumResponseBytes, stderrLimitBytes: N8N_WORKFLOW_MIGRATION_EXECUTOR_LIMITS.maxStderrBytes, terminateProcessTree: true, terminationGraceMs: N8N_WORKFLOW_MIGRATION_EXECUTOR_LIMITS.terminationGraceMs, mayMutate: true })
+    process = await host.executeFixedProcess({ executable: validated.wrapperPath, executableSha256: invocation.operation.binding.wrapperSha256, args: ['update-workflow', invocation.operation.binding.workflowId, '-'], cwd: validated.sourceRoot, env: { ...runtimeEnvironment }, stdin: payload.raw, shell: false, timeoutMs: Math.min(validated.timeoutMs, CONTROLLED_N8N_WRAPPER_CONTRACT_V1.limits.maximumTotalTimeoutSeconds * 1000), stdoutLimitBytes: CONTROLLED_N8N_WRAPPER_CONTRACT_V1.limits.maximumResponseBytes, stderrLimitBytes: N8N_WORKFLOW_MIGRATION_EXECUTOR_LIMITS.maxStderrBytes, terminateProcessTree: true, terminationGraceMs: N8N_WORKFLOW_MIGRATION_EXECUTOR_LIMITS.terminationGraceMs, mayMutate: true })
   } catch { return baseResult({ effect: effect.type, classification: 'ambiguous', operationId: invocation.operation.operationId, workflowId: invocation.operation.binding.workflowId, durationMs: nowMs() - startedAt, reasonCode: 'PROCESS_AMBIGUOUS' }) }
   if (!isFixedProcessResult(process) || process.outcome !== 'succeeded' || process.exitCode !== 0 || process.stdoutTruncated || process.stderrTruncated) return processFailureResult({ invocation, process: isFixedProcessResult(process) ? process : { outcome: 'ambiguous', exitCode: null, signal: null, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false }, startedAt, nowMs })
   let wrapperResult: unknown
@@ -885,10 +925,12 @@ export function createN8nWorkflowMigrationExecutor(host: ExecutorHost) {
     const requestedReadPurpose = invocationReadPurpose(value)
     let invocation: ParsedInvocation
     let validated: ReturnType<typeof validateBinding>
+    let runtimeConfiguration: N8nRuntimeConfiguration
     let credentialValues: string[]
     try {
       invocation = parseInvocation(value)
-      credentialValues = configuredCredentialValues(host)
+      runtimeConfiguration = configuredRuntimeConfiguration(host)
+      credentialValues = runtimeConfiguration.credentialValues
       validated = validateBinding({ invocation, host, configuredCredentialValues: credentialValues })
     } catch (error) {
       const reasonCode = error instanceof ExecutorValidationError
@@ -907,7 +949,7 @@ export function createN8nWorkflowMigrationExecutor(host: ExecutorHost) {
       })
     }
 
-    if (invocation.effect.type === 'apply_candidate' || invocation.effect.type === 'apply_rollback') return executeMutation({ invocation, validated, host, nowMs })
+    if (invocation.effect.type === 'apply_candidate' || invocation.effect.type === 'apply_rollback') return executeMutation({ invocation, validated, host, runtimeEnvironment: runtimeConfiguration.environment, nowMs })
 
     const startedAt = nowMs()
     let processResult: FixedProcessResult
@@ -917,7 +959,7 @@ export function createN8nWorkflowMigrationExecutor(host: ExecutorHost) {
         executableSha256: invocation.operation.binding.wrapperSha256,
         args: ['get-workflow', invocation.operation.binding.workflowId],
         cwd: validated.sourceRoot,
-        env: minimalN8nEnvironment(),
+        env: { ...runtimeConfiguration.environment },
         shell: false,
         timeoutMs: validated.timeoutMs,
         stdoutLimitBytes: Math.min(
@@ -1096,34 +1138,6 @@ export function createN8nWorkflowMigrationExecutor(host: ExecutorHost) {
   }
 }
 
-function defaultConfiguredCredentialValues(): string[] {
-  const values = new Set<string>()
-  if (typeof process.env.N8N_API_KEY === 'string' && process.env.N8N_API_KEY.length >= 4) {
-    values.add(process.env.N8N_API_KEY)
-  }
-  const home = process.env.HOME || ''
-  const configPath = process.env.N8N_CONFIG_FILE || (home ? path.join(home, '.config/n8n/.env') : '')
-  if (configPath) {
-    try {
-      if (!fs.existsSync(configPath)) return [...values]
-      const stat = fs.statSync(configPath)
-      if (!stat.isFile()) return [...values]
-      if (stat.size > 1_000_000) throw new Error('credential source exceeds bounded size')
-      for (const line of fs.readFileSync(configPath, 'utf8').split(/\r?\n/)) {
-        const match = line.match(/^\s*(?:export\s+)?N8N_API_KEY\s*=\s*(.*)\s*$/)
-        if (!match) continue
-        const raw = match[1].trim()
-        const quoted = raw.match(/^(['"])(.*?)\1(?:\s+#.*)?$/)
-        const value = (quoted ? quoted[2] : raw.replace(/\s+#.*$/, '')).trim()
-        if (value.length >= 4) values.add(value)
-      }
-    } catch {
-      throw new Error('configured credential source is unavailable')
-    }
-  }
-  return [...values]
-}
-
 function executeFixedNodeProcess(specification: FixedProcessSpecification): Promise<FixedProcessResult> {
   return new Promise(resolve => {
     try {
@@ -1285,7 +1299,7 @@ export function createNodeN8nWorkflowMigrationExecutor(host: Omit<
   return createN8nWorkflowMigrationExecutor({
     ...host,
     executeFixedProcess: executeFixedNodeProcess,
-    readConfiguredCredentialValues: defaultConfiguredCredentialValues
+    loadRuntimeConfiguration: host.loadRuntimeConfiguration || loadOwnerLocalN8nRuntimeConfiguration
   })
 }
 
@@ -1326,6 +1340,12 @@ export function toControlledWorkflowMigrationEvent(
       result: readbackResult,
       ...(result.protectedDomains ? { protectedDomains: result.protectedDomains } : {}),
       ...(result.observedCanonicalSha256 ? { observedCanonicalSha256: result.observedCanonicalSha256 } : {}),
+      executorClassification: result.classification,
+      executorReasonCode: result.reasonCode,
+      ...(typeof result.exitCode === 'number' ? { executorExitCode: result.exitCode } : { executorExitCode: null }),
+      readPurpose: 'precondition',
+      ...(result.operationId !== 'unknown' ? { executorOperationId: result.operationId } : {}),
+      ...(result.workflowId !== 'unknown' ? { executorWorkflowId: result.workflowId } : {}),
       at
     }
   }
@@ -1334,6 +1354,12 @@ export function toControlledWorkflowMigrationEvent(
     result: readbackResult,
     ...(result.protectedDomains ? { protectedDomains: result.protectedDomains } : {}),
     ...(result.observedCanonicalSha256 ? { observedCanonicalSha256: result.observedCanonicalSha256 } : {}),
+    executorClassification: result.classification,
+    executorReasonCode: result.reasonCode,
+    ...(typeof result.exitCode === 'number' ? { executorExitCode: result.exitCode } : { executorExitCode: null }),
+    readPurpose: result.readPurpose === 'reconciliation' ? 'reconciliation' : 'candidate_readback',
+    ...(result.operationId !== 'unknown' ? { executorOperationId: result.operationId } : {}),
+    ...(result.workflowId !== 'unknown' ? { executorWorkflowId: result.workflowId } : {}),
     at
   }
 }

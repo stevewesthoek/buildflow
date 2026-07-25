@@ -1,7 +1,9 @@
 import {
   runWorkbenchCommandRequestSchema,
+  sessionAwareRunWorkbenchCommandRequestSchema,
   type N8nWorkflowMigrationRequest
 } from '@workbench/shared'
+import type { WorkbenchAdmissionOperation } from './workbench-admission-orchestrator'
 import type {
   ExactCommandPolicy,
   SafeCommandKind,
@@ -45,6 +47,17 @@ export type ParsedRunCommandRequest =
       timeoutMs?: number
     }
   | { ok: true; kind: 'migration'; sourceId: string; request: MigrationRunCommandPlan }
+
+export type ParsedRunCommandSuccess = Exclude<ParsedRunCommandRequest, { ok: false }>
+
+export type ParsedSessionAwareRunCommandRequest =
+  | { ok: false; error: RunCommandValidationError }
+  | { ok: true; version: 2; sessionId: string; command: ParsedRunCommandSuccess }
+
+export type ParsedRunCommandRouteRequest =
+  | { ok: false; error: RunCommandValidationError }
+  | { ok: true; mode: 'legacy'; command: ParsedRunCommandSuccess }
+  | { ok: true; mode: 'session_aware'; version: 2; sessionId: string; command: ParsedRunCommandSuccess }
 
 const asRecord = (value: unknown): Record<string, unknown> => value as Record<string, unknown>
 
@@ -132,7 +145,9 @@ const normalizeDirectRequest = (record: Record<string, unknown>): DirectRunComma
         ...base,
         paths: optionalStrings(record, 'paths'),
         message: requiredString(record, 'message'),
-        body: optionalString(record, 'body')
+        body: optionalString(record, 'body'),
+        confirmedByUser: optionalBoolean(record, 'confirmedByUser'),
+        confirmationToken: optionalString(record, 'confirmationToken')
       }
     case 'git_push':
       return {
@@ -292,6 +307,91 @@ export function parseRunCommandRequest(input: unknown): ParsedRunCommandRequest 
     sourceId,
     request: normalizeDirectRequest(record)
   }
+}
+
+export function parseSessionAwareRunCommandRequest(input: unknown): ParsedSessionAwareRunCommandRequest {
+  const parsed = sessionAwareRunWorkbenchCommandRequestSchema.safeParse(input)
+  if (!parsed.success) {
+    return {
+      ok: false,
+      error: {
+        code: 'INVALID_WORKBENCH_COMMAND_REQUEST',
+        message: 'The session-aware runWorkbenchCommand request failed strict validation.',
+        issues: parsed.error.issues.slice(0, 10).map(issue => ({
+          path: issue.path.join('.') || 'request',
+          message: issue.message
+        }))
+      }
+    }
+  }
+
+  const command = parseRunCommandRequest(parsed.data.command)
+  if (command.ok === false) return command
+  return { ok: true, version: 2, sessionId: parsed.data.sessionId, command }
+}
+
+function isVersion2RunCommandRequest(input: unknown): boolean {
+  return typeof input === 'object'
+    && input !== null
+    && !Array.isArray(input)
+    && (input as Record<string, unknown>).version === 2
+}
+
+export function parseRunCommandRouteRequest(input: unknown): ParsedRunCommandRouteRequest {
+  if (isVersion2RunCommandRequest(input)) {
+    const sessionAware = parseSessionAwareRunCommandRequest(input)
+    if (sessionAware.ok === false) return sessionAware
+    return {
+      ok: true,
+      mode: 'session_aware',
+      version: sessionAware.version,
+      sessionId: sessionAware.sessionId,
+      command: sessionAware.command
+    }
+  }
+
+  const command = parseRunCommandRequest(input)
+  if (command.ok === false) return command
+  return { ok: true, mode: 'legacy', command }
+}
+
+const STATUS_COMMAND_KINDS = new Set<SafeCommandKind>([
+  'git_status_short',
+  'git_log_latest',
+  'git_branch_current',
+  'git_diff_stat',
+  'git_diff_name_only',
+  'git_diff_cached_stat',
+  'git_diff_cached_name_only'
+])
+
+const READ_COMMAND_KINDS = new Set<SafeCommandKind>([
+  'git_diff',
+  'validate_json_files',
+  'security_scan_paths',
+  'type_check_web',
+  'type_check_cli',
+  'verify_public_scope',
+  'verify_write_policy',
+  'verify_source_reindex_resilience',
+  'diagnose_performance',
+  'local_cli_github_auth_status',
+  'local_cli_github_repo_view'
+])
+
+export function classifyParsedRunCommandRequest(
+  parsed: ParsedRunCommandSuccess
+): WorkbenchAdmissionOperation {
+  if (parsed.kind === 'validation_status') return 'status'
+  if (parsed.kind === 'migration') return 'migration_execute'
+  if (parsed.kind === 'validation_submit') return 'write'
+
+  const commandKind = parsed.request.commandKind
+  if (STATUS_COMMAND_KINDS.has(commandKind)) return 'status'
+  if (READ_COMMAND_KINDS.has(commandKind)) return 'read'
+  if (commandKind.startsWith('git_')) return 'git'
+  if (commandKind === 'n8n_workflow_export') return 'migration_execute'
+  return 'write'
 }
 
 export function toSafeCommandRequest(request: DirectRunCommandPlan, sourceRoot: string): SafeCommandRequest {

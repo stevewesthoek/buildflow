@@ -21,6 +21,12 @@ const mutationContract = {
   mutationCapable: true
 } as WorkbenchToolContract
 
+const sessionCommand = (command: Record<string, unknown>) => ({
+  version: 2,
+  sessionId: 'session-agent-example',
+  command
+})
+
 function credentialFile(bearerValue = 'offline-test-token-1234567890'): { directory: string; file: string } {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-mcp-client-'))
   const file = path.join(directory, 'credential.token')
@@ -61,6 +67,64 @@ test('forwards one authenticated bounded request and removes private output fiel
     assert(serialized.includes('[REDACTED]'))
   })
   fs.rmSync(authFile.directory, { recursive: true })
+})
+
+test('preserves bounded migration operation projection while removing private operation fields', () => {
+  const sanitized = sanitizeWorkbenchValue({
+    status: 'needs_confirmation',
+    confirmationToken: 'confirmation-example',
+    operation: {
+      operationId: 'cap-op-example',
+      status: 'prepared',
+      revision: 0,
+      binding: {
+        sourceId: 'brain',
+        workflowId: 'workflow-example',
+        mode: 'apply',
+        candidatePath: 'artifacts/candidate.json',
+        candidateSha256: 'a'.repeat(64),
+        rollbackPath: 'artifacts/rollback.json',
+        rollbackSha256: 'b'.repeat(64),
+        manifestPath: 'artifacts/manifest.json',
+        manifestSha256: 'c'.repeat(64),
+        wrapperSha256: 'd'.repeat(64)
+      },
+      confirmationExpiresAt: '2026-07-19T19:30:00.000Z',
+      rollbackReady: true,
+      confirmationHash: 'private-confirmation-hash',
+      authorization: 'private-authorization',
+      authorizationDigest: 'private-authorization-digest',
+      dispatchAuthorization: 'private-dispatch-authorization',
+      leaseProof: 'private-lease-proof',
+      operationRecord: { raw: true },
+      environment: { PRIVATE_VALUE: 'private' },
+      env: { PRIVATE_VALUE: 'private' },
+      headers: { authorization: 'private' },
+      credentials: { token: 'private' },
+      rawWorkflow: { nodes: [] },
+      _internal: 'private'
+    }
+  }) as Record<string, unknown>
+
+  const operation = sanitized.operation as Record<string, unknown>
+  const binding = operation.binding as Record<string, unknown>
+  assert.equal(sanitized.confirmationToken, 'confirmation-example')
+  assert.equal(operation.operationId, 'cap-op-example')
+  assert.equal(operation.status, 'prepared')
+  assert.equal(operation.revision, 0)
+  assert.equal(binding.sourceId, 'brain')
+  assert.equal(binding.workflowId, 'workflow-example')
+  assert.equal(binding.candidateSha256, 'a'.repeat(64))
+  assert.equal(binding.rollbackSha256, 'b'.repeat(64))
+  assert.equal(binding.manifestSha256, 'c'.repeat(64))
+  assert.equal(binding.wrapperSha256, 'd'.repeat(64))
+  assert.equal(operation.confirmationExpiresAt, '2026-07-19T19:30:00.000Z')
+  assert.equal(operation.rollbackReady, true)
+  for (const privateKey of [
+    'confirmationHash', 'authorization', 'authorizationDigest', 'dispatchAuthorization',
+    'leaseProof', 'operationRecord', 'environment', 'env', 'headers', 'credentials',
+    'rawWorkflow', '_internal'
+  ]) assert.equal(Object.hasOwn(operation, privateKey), false, privateKey)
 })
 
 test('fails closed for missing, permissive, invalid, and revoked credentials', async () => {
@@ -167,7 +231,7 @@ test('never retries and reports possible mutation dispatch as ambiguous', async 
     request.resume()
     request.on('end', () => request.socket.destroy())
   }, async baseUrl => {
-    const result = await createWorkbenchClient({ baseUrl, credentialFile: authFile.file })(mutationContract, { sourceId: 'source', commandKind: 'git_status_short' })
+    const result = await createWorkbenchClient({ baseUrl, credentialFile: authFile.file })(mutationContract, sessionCommand({ sourceId: 'source', commandKind: 'git_status_short' }))
     assert.equal(calls, 1)
     assert.equal(result.ok, false)
     if (!result.ok) {
@@ -236,7 +300,7 @@ test('classifies mutation cancellation by the dispatch handoff boundary without 
     request.resume()
     request.once('end', () => afterBodySent.abort())
   }, async baseUrl => {
-    const result = await createWorkbenchClient({ baseUrl, credentialFile: authFile.file })(mutationContract, { sourceId: 'source', commandKind: 'git_status_short' }, afterBodySent.signal)
+    const result = await createWorkbenchClient({ baseUrl, credentialFile: authFile.file })(mutationContract, sessionCommand({ sourceId: 'source', commandKind: 'git_status_short' }), afterBodySent.signal)
     assert.equal(result.ok, false)
     if (!result.ok) {
       assert.equal(result.code, 'ambiguous_transport')
@@ -250,7 +314,7 @@ test('classifies mutation cancellation by the dispatch handoff boundary without 
     timeoutCalls++
     request.resume()
   }, async baseUrl => {
-    const result = await createWorkbenchClient({ baseUrl, credentialFile: authFile.file, totalTimeoutMs: 25 })(mutationContract, { sourceId: 'source', commandKind: 'git_status_short' })
+    const result = await createWorkbenchClient({ baseUrl, credentialFile: authFile.file, totalTimeoutMs: 25 })(mutationContract, sessionCommand({ sourceId: 'source', commandKind: 'git_status_short' }))
     assert.equal(result.ok, false)
     if (!result.ok) {
       assert.equal(result.code, 'ambiguous_transport')

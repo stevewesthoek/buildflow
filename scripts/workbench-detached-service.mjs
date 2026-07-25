@@ -2,15 +2,17 @@
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), '..')
-const DEFAULT_RUN_DIR = path.join(REPO_ROOT, 'runtime', 'local', 'workbench-stack')
+const DEFAULT_RUN_DIR = path.join(os.userInfo().homedir, '.config', 'workbench', 'runtime-state')
 const DEFAULT_MAX_LOG_BYTES = 2 * 1024 * 1024
 const DEFAULT_STOP_TIMEOUT_MS = 5_000
+const OWNER_CONFIG_MODULE = path.join(REPO_ROOT, 'packages', 'shared', 'dist', 'workbench-owner-config.js')
 
 const COMMON_ENV_KEYS = [
   'HOME',
@@ -23,7 +25,10 @@ const COMMON_ENV_KEYS = [
   'PNPM_HOME',
   'TMPDIR',
   'USER',
-  'npm_package_version'
+  'npm_package_version',
+  'WORKBENCH_PACKAGE_VERSION',
+  'WORKBENCH_BUILD_SHA',
+  'WORKBENCH_BUILD_TIMESTAMP'
 ]
 
 const AGENT_ENV_KEYS = [
@@ -40,13 +45,11 @@ const AGENT_ENV_KEYS = [
 
 const WEB_ENV_KEYS = [
   ...COMMON_ENV_KEYS,
-  'BUILDFLOW_ACTION_TOKEN',
   'LOCAL_AGENT_URL',
   'LOCAL_DASHBOARD_BASE_URL',
   'LOCAL_RELAY_URL',
   'NEXT_PUBLIC_WORKBENCH_SOURCE_URL',
   'PUBLIC_BASE_URL',
-  'WORKBENCH_ACTION_TOKEN',
   'WORKBENCH_WEB_BUILD_ID'
 ]
 
@@ -60,6 +63,22 @@ function inheritedEnv(keys, overrides = {}) {
     if (process.env[key] !== undefined) env[key] = process.env[key]
   }
   return { ...env, ...overrides }
+}
+
+export function injectOwnerActionToken(environment, actionToken) {
+  const env = { ...environment }
+  delete env.WORKBENCH_ACTION_TOKEN
+  delete env.BUILDFLOW_ACTION_TOKEN
+  return { ...env, WORKBENCH_ACTION_TOKEN: actionToken }
+}
+
+async function loadOwnerActionConfig() {
+  try {
+    const module = await import(pathToFileURL(OWNER_CONFIG_MODULE).href)
+    return module.loadWorkbenchOwnerConfig()
+  } catch {
+    throw new Error('Workbench owner-local action authentication is unavailable or invalid.')
+  }
 }
 
 function statePaths(runDir, service) {
@@ -98,6 +117,12 @@ function capture(executable, args) {
     stdio: ['ignore', 'pipe', 'ignore']
   })
   return result.status === 0 ? result.stdout.trim() : ''
+}
+
+function repositoryOwnershipScope() {
+  const commonDirectory = capture('git', ['-C', REPO_ROOT, 'rev-parse', '--git-common-dir'])
+  if (!commonDirectory) throw new Error('Could not establish Workbench repository ownership scope')
+  return fs.realpathSync(path.resolve(REPO_ROOT, commonDirectory))
 }
 
 export function readProcessMetadata(pid) {
@@ -228,13 +253,17 @@ export function inspectDetachedService(spec) {
   }
 
   if (
-    state?.version !== 1 ||
+    state?.version !== 2 ||
     state?.service !== spec.service ||
     !Number.isInteger(state?.pid) ||
     state.pid <= 0 ||
     state.pgid !== state.pid ||
     typeof state.startIdentity !== 'string' ||
-    !state.startIdentity
+    !state.startIdentity ||
+    typeof state.cwd !== 'string' ||
+    !path.isAbsolute(state.cwd) ||
+    typeof state.ownershipScope !== 'string' ||
+    state.ownershipScope !== spec.ownershipScope
   ) {
     return { service: spec.service, status: 'invalid_state', live: false, pid: state?.pid }
   }
@@ -249,7 +278,7 @@ export function inspectDetachedService(spec) {
   if (metadata.pgid !== state.pgid || metadata.pgid !== metadata.pid) {
     return { service: spec.service, status: 'process_group_mismatch', live: false, pid: state.pid, state }
   }
-  if (metadata.cwd !== spec.cwd) {
+  if (metadata.cwd !== state.cwd) {
     return { service: spec.service, status: 'cwd_mismatch', live: false, pid: state.pid, state }
   }
   if (!spec.commandMarkers.some(marker => metadata.command.includes(marker))) {
@@ -329,6 +358,7 @@ export async function startDetachedService(spec, { launchId }) {
     throw new Error('Detached argv must be a fixed string array')
   }
   if (!spec.commandMarkers?.length) throw new Error('At least one command ownership marker is required')
+  if (!path.isAbsolute(spec.ownershipScope)) throw new Error('An absolute repository ownership scope is required')
 
   fs.mkdirSync(spec.runDir, { recursive: true, mode: 0o700 })
   const releaseLaunchLock = await acquireLaunchLock(spec)
@@ -379,11 +409,13 @@ export async function startDetachedService(spec, { launchId }) {
     }
 
     const state = {
-      version: 1,
+      version: 2,
       service: spec.service,
       pid: child.pid,
       pgid: child.pid,
       startIdentity: metadata.startIdentity,
+      cwd: metadata.cwd,
+      ownershipScope: spec.ownershipScope,
       launchId,
       startedAt: new Date().toISOString()
     }
@@ -454,6 +486,7 @@ export async function requireSustainedHealth({ durationMs, intervalMs, probe }) 
 }
 
 function serviceSpec(service, port, runDir = DEFAULT_RUN_DIR) {
+  const ownershipScope = repositoryOwnershipScope()
   if (service === 'agent') {
     return {
       service,
@@ -462,6 +495,7 @@ function serviceSpec(service, port, runDir = DEFAULT_RUN_DIR) {
       executable: process.execPath,
       args: ['dist/index.js', 'serve'],
       commandMarkers: ['dist/index.js serve'],
+      ownershipScope,
       env: inheritedEnv(AGENT_ENV_KEYS, {
         PORT: String(port),
         HOST: '127.0.0.1',
@@ -481,6 +515,7 @@ function serviceSpec(service, port, runDir = DEFAULT_RUN_DIR) {
       executable: process.execPath,
       args: [nextEntrypoint, 'start', '-H', '127.0.0.1', '-p', String(port)],
       commandMarkers: ['next/dist/bin/next', 'next-server'],
+      ownershipScope,
       env: inheritedEnv(WEB_ENV_KEYS, {
         PORT: String(port),
         HOSTNAME: '127.0.0.1'
@@ -519,10 +554,35 @@ async function main() {
   const options = parseOptions(optionArgs)
   const runDir = options['run-dir'] || DEFAULT_RUN_DIR
 
+  if (command === 'validate-auth') {
+    const configured = await loadOwnerActionConfig()
+    console.log(JSON.stringify({ configured: true, source: 'owner_local', mode: configured.mode }))
+    return
+  }
+
+  if (command === 'verify-auth') {
+    const configured = await loadOwnerActionConfig()
+    const webPort = Number.parseInt(options['web-port'] || '3054', 10)
+    const response = await fetch(`http://127.0.0.1:${webPort}/api/actions/status?include=sources`, {
+      headers: { Authorization: `Bearer ${configured.actionToken}` },
+      signal: AbortSignal.timeout(5_000)
+    })
+    if (!response.ok) throw new Error(`Workbench authenticated status verification failed with status ${response.status}.`)
+    const payload = await response.json()
+    const connected = !!payload && typeof payload === 'object' && payload.connected === true
+    if (!connected) throw new Error('Workbench authenticated status verification did not report connected=true.')
+    console.log(JSON.stringify({ authenticated: true, statusCode: response.status, connected }))
+    return
+  }
+
   if (command === 'start' || command === 'stop' || command === 'status') {
     const defaultPort = service === 'agent' ? 3052 : 3054
     const port = Number.parseInt(options.port || String(defaultPort), 10)
     const spec = serviceSpec(service, port, runDir)
+    if (command === 'start' && service === 'web') {
+      const configured = await loadOwnerActionConfig()
+      spec.env = injectOwnerActionToken(spec.env, configured.actionToken)
+    }
     let result
     if (command === 'start') result = await startDetachedService(spec, { launchId: options['launch-id'] })
     else if (command === 'stop') result = await stopDetachedService(spec, { launchId: options['launch-id'] })
@@ -565,7 +625,7 @@ async function main() {
     return
   }
 
-  throw new Error('Usage: workbench-detached-service.mjs {start|stop|status} {agent|web} [options] | status-all [options] | sustain [options]')
+  throw new Error('Usage: workbench-detached-service.mjs {start|stop|status} {agent|web} [options] | status-all [options] | sustain [options] | validate-auth | verify-auth [options]')
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
