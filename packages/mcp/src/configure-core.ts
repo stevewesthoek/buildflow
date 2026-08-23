@@ -4,6 +4,34 @@ import path from 'node:path'
 export const WORKBENCH_MCP_PROFILES = ['workbench', 'brain'] as const
 export type WorkbenchMcpProfile = typeof WORKBENCH_MCP_PROFILES[number]
 
+// Node.js contract: exactly major 20, minimum 20.20.2
+export const REQUIRED_NODE_MAJOR = 20
+export const REQUIRED_NODE_MINOR = 20
+export const REQUIRED_NODE_PATCH = 2
+
+export function validateNodeContract(version = process.version): { valid: boolean; reason?: string } {
+  const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)$/)
+  if (!match) return { valid: false, reason: `Could not parse Node.js version: ${version}` }
+
+  const [, major, minor, patch] = match.map(v => parseInt(v, 10))
+
+  if (major !== REQUIRED_NODE_MAJOR) {
+    return {
+      valid: false,
+      reason: `Node.js major version ${major} is not supported; required ${REQUIRED_NODE_MAJOR}.${REQUIRED_NODE_MINOR}.${REQUIRED_NODE_PATCH}+`
+    }
+  }
+
+  if (minor < REQUIRED_NODE_MINOR || (minor === REQUIRED_NODE_MINOR && patch < REQUIRED_NODE_PATCH)) {
+    return {
+      valid: false,
+      reason: `Node.js ${process.version} is below required ${REQUIRED_NODE_MAJOR}.${REQUIRED_NODE_MINOR}.${REQUIRED_NODE_PATCH}`
+    }
+  }
+
+  return { valid: true }
+}
+
 export const BRAIN_PROFILE_ALLOWED_TOOLS = 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand'
 export const BRAIN_PROFILE_ALLOWED_COMMAND_KINDS = 'n8n_workflow_migration'
 

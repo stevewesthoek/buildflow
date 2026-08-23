@@ -5,7 +5,7 @@ import { getConfigDir } from '../utils/paths'
 import { runSafeCommand, type SafeCommandRequest, type SafeCommandResult } from './command-runner'
 import { recordValidationJobTelemetry, type TerminalValidationJobStatus } from './validation-job-telemetry'
 import { recordGitLockTelemetry } from './git-lock-telemetry'
-
+import { appendAgentEvent, hasValidationActivityEvent } from './agent-events'
 export const WORKBENCH_VALIDATION_JOB_STORE_VERSION = 1 as const
 
 export type PersistedValidationCommandKind =
@@ -135,12 +135,19 @@ export type SubmitWorkbenchValidationJobResult =
   | { ok: true; created: boolean; job: CompactWorkbenchValidationJob }
   | {
       ok: false
-      code: 'VALIDATION_JOB_STORE_BUSY' | 'VALIDATION_JOB_IDEMPOTENCY_CONFLICT' | 'VALIDATION_JOB_INVALID'
+      code: 'VALIDATION_JOB_STORE_BUSY' | 'VALIDATION_JOB_STORE_CORRUPT' | 'VALIDATION_JOB_IDEMPOTENCY_CONFLICT' | 'VALIDATION_JOB_INVALID'
       message: string
       field?: string
       reason?: string
       allowedValues?: string[]
     }
+
+class ValidationJobStoreCorruptError extends Error {
+  constructor(message = 'Validation job store is corrupt or unsupported.') {
+    super(message)
+    this.name = 'ValidationJobStoreCorruptError'
+  }
+}
 
 const STORE_PATH = path.join(getConfigDir(), 'workbench-validation-jobs.json')
 const LOCK_PATH = `${STORE_PATH}.lock`
@@ -181,17 +188,92 @@ function isRecord(value: unknown): value is WorkbenchValidationJobRecord {
 }
 
 function readStore(): WorkbenchValidationJobStore {
+  if (!fs.existsSync(STORE_PATH)) return emptyStore()
+  let parsed: Partial<WorkbenchValidationJobStore>
   try {
-    if (!fs.existsSync(STORE_PATH)) return emptyStore()
-    const parsed = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8')) as Partial<WorkbenchValidationJobStore>
-    return {
-      version: WORKBENCH_VALIDATION_JOB_STORE_VERSION,
-      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs.filter(isRecord) : []
-    }
+    parsed = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8')) as Partial<WorkbenchValidationJobStore>
   } catch {
-    return emptyStore()
+    throw new ValidationJobStoreCorruptError('Validation job store JSON is corrupt.')
   }
+  if (parsed.version !== WORKBENCH_VALIDATION_JOB_STORE_VERSION
+    || typeof parsed.updatedAt !== 'string'
+    || !Array.isArray(parsed.jobs)
+    || parsed.jobs.some(job => !isRecord(job))) {
+    throw new ValidationJobStoreCorruptError('Validation job store schema is corrupt or unsupported.')
+  }
+  return {
+    version: WORKBENCH_VALIDATION_JOB_STORE_VERSION,
+    updatedAt: parsed.updatedAt,
+    jobs: parsed.jobs as WorkbenchValidationJobRecord[]
+  }
+}
+
+function projectValidationStarted(record: WorkbenchValidationJobRecord): void {
+  if (!record.runId || !record.startedAt) return
+  if (hasValidationActivityEvent({ jobId: record.runId, sourceId: record.sourceId, validationJobId: record.jobId, kind: 'validation_started' })) return
+  appendAgentEvent({
+    jobId: record.runId,
+    sourceId: record.sourceId,
+    type: 'validation_started',
+    activityKind: 'validation_started',
+    message: `Validation ${record.command.commandKind} started`,
+    createdAt: record.startedAt,
+    validationJobId: record.jobId,
+    packetId: record.packetId,
+    taskId: record.taskId,
+    status: 'running',
+    evidenceRefs: [{ kind: 'validation', ref: record.jobId }]
+  })
+}
+
+function projectValidationTerminal(record: WorkbenchValidationJobRecord): void {
+  if (!record.runId || !['completed', 'failed', 'timed_out', 'cancelled'].includes(record.status)) return
+  const kind = record.status === 'completed' ? 'validation_completed' : 'validation_failed'
+  if (hasValidationActivityEvent({ jobId: record.runId, sourceId: record.sourceId, validationJobId: record.jobId, kind })) return
+  const createdAt = record.completedAt || record.failedAt || record.cancelledAt || record.updatedAt
+  appendAgentEvent({
+    jobId: record.runId,
+    sourceId: record.sourceId,
+    type: kind,
+    activityKind: kind,
+    message: `Validation ${record.command.commandKind} ${record.status}`,
+    createdAt,
+    validationJobId: record.jobId,
+    packetId: record.packetId,
+    taskId: record.taskId,
+    status: record.status,
+    evidenceRefs: [{ kind: 'validation', ref: record.jobId }],
+    ...(typeof record.result?.durationMs === 'number' ? { telemetry: { durationMs: record.result.durationMs } } : {})
+  })
+}
+
+function recoverExpiredRunningJobsInStore(store: WorkbenchValidationJobStore, now = new Date().toISOString()): WorkbenchValidationJobRecord[] {
+  const nowMs = Date.parse(now)
+  const recovered: WorkbenchValidationJobRecord[] = []
+  for (const record of store.jobs) {
+    if (record.status !== 'running' || !record.leaseExpiresAt) continue
+    if (Date.parse(record.leaseExpiresAt) > nowMs) continue
+    record.status = 'failed'
+    record.updatedAt = now
+    record.failedAt = now
+    record.result = {
+      exitCode: null,
+      signal: null,
+      durationMs: Math.max(0, nowMs - Date.parse(record.startedAt || record.leaseAcquiredAt || record.createdAt)),
+      stdout: '',
+      stderr: 'Validation worker lease expired before terminal evidence was persisted.',
+      outputTruncated: false,
+      changedPaths: [],
+      reason: 'Validation worker lease expired before terminal evidence was persisted.',
+      terminatedByInfrastructure: true,
+      terminationReason: 'worker_failure'
+    }
+    record.leaseToken = undefined
+    record.leaseAcquiredAt = undefined
+    record.leaseExpiresAt = undefined
+    recovered.push({ ...record, command: { ...record.command }, result: record.result ? { ...record.result } : undefined })
+  }
+  return recovered
 }
 
 function persistStore(store: WorkbenchValidationJobStore): void {
@@ -394,50 +476,73 @@ export function submitWorkbenchValidationJob(request: WorkbenchValidationJobRequ
   }
   const normalized = normalizedResult.request
 
-  const result = withExclusiveStoreLock<SubmitWorkbenchValidationJobResult>(() => {
-    const store = readStore()
-    const existing = store.jobs.find(job => job.sourceId === normalized.sourceId && job.idempotencyKey === normalized.idempotencyKey)
-    if (existing) {
-      if (!sameCommand(existing.command, normalized)) {
-        return {
-          ok: false,
-          code: 'VALIDATION_JOB_IDEMPOTENCY_CONFLICT',
-          message: 'The idempotency key is already associated with a different validation command.'
+  try {
+    const result = withExclusiveStoreLock<SubmitWorkbenchValidationJobResult>(() => {
+      const store = readStore()
+      const recovered = recoverExpiredRunningJobsInStore(store)
+      const existing = store.jobs.find(job => job.sourceId === normalized.sourceId && job.idempotencyKey === normalized.idempotencyKey)
+      if (existing) {
+        if (recovered.length > 0) {
+          persistStore(store)
+          recovered.forEach(projectValidationTerminal)
         }
+        if (!sameCommand(existing.command, normalized)) {
+          return {
+            ok: false,
+            code: 'VALIDATION_JOB_IDEMPOTENCY_CONFLICT',
+            message: 'The idempotency key is already associated with a different validation command.'
+          }
+        }
+        return { ok: true, created: false, job: compactWorkbenchValidationJob(existing) }
       }
-      return { ok: true, created: false, job: compactWorkbenchValidationJob(existing) }
-    }
 
-    const now = new Date().toISOString()
-    const record: WorkbenchValidationJobRecord = {
-      storeVersion: WORKBENCH_VALIDATION_JOB_STORE_VERSION,
-      jobId: `validation-${crypto.randomUUID()}`,
-      idempotencyKey: normalized.idempotencyKey,
-      sourceId: normalized.sourceId,
-      runId: normalized.runId,
-      packetId: normalized.packetId,
-      taskId: normalized.taskId,
-      status: 'queued',
-      command: normalized,
-      createdAt: now,
-      updatedAt: now
-    }
-    store.jobs.push(record)
-    persistStore(store)
-    return { ok: true, created: true, job: compactWorkbenchValidationJob(record) }
-  })
+      const now = new Date().toISOString()
+      const record: WorkbenchValidationJobRecord = {
+        storeVersion: WORKBENCH_VALIDATION_JOB_STORE_VERSION,
+        jobId: `validation-${crypto.randomUUID()}`,
+        idempotencyKey: normalized.idempotencyKey,
+        sourceId: normalized.sourceId,
+        runId: normalized.runId,
+        packetId: normalized.packetId,
+        taskId: normalized.taskId,
+        status: 'queued',
+        command: normalized,
+        createdAt: now,
+        updatedAt: now
+      }
+      store.jobs.push(record)
+      persistStore(store)
+      recovered.forEach(projectValidationTerminal)
+      return { ok: true, created: true, job: compactWorkbenchValidationJob(record) }
+    })
 
-  return result || {
-    ok: false,
-    code: 'VALIDATION_JOB_STORE_BUSY',
-    message: 'Validation job storage is busy. Retry the same idempotent submission.'
+    return result || {
+      ok: false,
+      code: 'VALIDATION_JOB_STORE_BUSY',
+      message: 'Validation job storage is busy. Retry the same idempotent submission.'
+    }
+  } catch (error) {
+    if (error instanceof ValidationJobStoreCorruptError) {
+      return { ok: false, code: 'VALIDATION_JOB_STORE_CORRUPT', message: error.message }
+    }
+    throw error
   }
 }
 
 export function getWorkbenchValidationJob(jobId: string, sourceId?: string): WorkbenchValidationJobRecord | undefined {
   const normalizedJobId = String(jobId || '').trim()
   const normalizedSourceId = sourceId ? String(sourceId).trim() : undefined
-  return readStore().jobs.find(job => job.jobId === normalizedJobId && (!normalizedSourceId || job.sourceId === normalizedSourceId))
+  const recoveredStore = withExclusiveStoreLock(() => {
+    const store = readStore()
+    const recovered = recoverExpiredRunningJobsInStore(store)
+    if (recovered.length > 0) {
+      persistStore(store)
+      recovered.forEach(projectValidationTerminal)
+    }
+    return store
+  })
+  const store = recoveredStore ?? readStore()
+  return store.jobs.find(job => job.jobId === normalizedJobId && (!normalizedSourceId || job.sourceId === normalizedSourceId))
 }
 
 export function getCompactWorkbenchValidationJob(jobId: string, sourceId?: string): CompactWorkbenchValidationJob | undefined {
@@ -453,11 +558,45 @@ export function listCompactWorkbenchValidationJobs(params: {
   const sourceId = String(params.sourceId || '').trim()
   const runId = params.runId ? String(params.runId).trim() : undefined
   const limit = Math.max(1, Math.min(Math.floor(params.limit || 20), 100))
-  return readStore().jobs
+  const recoveredStore = withExclusiveStoreLock(() => {
+    const store = readStore()
+    const recovered = recoverExpiredRunningJobsInStore(store)
+    if (recovered.length > 0) {
+      persistStore(store)
+      recovered.forEach(projectValidationTerminal)
+    }
+    return store
+  })
+  const store = recoveredStore ?? readStore()
+  return store.jobs
     .filter(job => job.sourceId === sourceId && (!runId || job.runId === runId))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, limit)
     .map(compactWorkbenchValidationJob)
+}
+
+export type RecoverExpiredWorkbenchValidationJobsResult =
+  | { ok: true; recovered: number }
+  | { ok: false; code: 'VALIDATION_JOB_STORE_BUSY' | 'VALIDATION_JOB_STORE_CORRUPT'; message: string }
+
+export function recoverExpiredWorkbenchValidationJobs(now = new Date().toISOString()): RecoverExpiredWorkbenchValidationJobsResult {
+  try {
+    const result = withExclusiveStoreLock(() => {
+      const store = readStore()
+      const recovered = recoverExpiredRunningJobsInStore(store, now)
+      if (recovered.length > 0) {
+        persistStore(store)
+        recovered.forEach(projectValidationTerminal)
+      }
+      return { ok: true as const, recovered: recovered.length }
+    })
+    return result ?? { ok: false, code: 'VALIDATION_JOB_STORE_BUSY', message: 'Validation job storage is busy.' }
+  } catch (error) {
+    if (error instanceof ValidationJobStoreCorruptError) {
+      return { ok: false, code: 'VALIDATION_JOB_STORE_CORRUPT', message: error.message }
+    }
+    throw error
+  }
 }
 
 export function recordWorkbenchValidationJobResult(params: {
@@ -470,7 +609,19 @@ export function recordWorkbenchValidationJobResult(params: {
     const store = readStore()
     const record = store.jobs.find(job => job.jobId === params.jobId && job.sourceId === params.sourceId)
     if (!record) return undefined
+    const recovered = recoverExpiredRunningJobsInStore(store)
     const alreadyTerminal = ['completed', 'failed', 'timed_out', 'cancelled'].includes(record.status)
+    if (alreadyTerminal) {
+      if (recovered.length > 0) {
+        persistStore(store)
+        recovered.forEach(projectValidationTerminal)
+      }
+      return {
+        compact: compactWorkbenchValidationJob(record),
+        record: { ...record, command: { ...record.command }, result: record.result ? { ...record.result } : undefined },
+        shouldRecordTelemetry: false
+      }
+    }
     const now = new Date().toISOString()
     record.status = params.status
     record.updatedAt = now
@@ -483,15 +634,19 @@ export function recordWorkbenchValidationJobResult(params: {
       stderr: boundedText(params.result.stderr),
       changedPaths: Array.from(new Set(params.result.changedPaths)).sort().slice(0, 200)
     }
+    record.leaseToken = undefined
+    record.leaseAcquiredAt = undefined
+    record.leaseExpiresAt = undefined
     persistStore(store)
     return {
       compact: compactWorkbenchValidationJob(record),
       record: { ...record, command: { ...record.command }, result: record.result ? { ...record.result } : undefined },
-      shouldRecordTelemetry: !alreadyTerminal
+      shouldRecordTelemetry: true
     }
   })
   if (!transition) return undefined
   if (transition.shouldRecordTelemetry) {
+    projectValidationTerminal(transition.record)
     recordValidationJobTelemetry(transition.record, params.status, params.result.durationMs)
   }
   return transition.compact
@@ -525,7 +680,89 @@ export type ScheduleWorkbenchValidationJobResult = {
   reason?: string
 }
 
+export type CancelWorkbenchValidationJobResult =
+  | { ok: true; job: CompactWorkbenchValidationJob; cancellationRequested: boolean }
+  | { ok: false; code: 'VALIDATION_JOB_NOT_FOUND' | 'VALIDATION_JOB_STORE_BUSY' | 'VALIDATION_JOB_STORE_CORRUPT'; message: string }
+
 const scheduledValidationJobIds = new Set<string>()
+const scheduledValidationJobControllers = new Map<string, AbortController>()
+
+export function cancelWorkbenchValidationJob(params: {
+  jobId: string
+  sourceId: string
+  reason?: string
+}): CancelWorkbenchValidationJobResult {
+  const jobId = String(params.jobId || '').trim()
+  const sourceId = String(params.sourceId || '').trim()
+  if (!jobId || !sourceId) {
+    return { ok: false, code: 'VALIDATION_JOB_NOT_FOUND', message: 'Job ID and source ID are required.' }
+  }
+
+  let transition:
+    | { kind: 'not_found' }
+    | { kind: 'terminal'; job: CompactWorkbenchValidationJob }
+    | { kind: 'requested'; job: CompactWorkbenchValidationJob; running: boolean }
+    | undefined
+  try {
+    transition = withExclusiveStoreLock(() => {
+      const store = readStore()
+      const recovered = recoverExpiredRunningJobsInStore(store)
+      const record = store.jobs.find(job => job.jobId === jobId && job.sourceId === sourceId)
+      if (!record) {
+        if (recovered.length > 0) {
+          persistStore(store)
+          recovered.forEach(projectValidationTerminal)
+        }
+        return { kind: 'not_found' as const }
+      }
+      if (['completed', 'failed', 'timed_out', 'cancelled'].includes(record.status)) {
+        if (recovered.length > 0) {
+          persistStore(store)
+          recovered.forEach(projectValidationTerminal)
+        }
+        return { kind: 'terminal' as const, job: compactWorkbenchValidationJob(record) }
+      }
+
+      const now = new Date().toISOString()
+      record.cancelRequestedAt = record.cancelRequestedAt || now
+      record.cancelReason = String(params.reason || 'validation plan cancellation requested').slice(0, 500)
+      record.updatedAt = now
+
+      if (record.status === 'queued') {
+        record.status = 'cancelled'
+        record.cancelledAt = now
+        record.result = {
+          exitCode: null,
+          signal: null,
+          durationMs: 0,
+          stdout: '',
+          stderr: '',
+          outputTruncated: false,
+          changedPaths: [],
+          terminatedByInfrastructure: false,
+          terminationReason: 'cancelled'
+        }
+      }
+
+      persistStore(store)
+      if (record.status === 'cancelled') {
+        projectValidationTerminal({ ...record, command: { ...record.command }, result: record.result ? { ...record.result } : undefined })
+      }
+      return { kind: 'requested' as const, job: compactWorkbenchValidationJob(record), running: record.status === 'running' }
+    })
+  } catch (error) {
+    if (error instanceof ValidationJobStoreCorruptError) {
+      return { ok: false, code: 'VALIDATION_JOB_STORE_CORRUPT', message: error.message }
+    }
+    throw error
+  }
+
+  if (!transition) return { ok: false, code: 'VALIDATION_JOB_STORE_BUSY', message: 'Validation job store is busy.' }
+  if (transition.kind === 'not_found') return { ok: false, code: 'VALIDATION_JOB_NOT_FOUND', message: 'Validation job was not found for the selected source.' }
+  if (transition.kind === 'terminal') return { ok: true, job: transition.job, cancellationRequested: false }
+  if (transition.running) scheduledValidationJobControllers.get(jobId)?.abort('validation plan cancellation requested')
+  return { ok: true, job: transition.job, cancellationRequested: true }
+}
 
 function claimWorkbenchValidationJob(params: {
   jobId: string
@@ -533,10 +770,14 @@ function claimWorkbenchValidationJob(params: {
   workerId: string
   leaseMs: number
 }): WorkbenchValidationJobRecord | undefined {
-  return withExclusiveStoreLock(() => {
+  const transition = withExclusiveStoreLock(() => {
     const store = readStore()
+    const recovered = recoverExpiredRunningJobsInStore(store)
     const record = store.jobs.find(job => job.jobId === params.jobId && job.sourceId === params.sourceId)
-    if (!record || record.status !== 'queued') return undefined
+    if (!record || record.status !== 'queued') {
+      if (recovered.length > 0) persistStore(store)
+      return { claimed: undefined, recovered }
+    }
 
     const now = new Date()
     record.status = 'running'
@@ -547,13 +788,17 @@ function claimWorkbenchValidationJob(params: {
     record.leaseAcquiredAt = record.startedAt
     record.leaseExpiresAt = new Date(now.getTime() + params.leaseMs).toISOString()
     persistStore(store)
-    return { ...record, command: { ...record.command } }
+    return { claimed: { ...record, command: { ...record.command } }, recovered }
   })
+  transition?.recovered.forEach(projectValidationTerminal)
+  if (transition?.claimed) projectValidationStarted(transition.claimed)
+  return transition?.claimed
 }
 
-function terminalStatus(result: SafeCommandResult): Extract<WorkbenchValidationJobStatus, 'completed' | 'failed' | 'timed_out'> {
+function terminalStatus(result: SafeCommandResult): Extract<WorkbenchValidationJobStatus, 'completed' | 'failed' | 'timed_out' | 'cancelled'> {
   if (result.status === 'completed' && result.exitCode === 0) return 'completed'
   if (result.status === 'timed_out') return 'timed_out'
+  if (result.reason === 'cancelled') return 'cancelled'
   return 'failed'
 }
 
@@ -570,7 +815,15 @@ export function scheduleWorkbenchValidationJob(params: {
     return { status: 'rejected', jobId, sourceId, reason: 'Job ID, source ID, and source root are required.' }
   }
 
-  const existing = getWorkbenchValidationJob(jobId, sourceId)
+  let existing: WorkbenchValidationJobRecord | undefined
+  try {
+    existing = getWorkbenchValidationJob(jobId, sourceId)
+  } catch (error) {
+    if (error instanceof ValidationJobStoreCorruptError) {
+      return { status: 'rejected', jobId, sourceId, reason: error.message }
+    }
+    throw error
+  }
   if (!existing) return { status: 'rejected', jobId, sourceId, reason: 'Validation job was not found for the selected source.' }
   if (existing.status === 'running' || scheduledValidationJobIds.has(jobId)) {
     return { status: 'already_running', jobId, sourceId, workerId: existing.workerId }
@@ -581,12 +834,22 @@ export function scheduleWorkbenchValidationJob(params: {
 
   const workerId = `validation-worker-${process.pid}-${crypto.randomUUID()}`.slice(0, 160)
   const leaseMs = Math.max(30_000, Math.min(params.leaseMs || 360_000, 960_000))
-  const claimed = claimWorkbenchValidationJob({ jobId, sourceId, workerId, leaseMs })
+  let claimed: WorkbenchValidationJobRecord | undefined
+  try {
+    claimed = claimWorkbenchValidationJob({ jobId, sourceId, workerId, leaseMs })
+  } catch (error) {
+    if (error instanceof ValidationJobStoreCorruptError) {
+      return { status: 'rejected', jobId, sourceId, reason: error.message }
+    }
+    throw error
+  }
   if (!claimed) return { status: 'already_running', jobId, sourceId }
 
+  const controller = new AbortController()
   scheduledValidationJobIds.add(jobId)
+  scheduledValidationJobControllers.set(jobId, controller)
   setImmediate(() => {
-    void runSafeCommand(toSafeCommandRequest(claimed, sourceRoot))
+    void runSafeCommand({ ...toSafeCommandRequest(claimed, sourceRoot), signal: controller.signal })
       .then(result => {
         const status = terminalStatus(result)
         recordWorkbenchValidationJobResult({
@@ -606,7 +869,7 @@ export function scheduleWorkbenchValidationJob(params: {
             reason: result.reason,
             details: result.details,
             terminatedByInfrastructure: false,
-            terminationReason: status === 'timed_out' ? 'job_timeout' : undefined,
+            terminationReason: status === 'timed_out' ? 'job_timeout' : status === 'cancelled' ? 'cancelled' : undefined,
             runtime: result.runtime
           }
         })
@@ -630,6 +893,7 @@ export function scheduleWorkbenchValidationJob(params: {
         })
       })
       .finally(() => {
+        scheduledValidationJobControllers.delete(jobId)
         scheduledValidationJobIds.delete(jobId)
       })
   })

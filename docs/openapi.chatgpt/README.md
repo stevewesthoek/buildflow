@@ -12,7 +12,7 @@ The GPT-facing API remains short and fail-fast. Larger goals must be implemented
 ## Canonical schema sources
 
 - schema file: `docs/openapi.chatgpt.json`
-- local schema endpoint: `http://127.0.0.1:3054/api/openapi`
+- owner-local native ingress for inspection: `http://127.0.0.1:3154/api/openapi`
 - hosted endpoint: `https://workbench.prochat.tools/api/openapi`
 - another HTTPS endpoint you control: `https://<your-domain-or-tunnel>/api/openapi`
 
@@ -100,6 +100,15 @@ Use Graphify for unknown architecture, then verify exact source before editing. 
 - Configured Git worktrees may be grouped for dashboard use, but Workbench must not switch the GPT’s source silently.
 - Call `getWorkbenchStatus?include=sources` before the first repo action and use one exact enabled returned ID.
 - Reject `default`, `workspace`, `current`, and `repo`; Workbench returns an actionable source-selection response instead of dispatching them.
+
+Natural activation is discovery-first: “Activate Workbench” lists the available
+human-readable repository labels and their active state. “Activate
+`<repository name>`” matches one unique enabled label/name after normalizing
+case and common separators such as hyphens, underscores, and spaces. For
+example, `workbench` matches `Workbench Private`. The GPT then uses the
+returned ID internally to load bounded context and lock the conversation to that
+source. Users do not need to know source IDs. Ambiguous names require a label
+choice; the GPT must not guess or silently change the global dashboard context.
 
 ## Bounded command evidence
 

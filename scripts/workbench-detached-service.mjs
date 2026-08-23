@@ -13,6 +13,7 @@ const DEFAULT_RUN_DIR = path.join(os.userInfo().homedir, '.config', 'workbench',
 const DEFAULT_MAX_LOG_BYTES = 2 * 1024 * 1024
 const DEFAULT_STOP_TIMEOUT_MS = 5_000
 const OWNER_CONFIG_MODULE = path.join(REPO_ROOT, 'packages', 'shared', 'dist', 'workbench-owner-config.js')
+const TRANSPORT_CONFIG_MODULE = path.join(REPO_ROOT, 'packages', 'shared', 'dist', 'workbench-transport-config.js')
 
 const COMMON_ENV_KEYS = [
   'HOME',
@@ -72,12 +73,27 @@ export function injectOwnerActionToken(environment, actionToken) {
   return { ...env, WORKBENCH_ACTION_TOKEN: actionToken }
 }
 
+export function injectOwnerTransport(environment, transport) {
+  const env = { ...environment }
+  delete env.WORKBENCH_TRANSPORT
+  return { ...env, WORKBENCH_TRANSPORT: transport }
+}
+
 async function loadOwnerActionConfig() {
   try {
     const module = await import(pathToFileURL(OWNER_CONFIG_MODULE).href)
     return module.loadWorkbenchOwnerConfig()
   } catch {
     throw new Error('Workbench owner-local action authentication is unavailable or invalid.')
+  }
+}
+
+async function loadOwnerTransportConfig() {
+  try {
+    const module = await import(pathToFileURL(TRANSPORT_CONFIG_MODULE).href)
+    return module.loadWorkbenchTransportConfig()
+  } catch {
+    throw new Error('Workbench owner-local transport configuration is unavailable or invalid.')
   }
 }
 
@@ -560,6 +576,12 @@ async function main() {
     return
   }
 
+  if (command === 'validate-transport') {
+    const configured = await loadOwnerTransportConfig()
+    console.log(JSON.stringify({ configured: true, source: 'owner_local', transport: configured.transport, mode: configured.mode }))
+    return
+  }
+
   if (command === 'verify-auth') {
     const configured = await loadOwnerActionConfig()
     const webPort = Number.parseInt(options['web-port'] || '3054', 10)
@@ -579,9 +601,13 @@ async function main() {
     const defaultPort = service === 'agent' ? 3052 : 3054
     const port = Number.parseInt(options.port || String(defaultPort), 10)
     const spec = serviceSpec(service, port, runDir)
-    if (command === 'start' && service === 'web') {
-      const configured = await loadOwnerActionConfig()
-      spec.env = injectOwnerActionToken(spec.env, configured.actionToken)
+    if (command === 'start') {
+      const transport = await loadOwnerTransportConfig()
+      spec.env = injectOwnerTransport(spec.env, transport.transport)
+      if (service === 'web') {
+        const configured = await loadOwnerActionConfig()
+        spec.env = injectOwnerActionToken(spec.env, configured.actionToken)
+      }
     }
     let result
     if (command === 'start') result = await startDetachedService(spec, { launchId: options['launch-id'] })

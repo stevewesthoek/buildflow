@@ -186,6 +186,31 @@ assert.equal(validRollback.allowed, true)
 if (!validRollback.allowed) throw new Error(validRollback.reasonCode)
 assert.equal(validRollback.operation.binding.mode, 'rollback')
 
+const versionTwoInput = prepareInput('apply')
+versionTwoInput.operationId = 'operation-apply-v2'
+versionTwoInput.grant = { ...versionTwoInput.grant, canonicalizationVersion: 2 }
+versionTwoInput.manifest = {
+  ...versionTwoInput.manifest,
+  workflow: { ...versionTwoInput.manifest.workflow, canonicalizationVersion: 2 }
+}
+const validVersionTwo = prepareControlledWorkflowMigration(versionTwoInput)
+assert.equal(validVersionTwo.allowed, true)
+if (!validVersionTwo.allowed) throw new Error(validVersionTwo.reasonCode)
+assert.equal(validVersionTwo.operation.binding.canonicalizationVersion, 2)
+assert.equal(validVersionTwo.evidence.canonicalizationVersion, 2)
+
+const mismatchedCanonicalizationVersion = prepareControlledWorkflowMigration({
+  ...versionTwoInput,
+  manifest: {
+    ...versionTwoInput.manifest,
+    workflow: { ...versionTwoInput.manifest.workflow, canonicalizationVersion: 1 }
+  }
+})
+assert.equal(mismatchedCanonicalizationVersion.allowed, false)
+if (!mismatchedCanonicalizationVersion.allowed) {
+  assert.ok(mismatchedCanonicalizationVersion.issues.some(issue => issue.code === 'CANONICALIZATION_VERSION_MISMATCH'))
+}
+
 const wrongWorkflow = prepareControlledWorkflowMigration({ ...prepareInput('apply'), workflowId: 'wrong-workflow' })
 assert.equal(wrongWorkflow.allowed, false)
 if (!wrongWorkflow.allowed) assert.ok(wrongWorkflow.issues.some(issue => issue.code === 'WORKFLOW_ID_MISMATCH'))
@@ -244,6 +269,50 @@ for (const result of ['unexpected_state', 'unavailable'] as const) {
   assert.equal(decision.operation.candidateUpdateRequests, 0)
   assert.ok(!effectTypes(decision).includes('apply_candidate'))
 }
+
+const protectedDomainMismatch = step(run(prepared('apply')), {
+  type: 'precondition_readback',
+  result: 'unavailable',
+  protectedDomains: 'unverified',
+  protectedDomainMismatches: ['activation', 'settings'],
+  executorReasonCode: 'PROTECTED_DOMAIN_MISMATCH',
+  at: at(3)
+})
+assert.deepEqual(protectedDomainMismatch.operation.evidence?.protectedDomainMismatches, ['activation', 'settings'])
+assert.deepEqual(
+  projectControlledWorkflowMigrationStatus(protectedDomainMismatch.operation).protectedDomainMismatches,
+  ['activation', 'settings']
+)
+
+const nonMismatchDiagnostic = step(run(prepared('apply')), {
+  type: 'precondition_readback',
+  result: 'unavailable',
+  protectedDomains: 'unverified',
+  protectedDomainMismatches: ['activation'],
+  executorReasonCode: 'READ_SUCCEEDED',
+  at: at(3)
+})
+assert.equal(nonMismatchDiagnostic.operation.evidence?.protectedDomainMismatches, undefined)
+
+const nonCanonicalMismatchNames = step(run(prepared('apply')), {
+  type: 'precondition_readback',
+  result: 'unavailable',
+  protectedDomains: 'unverified',
+  protectedDomainMismatches: ['settings', 'activation'],
+  executorReasonCode: 'PROTECTED_DOMAIN_MISMATCH',
+  at: at(3)
+})
+assert.equal(nonCanonicalMismatchNames.operation.evidence?.protectedDomainMismatches, undefined)
+
+const inconsistentProtectedDomainState = step(run(prepared('apply')), {
+  type: 'precondition_readback',
+  result: 'unavailable',
+  protectedDomains: 'unchanged',
+  protectedDomainMismatches: ['activation'],
+  executorReasonCode: 'PROTECTED_DOMAIN_MISMATCH',
+  at: at(3)
+})
+assert.equal(inconsistentProtectedDomainState.operation.evidence?.protectedDomainMismatches, undefined)
 
 const applyRequested = requestMutation(prepared('apply'))
 assert.equal(applyRequested.candidateUpdateRequests, 1)

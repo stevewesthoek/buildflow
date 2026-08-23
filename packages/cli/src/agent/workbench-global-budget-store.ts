@@ -70,7 +70,7 @@ const DEFAULT_LIMITS: WorkbenchBudgetLimits = {
 
 const DEFAULT_MAX_LEASES = 1000
 const DEFAULT_LEASE_MS = 60_000
-const MAX_LEASE_MS = 15 * 60_000
+const MAX_LEASE_MS = 16 * 60_000
 const TERMINAL_LEASE_RETENTION_MS = 60 * 60_000    // terminal leases older than this are pruned
 const LOCK_WAIT_MS = 250
 const LOCK_STALE_MS = 30_000
@@ -275,7 +275,11 @@ export function releaseWorkbenchBudget(input: { leaseId: string; leaseProof: str
     const lease = store.leases.find((item) => item.leaseId === input.leaseId)
     if (!lease) return { ok: false, code: 'BUDGET_LEASE_NOT_FOUND', message: 'Budget lease was not found.' } as WorkbenchBudgetFailure
     if (lease.leaseProofHash !== hashProof(input.leaseProof)) return { ok: false, code: 'BUDGET_LEASE_PROOF_INVALID', message: 'Budget lease proof is invalid.' } as WorkbenchBudgetFailure
-    if (lease.status !== 'active') return { ok: false, code: 'BUDGET_LEASE_NOT_FOUND', message: 'Budget lease is no longer active.' } as WorkbenchBudgetFailure
+    if (lease.status !== 'active') {
+      store.updatedAt = now
+      writeStore(store, options)
+      return { ok: true as const, lease }
+    }
     lease.status = input.outcome === 'cancelled' ? 'cancelled' : 'released'
     lease.updatedAt = now
     if (lease.status === 'cancelled') lease.cancelledAt = now

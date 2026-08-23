@@ -64,7 +64,7 @@ function isSessionFailure(value: WorkbenchSessionStoreFailure | { lockedSourceId
 
 const DEFAULT_MAX_REQUESTS = 1000
 const DEFAULT_LEASE_MS = 60_000
-const MAX_LEASE_MS = 15 * 60_000
+const MAX_LEASE_MS = 16 * 60_000
 const QUEUED_REQUEST_EXPIRY_MS = 15 * 60_000       // queued requests waiting longer than this are timed out
 const TERMINAL_REQUEST_RETENTION_MS = 2 * 60 * 60_000  // terminal entries older than this are pruned
 const LOCK_WAIT_MS = 250

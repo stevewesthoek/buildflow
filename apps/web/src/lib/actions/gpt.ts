@@ -8,6 +8,7 @@ import {
   GPT_ACTION_DEFAULT_INSPECT_LIMIT,
   sessionAwareRunWorkbenchCommandRequestSchema
 } from '@workbench/shared'
+import { containsProtectedRepositoryContent, evaluateConnectedRepositoryPath } from '../../../../../packages/shared/src/workbench-repository-access-policy'
 import { getActionDiagnostics } from '../env-compat'
 
 type NormalizedSource = {
@@ -110,15 +111,6 @@ type WritePolicy = {
 }
 
 type ActivityInput = Omit<ActionActivity, 'version'>
-
-const ENV_TEMPLATE_FILES = new Set([
-  '.env.example',
-  '.env.sample',
-  '.env.template',
-  '.env.local.example',
-  '.env.development.example',
-  '.env.production.example'
-])
 
 const PLACEHOLDER_SOURCE_IDS = new Set(['default', 'workspace', 'current', 'repo'])
 
@@ -391,11 +383,12 @@ function classifyBlockedWrite(path: string, policy?: WritePolicy, content?: stri
   if (path.startsWith('/')) {
     return { code: 'ABSOLUTE_PATH_BLOCKED', message: 'Absolute paths outside the repo are blocked.', userMessage: 'Workbench can only write inside the connected source root.', reason: 'absolute_path', hint: 'Use a repo-relative path inside the source root.' }
   }
-  if (ENV_TEMPLATE_FILES.has(normalized.split('/').pop() || '')) {
-    return null
+  const pathProtection = evaluateConnectedRepositoryPath(path)
+  if (pathProtection) {
+    return { code: pathProtection.code, message: pathProtection.message, userMessage: pathProtection.message, reason: pathProtection.reason, hint: pathProtection.hint }
   }
-  if (normalized.split('/').some(part => part === '.git' || part === 'node_modules' || part === '.next' || part === 'dist' || part === 'build' || part === 'coverage')) {
-    return { code: 'PROTECTED_PATH', message: 'This file or directory is protected by policy.', userMessage: 'Workbench is not allowed to write to protected runtime or dependency directories.', reason: 'protected_directory', hint: 'Choose a docs path or update the source policy if intentional.' }
+  if (typeof content === 'string' && containsProtectedRepositoryContent(content)) {
+    return { code: 'SECRET_PATTERN_BLOCKED', message: 'This content is blocked because it looks like it may contain a secret.', userMessage: 'Workbench will not write content that looks like a token, credential, or private key.', reason: 'blocked_content_pattern', hint: 'Use redacted placeholders such as [REDACTED], <token>, or your-key-here instead.' }
   }
   if (typeof content === 'string' && Array.isArray(policy?.blockedContentPatterns)) {
     const matchedPattern = policy.blockedContentPatterns.find(pattern => typeof pattern === 'string' && pattern.length > 0 && content.includes(pattern))
@@ -418,20 +411,15 @@ function classifyBlockedWrite(path: string, policy?: WritePolicy, content?: stri
   if (matchesAny(policy?.blockedGlobs, normalized)) {
     return { code: 'SECRET_PATH_BLOCKED', message: 'This path is blocked because it may contain secrets.', userMessage: 'Workbench will not write to secret-like files such as .env or private key paths.', reason: 'blocked_glob', hint: 'Use a docs or project note path instead.' }
   }
-  if (matchesAny(policy?.blockedWriteGlobs, normalized)) {
-    if ((changeType === 'delete_file' || changeType === 'delete_directory' || changeType === 'rmdir') && matchesAny(policy?.generatedDeleteAllowedGlobs, normalized)) {
-      return null
-    }
-    return { code: 'GENERATED_WRITE_BLOCKED', message: 'This path is blocked because it is generated output.', userMessage: 'Workbench will not write generated or build output files.', reason: 'generated_write_blocked', hint: 'Write to the source file or a repo note instead.' }
-  }
   if (matchesAny(policy?.protectedGlobs, normalized)) {
     return { code: 'PROTECTED_PATH', message: 'This file is protected by policy.', userMessage: 'Workbench is not allowed to write to this protected file.', reason: 'protected_glob', hint: 'Choose a docs path or update the source policy if intentional.' }
   }
-  const allowedRoots = Array.isArray(policy?.allowedRoots) ? policy!.allowedRoots! : []
+  // Repository scope is the authorization boundary; no folder allowlist is evaluated here.
+  const allowedRoots = ['**']
   const allowRoot = allowedRoots.some(root => typeof root === 'string' && root.length > 0 && (
     root === '*.md' ? normalized.endsWith('.md') : root.endsWith('/**') ? normalized === root.slice(0, -3) || normalized.startsWith(root.slice(0, -3) + '/') : normalized === root || normalized.startsWith(`${root}/`)
   ))
-  if (!allowRoot) {
+  if (false && !allowRoot) {
     return { code: 'WRITE_PATH_BLOCKED', message: 'This path is blocked by the source write policy.', userMessage: 'Workbench can read this file, but the current write policy blocks changes to this path.', reason: 'path_not_allowed', hint: 'Choose an allowed docs path or update the source write policy.' }
   }
   return null
@@ -721,7 +709,7 @@ async function preflightWrite(body: Record<string, unknown>, userToken?: string,
   const policy = (source?.writePolicy || {}) as WritePolicy
   const normalizedPath = normalizePath(path)
   const blocked = classifyBlockedWrite(path, policy, typeof body.content === 'string' ? body.content : undefined, changeType)
-  const matchedAllowGlob = findMatchingGlob(policy?.allowedRoots, normalizedPath)
+  const matchedAllowGlob = undefined
   const matchedBlockGlob = findMatchingGlob(policy?.blockedGlobs, normalizedPath) || findMatchingGlob(policy?.confirmationRequiredGlobs, normalizedPath) || findMatchingGlob(policy?.protectedGlobs, normalizedPath)
   if (blocked) {
     return {

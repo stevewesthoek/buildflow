@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import {
+  CONTROLLED_WORKFLOW_PROTECTED_DOMAINS,
   canonicalizeN8nWorkflow,
   compareControlledWorkflowCandidate,
   hashCanonicalWorkflowTopology,
+  isCanonicalControlledWorkflowProtectedDomainList,
   stableSerializeCanonicalValue
 } from '../packages/shared/src/controlled-workflow-canonicalization'
 import type { ControlledWorkflowTopologyManifest } from '../packages/shared/src/controlled-workflow-topology'
@@ -108,6 +110,11 @@ const protectedCases: Array<[string, unknown]> = [
   ['webhooks', { ...candidateWorkflow, nodes: [...candidateWorkflow.nodes, { id: 'webhook-node', name: 'Webhook', type: 'n8n-nodes-base.webhook', typeVersion: 1, parameters: { path: 'changed' } }] }],
   ['schedules', { ...candidateWorkflow, nodes: [...candidateWorkflow.nodes, { id: 'schedule-node', name: 'Schedule', type: 'n8n-nodes-base.scheduleTrigger', typeVersion: 1, parameters: { interval: 5 } }] }]
 ]
+assert.deepEqual(CONTROLLED_WORKFLOW_PROTECTED_DOMAINS, protectedCases.map(([domain]) => domain))
+assert.equal(isCanonicalControlledWorkflowProtectedDomainList(['activation', 'settings']), true)
+assert.equal(isCanonicalControlledWorkflowProtectedDomainList([]), false)
+assert.equal(isCanonicalControlledWorkflowProtectedDomainList(['settings', 'activation']), false)
+assert.equal(isCanonicalControlledWorkflowProtectedDomainList(['activation', 'workflow']), false)
 for (const [domain, candidate] of protectedCases) {
   const canonical = canonicalizeN8nWorkflow(candidate)
   assert.equal(canonical.ok, true)
@@ -120,6 +127,135 @@ for (const [domain, candidate] of protectedCases) {
   assert.ok(result.issues.some(issue => issue.path === `/invariants/${domain}`), `${domain} change must fail`)
   assert.equal(JSON.stringify(result.issues).includes('never-print-this-reference'), false)
 }
+
+const realisticSharingA = [
+  {
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    workflowId: 'workflow-1',
+    projectId: 'project-owner',
+    role: 'workflow:owner',
+    project: {
+      id: 'project-owner',
+      name: 'Original display name',
+      type: 'personal',
+      createdAt: '2025-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      projectRelations: [{ userId: 'user-owner', projectId: 'project-owner', role: 'project:personalOwner' }]
+    }
+  },
+  {
+    createdAt: '2026-01-02T00:00:00.000Z',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    workflowId: 'workflow-1',
+    projectId: 'project-editor',
+    role: 'workflow:editor',
+    project: {
+      id: 'project-editor',
+      name: 'Team display name',
+      type: 'team',
+      projectRelations: [{ userId: 'user-editor', projectId: 'project-editor', role: 'project:editor' }]
+    }
+  }
+]
+const realisticSharingB = [
+  {
+    ...realisticSharingA[1],
+    updatedAt: '2026-07-21T00:00:00.000Z',
+    project: {
+      ...realisticSharingA[1].project,
+      name: 'Renamed team',
+      projectRelations: [{ userId: 'different-expanded-user', projectId: 'project-editor', role: 'project:admin' }]
+    }
+  },
+  {
+    ...realisticSharingA[0],
+    updatedAt: '2026-07-21T00:00:00.000Z',
+    project: {
+      ...realisticSharingA[0].project,
+      name: 'Renamed personal project',
+      updatedAt: '2026-07-21T00:00:00.000Z'
+    }
+  }
+]
+const sharingV1A = canonicalizeN8nWorkflow({ ...liveWorkflow, shared: realisticSharingA }, 1)
+const sharingV1B = canonicalizeN8nWorkflow({ ...liveWorkflow, shared: realisticSharingB }, 1)
+const sharingV2A = canonicalizeN8nWorkflow({ ...liveWorkflow, shared: realisticSharingA }, 2)
+const sharingV2B = canonicalizeN8nWorkflow({ ...liveWorkflow, shared: realisticSharingB }, 2)
+assert.equal(sharingV1A.ok, true)
+assert.equal(sharingV1B.ok, true)
+assert.equal(sharingV2A.ok, true)
+assert.equal(sharingV2B.ok, true)
+if (!sharingV1A.ok || !sharingV1B.ok || !sharingV2A.ok || !sharingV2B.ok) throw new Error('sharing canonicalization failed')
+assert.notEqual(stableSerializeCanonicalValue(sharingV1A.protected.sharing), stableSerializeCanonicalValue(sharingV1B.protected.sharing))
+assert.equal(stableSerializeCanonicalValue(sharingV2A.protected.sharing), stableSerializeCanonicalValue(sharingV2B.protected.sharing))
+assert.deepEqual(sharingV2A.protected.sharing, {
+  state: 'present',
+  value: [
+    { projectId: 'project-editor', role: 'workflow:editor' },
+    { projectId: 'project-owner', role: 'workflow:owner' }
+  ]
+})
+
+const sharingRoleChanged = canonicalizeN8nWorkflow({
+  ...liveWorkflow,
+  shared: realisticSharingA.map((entry, index) => index === 0 ? { ...entry, role: 'workflow:editor' } : entry)
+}, 2)
+const sharingProjectChanged = canonicalizeN8nWorkflow({
+  ...liveWorkflow,
+  shared: realisticSharingA.map((entry, index) => index === 0
+    ? { ...entry, projectId: 'project-other', project: { ...entry.project, id: 'project-other' } }
+    : entry)
+}, 2)
+assert.equal(sharingRoleChanged.ok, true)
+assert.equal(sharingProjectChanged.ok, true)
+if (!sharingRoleChanged.ok || !sharingProjectChanged.ok) throw new Error('changed sharing canonicalization failed')
+assert.notEqual(stableSerializeCanonicalValue(sharingV2A.protected.sharing), stableSerializeCanonicalValue(sharingRoleChanged.protected.sharing))
+assert.notEqual(stableSerializeCanonicalValue(sharingV2A.protected.sharing), stableSerializeCanonicalValue(sharingProjectChanged.protected.sharing))
+
+const sharingMissingV2 = canonicalizeN8nWorkflow({ ...liveWorkflow, shared: undefined }, 2)
+const sharingPresentEmptyV2 = canonicalizeN8nWorkflow({ ...liveWorkflow, shared: [] }, 2)
+assert.equal(sharingMissingV2.ok, false, 'an explicitly present undefined sharing value must fail closed')
+assert.equal(sharingPresentEmptyV2.ok, true)
+const sharingAbsentWorkflow = { ...liveWorkflow } as Record<string, unknown>
+delete sharingAbsentWorkflow.shared
+const sharingAbsentV2 = canonicalizeN8nWorkflow(sharingAbsentWorkflow, 2)
+assert.equal(sharingAbsentV2.ok, true)
+if (!sharingAbsentV2.ok || !sharingPresentEmptyV2.ok) throw new Error('sharing presence canonicalization failed')
+assert.notEqual(stableSerializeCanonicalValue(sharingAbsentV2.protected.sharing), stableSerializeCanonicalValue(sharingPresentEmptyV2.protected.sharing))
+
+const invalidSharingV2 = [
+  { ...liveWorkflow, shared: [{ workflowId: 'different-workflow', projectId: 'project-owner', role: 'workflow:owner' }] },
+  { ...liveWorkflow, shared: [{ projectId: 'project-owner', role: 'workflow:owner', project: { id: 'different-project' } }] },
+  { ...liveWorkflow, shared: [{ projectId: 'project-owner', role: 'workflow:owner' }, { projectId: 'project-owner', role: 'workflow:editor' }] },
+  { ...liveWorkflow, shared: [{ projectId: '', role: 'workflow:owner' }] },
+  { ...liveWorkflow, shared: [{ projectId: 'project-owner', role: '' }] },
+  { ...liveWorkflow, shared: realisticSharingA, sharing: realisticSharingA }
+]
+invalidSharingV2.forEach(workflow => assert.equal(canonicalizeN8nWorkflow(workflow, 2).ok, false))
+
+const semanticManifest = clone(manifest)
+semanticManifest.workflow.canonicalizationVersion = 2
+const semanticLive = { ...liveWorkflow, shared: realisticSharingA }
+const semanticCandidate = { ...candidateWorkflow, shared: realisticSharingB }
+const semanticLiveCanonical = canonicalizeN8nWorkflow(semanticLive, 2)
+const semanticCandidateCanonical = canonicalizeN8nWorkflow(semanticCandidate, 2)
+assert.equal(semanticLiveCanonical.ok, true)
+assert.equal(semanticCandidateCanonical.ok, true)
+if (!semanticLiveCanonical.ok || !semanticCandidateCanonical.ok) throw new Error('semantic sharing fixture failed')
+semanticManifest.workflow.expectedLiveCanonicalSha256 = hashCanonicalWorkflowTopology(semanticLiveCanonical.topology, digest)
+semanticManifest.workflow.rollbackCanonicalSha256 = semanticManifest.workflow.expectedLiveCanonicalSha256
+semanticManifest.workflow.candidateCanonicalSha256 = hashCanonicalWorkflowTopology(semanticCandidateCanonical.topology, digest)
+const semanticComparison = compareControlledWorkflowCandidate({ live: semanticLive, candidate: semanticCandidate, manifest: semanticManifest, digest })
+assert.equal(semanticComparison.ok, true, JSON.stringify(semanticComparison.issues))
+const roleChangedCandidate = { ...semanticCandidate, shared: [{ ...realisticSharingB[0], role: 'workflow:owner' }, realisticSharingB[1]] }
+const roleChangedCanonical = canonicalizeN8nWorkflow(roleChangedCandidate, 2)
+assert.equal(roleChangedCanonical.ok, true)
+if (!roleChangedCanonical.ok) throw new Error('role-changed sharing fixture failed')
+const roleChangedManifest = clone(semanticManifest)
+roleChangedManifest.workflow.candidateCanonicalSha256 = hashCanonicalWorkflowTopology(roleChangedCanonical.topology, digest)
+const roleChangedComparison = compareControlledWorkflowCandidate({ live: semanticLive, candidate: roleChangedCandidate, manifest: roleChangedManifest, digest })
+assert.ok(roleChangedComparison.issues.some(issue => issue.path === '/invariants/sharing'))
 
 const prototypeBefore = canonicalizeN8nWorkflow({
   id: 'prototype-workflow',

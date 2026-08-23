@@ -17,6 +17,10 @@
     "./workbench-owner-config": {
       "types": "./src/workbench-owner-config.ts",
       "default": "./dist/workbench-owner-config.js"
+    },
+    "./workbench-transport-config": {
+      "types": "./src/workbench-transport-config.ts",
+      "default": "./dist/workbench-transport-config.js"
     }
   },
   "scripts": {

@@ -134,6 +134,15 @@ preflight_action_auth() {
   log "✓ owner-local Workbench action authentication validated"
 }
 
+preflight_transport_config() {
+  log "Validating owner-local Workbench transport configuration"
+  if ! node "$SERVICE_MANAGER" validate-transport; then
+    log "ERROR: owner-local Workbench transport configuration is unavailable or invalid"
+    return 1
+  fi
+  log "✓ owner-local Workbench transport configuration validated"
+}
+
 start_relay() {
   log "Starting relay compose project only"
   if ! docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up -d --remove-orphans; then
@@ -259,6 +268,7 @@ start_stack_clean() {
 
   initialize_build_identity
   preflight_action_auth
+  preflight_transport_config
   stop_stack
   build_runtime_packages
 

@@ -24,8 +24,8 @@ import {
 const sha256Text = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex')
 const hash = (character: string): string => character.repeat(64)
 
-function canonicalHash(value: unknown): string {
-  const canonical = canonicalizeN8nWorkflow(value)
+function canonicalHash(value: unknown, canonicalizationVersion: 1 | 2 = 1): string {
+  const canonical = canonicalizeN8nWorkflow(value, canonicalizationVersion)
   assert.equal(canonical.ok, true)
   if (!canonical.ok) throw new Error(canonical.issues[0]?.code)
   return hashCanonicalWorkflowTopology(canonical.topology, sha256Text)
@@ -630,6 +630,7 @@ async function main() {
     assert.equal(result.reasonCode, 'PROTECTED_DOMAIN_MISMATCH')
     assert.equal(result.observedCanonicalSha256, undefined)
     assert.equal(result.protectedDomains, 'unverified')
+    assert.deepEqual(result.protectedDomainMismatches, ['activation'])
     const protectedMismatchEvent = toControlledWorkflowMigrationEvent(
       result,
       '2026-07-14T11:00:30.000Z'
@@ -641,6 +642,12 @@ async function main() {
         : undefined,
       'unverified'
     )
+    assert.deepEqual(
+      protectedMismatchEvent.type === 'precondition_readback'
+        ? protectedMismatchEvent.protectedDomainMismatches
+        : undefined,
+      ['activation']
+    )
     const protectedMismatchTransition = advanceControlledWorkflowMigration({
       operation: baseOperation,
       event: protectedMismatchEvent
@@ -649,6 +656,143 @@ async function main() {
       projectControlledWorkflowMigrationStatus(protectedMismatchTransition.operation).protectedDomains,
       'unverified'
     )
+    assert.deepEqual(
+      projectControlledWorkflowMigrationStatus(protectedMismatchTransition.operation).protectedDomainMismatches,
+      ['activation']
+    )
+
+    const privateSettingValue = 'private-setting-value'
+    nextProcessResult = {
+      outcome: 'succeeded', exitCode: 0, signal: null,
+      stdout: JSON.stringify({
+        ...preMutationWorkflow,
+        active: true,
+        settings: { executionOrder: privateSettingValue },
+        tags: [{ id: 'tag-1', name: 'private-tag-name' }]
+      }),
+      stderr: '', stdoutTruncated: false, stderrTruncated: false
+    }
+    result = await createExecutor()(invocation())
+    assert.equal(result.reasonCode, 'PROTECTED_DOMAIN_MISMATCH')
+    assert.deepEqual(result.protectedDomainMismatches, ['activation', 'settings', 'tags'])
+    assert.equal(JSON.stringify(result).includes(privateSettingValue), false)
+
+    const versionTwoCandidate = {
+      ...candidateWorkflow,
+      shared: [{
+        workflowId,
+        projectId: 'project-1',
+        role: 'workflow:owner',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        project: { id: 'project-1', name: 'Candidate project label', type: 'personal' }
+      }]
+    }
+    const versionTwoRollback = {
+      ...rollbackWorkflow,
+      shared: [{
+        workflowId,
+        projectId: 'project-1',
+        role: 'workflow:owner',
+        createdAt: '2025-01-01T00:00:00.000Z',
+        updatedAt: '2025-01-01T00:00:00.000Z',
+        project: { id: 'project-1', name: 'Rollback project label', type: 'team' }
+      }]
+    }
+    const versionTwoLive = {
+      ...preMutationWorkflow,
+      shared: [{
+        workflowId,
+        projectId: 'project-1',
+        role: 'workflow:owner',
+        createdAt: '2026-07-14T10:59:00.000Z',
+        updatedAt: '2026-07-14T10:59:30.000Z',
+        project: { id: 'project-1', name: 'Live project label', type: 'team' },
+        projectRelations: [{ projectId: 'project-1', userId: 'user-1', role: 'project:admin' }]
+      }]
+    }
+    const versionTwoCandidateContent = JSON.stringify(versionTwoCandidate)
+    const versionTwoRollbackContent = JSON.stringify(versionTwoRollback)
+    const versionTwoManifest: ControlledWorkflowTopologyManifest = {
+      ...manifest,
+      workflow: {
+        id: workflowId,
+        canonicalizationVersion: 2,
+        expectedLiveCanonicalSha256: canonicalHash(versionTwoLive, 2),
+        candidateCanonicalSha256: canonicalHash(versionTwoCandidate, 2),
+        rollbackCanonicalSha256: canonicalHash(versionTwoRollback, 2)
+      },
+      artifacts: {
+        candidatePath: candidateRelativePath,
+        candidateSha256: sha256Text(versionTwoCandidateContent),
+        rollbackPath: rollbackRelativePath,
+        rollbackSha256: sha256Text(versionTwoRollbackContent)
+      }
+    }
+    const versionTwoManifestContent = JSON.stringify(versionTwoManifest)
+    write(candidateRelativePath, versionTwoCandidateContent)
+    write(rollbackRelativePath, versionTwoRollbackContent)
+    write(manifestRelativePath, versionTwoManifestContent)
+    const versionTwoGrant: ControlledN8nWorkflowGrant = {
+      ...grant,
+      canonicalizationVersion: 2
+    }
+    const versionTwoOperation: ControlledWorkflowMigrationOperation = {
+      ...baseOperation,
+      operationId: 'operation-v2-sharing',
+      binding: {
+        ...baseOperation.binding,
+        canonicalizationVersion: 2,
+        candidateSha256: versionTwoManifest.artifacts.candidateSha256,
+        rollbackSha256: versionTwoManifest.artifacts.rollbackSha256,
+        manifestSha256: sha256Text(versionTwoManifestContent),
+        candidateCanonicalSha256: versionTwoManifest.workflow.candidateCanonicalSha256,
+        rollbackCanonicalSha256: versionTwoManifest.workflow.rollbackCanonicalSha256,
+        expectedLiveCanonicalSha256: versionTwoManifest.workflow.expectedLiveCanonicalSha256
+      }
+    }
+    const versionTwoReadEffect = {
+      ...readEffect,
+      operationId: versionTwoOperation.operationId,
+      expectedLiveCanonicalSha256: versionTwoManifest.workflow.expectedLiveCanonicalSha256
+    }
+    nextProcessResult = {
+      outcome: 'succeeded', exitCode: 0, signal: null,
+      stdout: JSON.stringify(versionTwoLive), stderr: '',
+      stdoutTruncated: false, stderrTruncated: false
+    }
+    const beforeVersionTwoRead = processSpecifications.length
+    result = await createExecutor()(invocation(versionTwoReadEffect, versionTwoOperation, versionTwoGrant))
+    assert.equal(result.classification, 'succeeded')
+    assert.equal(result.reasonCode, 'READ_SUCCEEDED')
+    assert.equal(result.protectedDomains, 'unchanged')
+    assert.equal(result.protectedDomainMismatches, undefined)
+    assert.equal(processSpecifications.length, beforeVersionTwoRead + 1)
+
+    nextProcessResult = {
+      outcome: 'succeeded', exitCode: 0, signal: null,
+      stdout: JSON.stringify({
+        ...versionTwoLive,
+        shared: [{ ...versionTwoLive.shared[0], role: 'workflow:editor' }]
+      }),
+      stderr: '', stdoutTruncated: false, stderrTruncated: false
+    }
+    const beforeVersionTwoMismatch = processSpecifications.length
+    result = await createExecutor()(invocation(versionTwoReadEffect, versionTwoOperation, versionTwoGrant))
+    assert.equal(result.classification, 'definitively_failed')
+    assert.equal(result.reasonCode, 'PROTECTED_DOMAIN_MISMATCH')
+    assert.deepEqual(result.protectedDomainMismatches, ['sharing'])
+    assert.equal(result.observedCanonicalSha256, undefined)
+    assert.equal(JSON.stringify(result).includes('workflow:editor'), false)
+    assert.equal(processSpecifications.length, beforeVersionTwoMismatch + 1)
+    const versionTwoMismatchSpec = processSpecifications.at(-1)
+    assert.deepEqual(versionTwoMismatchSpec.args, ['get-workflow', workflowId])
+    assert.equal(versionTwoMismatchSpec.mayMutate, false)
+    assert.equal(versionTwoOperation.candidateUpdateRequests, 0)
+    assert.equal(versionTwoOperation.rollbackUpdateRequests, 0)
+    write(candidateRelativePath, candidateContent)
+    write(rollbackRelativePath, rollbackContent)
+    write(manifestRelativePath, manifestContent)
 
     nextProcessResult = {
       outcome: 'succeeded', exitCode: 0, signal: null,
@@ -861,6 +1005,7 @@ async function main() {
     }
     const preconditionResult = await createExecutor()(invocation())
     assert.equal(preconditionResult.protectedDomains, 'unchanged')
+    assert.equal(preconditionResult.protectedDomainMismatches, undefined)
     const preconditionEvent = toControlledWorkflowMigrationEvent(preconditionResult, '2026-07-14T11:01:00.000Z')
     const mutationRequested = advanceControlledWorkflowMigration({ operation: baseOperation, event: preconditionEvent })
     assert.equal(mutationRequested.operation.candidateUpdateRequests, 0)

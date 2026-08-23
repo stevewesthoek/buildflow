@@ -11,6 +11,7 @@ export type SourceIndexRecord = {
   indexedFileCount?: number
   lastIndexedAt?: string
   indexError?: string
+  sourceRevision?: string
 }
 
 export type SourceIndexState = Record<string, SourceIndexRecord>
@@ -18,6 +19,7 @@ export type SourceIndexState = Record<string, SourceIndexRecord>
 const INDEX_STATE_FILENAME = 'index-state.json'
 let pendingWrite: NodeJS.Timeout | null = null
 let pendingState: SourceIndexState | null = null
+let pendingStatePath: string | null = null
 
 export function getIndexStatePath(): string {
   return path.join(getConfigDir(), INDEX_STATE_FILENAME)
@@ -25,6 +27,10 @@ export function getIndexStatePath(): string {
 
 export function loadIndexState(): SourceIndexState {
   const statePath = getIndexStatePath()
+  // Pending writes are authoritative inside the current process. Reading the
+  // on-disk snapshot here used to lose back-to-back mutations during the
+  // 500 ms debounce window (for example disable -> enable -> list).
+  if (pendingState && pendingStatePath === statePath) return pendingState
   if (!fs.existsSync(statePath)) return {}
   try {
     const parsed = JSON.parse(fs.readFileSync(statePath, 'utf-8'))
@@ -64,7 +70,14 @@ export function loadIndexState(): SourceIndexState {
 }
 
 export function saveIndexState(state: SourceIndexState, immediate: boolean = false): void {
+  const statePath = getIndexStatePath()
+  if (pendingState && pendingStatePath && pendingStatePath !== statePath) {
+    if (pendingWrite) clearTimeout(pendingWrite)
+    pendingWrite = null
+    _flushIndexState()
+  }
   pendingState = state
+  pendingStatePath = statePath
   if (immediate) {
     if (pendingWrite) clearTimeout(pendingWrite)
     pendingWrite = null
@@ -76,12 +89,13 @@ export function saveIndexState(state: SourceIndexState, immediate: boolean = fal
 
 function _flushIndexState(): void {
   if (!pendingState) return
-  const statePath = getIndexStatePath()
+  const statePath = pendingStatePath || getIndexStatePath()
   const dir = path.dirname(statePath)
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(statePath, JSON.stringify(pendingState, null, 2))
   pendingWrite = null
   pendingState = null
+  pendingStatePath = null
 }
 
 export function upsertIndexState(sourceId: string, record: Partial<SourceIndexRecord>): SourceIndexState {

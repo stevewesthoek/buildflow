@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import {
   inspectDetachedService,
   injectOwnerActionToken,
+  injectOwnerTransport,
   readProcessMetadata,
   requireSustainedHealth,
   startDetachedService,
@@ -150,11 +151,13 @@ async function verify() {
   assert.match(stackScript, /if ! node "\$SERVICE_MANAGER" status-all/, 'ownership status failure must stop restart')
   assert.match(stackScript, /if ! node "\$SERVICE_MANAGER" sustain/, 'sustained health failure must stop restart')
   assert.match(stackScript, /node "\$SERVICE_MANAGER" validate-auth/, 'restart must validate owner-local authentication')
+  assert.match(stackScript, /node "\$SERVICE_MANAGER" validate-transport/, 'restart must validate owner-local transport configuration')
   assert.match(stackScript, /node "\$SERVICE_MANAGER" verify-auth/, 'restart must verify authenticated status')
   assert.match(stackScript, /userInfo\(\)\.homedir/, 'owner paths must ignore caller-controlled HOME')
   assert.match(stackScript, /RUN_DIR="\$OWNER_HOME\/\.config\/workbench\/runtime-state"/, 'runtime ownership must be worktree-independent')
   const startBlock = stackScript.slice(stackScript.indexOf('start_stack_clean()'), stackScript.indexOf('case "${1:-restart}"'))
   assert(startBlock.indexOf('preflight_action_auth') < startBlock.indexOf('stop_stack'), 'authentication preflight must run before stopping live services')
+  assert(startBlock.indexOf('preflight_transport_config') < startBlock.indexOf('stop_stack'), 'transport preflight must run before stopping live services')
 
   const injected = injectOwnerActionToken({
     PATH: '/usr/bin:/bin',
@@ -163,6 +166,12 @@ async function verify() {
   }, SECRET_SENTINEL)
   assert.equal(injected.WORKBENCH_ACTION_TOKEN, SECRET_SENTINEL)
   assert.equal(injected.BUILDFLOW_ACTION_TOKEN, undefined)
+
+  const transportInjected = injectOwnerTransport({
+    PATH: '/usr/bin:/bin',
+    WORKBENCH_TRANSPORT: 'native_helper'
+  }, 'typescript_agent')
+  assert.equal(transportInjected.WORKBENCH_TRANSPORT, 'typescript_agent')
 
   const createdRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-detached-lifecycle-'))
   const root = fs.realpathSync(createdRoot)
@@ -317,6 +326,8 @@ async function verify() {
       secretValuesAbsentFromStateAndLogs: true,
       sustainedHealthRequired: true,
       criticalLauncherFailuresPropagate: true,
+      ownerLocalTransportPreflightRunsBeforeRestart: true,
+      ambientTransportCannotOverrideOwnerLocalSelection: true,
       worktreeIndependentOwnership: true
     }, null, 2))
   } finally {

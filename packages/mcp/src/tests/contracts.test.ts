@@ -4,6 +4,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   WORKBENCH_TOOL_NAMES,
+  buildRunWorkbenchCommandDiscoverySchema,
   loadWorkbenchToolContracts,
   validateToolInput
 } from '../contracts.js'
@@ -70,6 +71,19 @@ test('projects exactly the five existing Workbench actions', () => {
       assert.equal(contract.inputSchema.additionalProperties, false)
     }
   }
+})
+
+test('projects runWorkbenchCommand discovery to the admitted direct command kinds', () => {
+  const schema = buildRunWorkbenchCommandDiscoverySchema(new Set(['n8n_workflow_migration']))
+  const properties = schema.properties as Record<string, unknown>
+  const command = properties.command as { properties?: Record<string, unknown> }
+  const commandProperties = command.properties || {}
+  const commandKind = commandProperties.commandKind as { enum?: string[] }
+
+  assert.deepEqual(commandKind.enum, ['n8n_workflow_migration'])
+  assert.equal(commandProperties.validationJobOperation, undefined)
+  assert.equal(commandProperties.confirmedByUser, undefined)
+  assert.equal(commandProperties.migration !== undefined, true)
 })
 
 test('strict shared runWorkbenchCommand union rejects private and arbitrary execution fields', () => {

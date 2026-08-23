@@ -18,6 +18,15 @@ const GIT_METADATA_CACHE_TTL_MS = 5 * 60_000
 
 const gitMetadataCache = new Map<string, { data: Partial<KnowledgeSource>; expiresAt: number }>()
 
+export function clearGitMetadataCache(sourcePath?: string): void {
+  if (sourcePath) {
+    const expanded = expandTilde(sourcePath)
+    gitMetadataCache.delete(expanded)
+  } else {
+    gitMetadataCache.clear()
+  }
+}
+
 export function normalizeAutoIndexIntervalMinutes(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(numeric)) return DEFAULT_AUTO_INDEX_INTERVAL_MINUTES
@@ -258,6 +267,7 @@ function getSourceIndexStatus(source: KnowledgeSource): {
   indexedFileCount?: number
   lastIndexedAt?: string
   indexError?: string
+  sourceRevision?: string
 } {
   const record = getIndexRecord(source.id)
   if (source.enabled === false) {
@@ -270,6 +280,30 @@ function getSourceIndexStatus(source: KnowledgeSource): {
     }
   }
   if (record) {
+    if (record.indexStatus === 'disabled') {
+      return {
+        indexed: false,
+        indexStatus: 'pending',
+        indexedFileCount: 0,
+        indexError: undefined,
+        sourceRevision: undefined
+      }
+    }
+    if (record.indexStatus === 'ready' && record.lastIndexedAt) {
+      const currentRevision = runGit(source.path, ['rev-parse', 'HEAD'])
+      const revisionChanged = Boolean(record.sourceRevision && currentRevision && record.sourceRevision !== currentRevision)
+      const latestCommitAt = record.sourceRevision ? undefined : runGit(source.path, ['log', '-1', '--format=%cI'])
+      const latestCommitMs = latestCommitAt ? Date.parse(latestCommitAt) : Number.NaN
+      const indexedAtMs = Date.parse(record.lastIndexedAt)
+      if (revisionChanged || (Number.isFinite(latestCommitMs) && Number.isFinite(indexedAtMs) && latestCommitMs > indexedAtMs)) {
+        return {
+          ...record,
+          indexed: false,
+          indexStatus: 'pending',
+          indexError: 'Source HEAD changed after the last completed index.'
+        }
+      }
+    }
     return record
   }
   return {
@@ -284,6 +318,7 @@ export function withSourceIndexState(source: KnowledgeSource): KnowledgeSource &
   indexedFileCount?: number
   lastIndexedAt?: string
   indexError?: string
+  sourceRevision?: string
 } {
   return { ...source, ...getSourceIndexStatus(source) }
 }
@@ -657,8 +692,15 @@ export function setSourceIndexStatus(
     indexedFileCount?: number
     lastIndexedAt?: string
     indexError?: string
+    sourceRevision?: string
   }
 ): void {
+  if (record.indexStatus === 'ready' && record.lastIndexedAt) {
+    const source = getAllConfiguredSources(loadConfig() ?? ({} as AgentConfig)).find(item => item.id === sourceId)
+    const sourceRevision = source ? runGit(source.path, ['rev-parse', 'HEAD']) : undefined
+    upsertIndexState(sourceId, { ...record, sourceRevision })
+    return
+  }
   upsertIndexState(sourceId, record)
 }
 

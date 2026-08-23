@@ -310,15 +310,75 @@ async function testRunCommandRoutePreservesMigrationOperation() {
   }
 }
 
+async function testRunCommandRoutePreservesProtectedDomainMismatchNames() {
+  const originalFetch = globalThis.fetch
+  const originalToken = process.env.WORKBENCH_ACTION_TOKEN
+  const originalMode = process.env.WORKBENCH_BACKEND_MODE
+  const migrationRequest = {
+    sourceId: 'migration-example-source',
+    commandKind: 'n8n_workflow_migration',
+    migration: {
+      mode: 'apply', phase: 'status', operationId: 'operation-example'
+    }
+  }
+
+  try {
+    process.env.WORKBENCH_ACTION_TOKEN = 'test-action-token'
+    process.env.WORKBENCH_BACKEND_MODE = 'direct-agent'
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      status: 'completed',
+      sourceId: migrationRequest.sourceId,
+      commandKind: migrationRequest.commandKind,
+      migrationMode: 'apply',
+      migrationPhase: 'status',
+      operation: {
+        operationId: 'operation-example',
+        status: 'failed',
+        revision: 4,
+        protectedDomains: 'unverified',
+        protectedDomainMismatches: ['activation', 'settings'],
+        executorReasonCode: 'PROTECTED_DOMAIN_MISMATCH',
+        candidateUpdate: 0,
+        rollbackUpdate: 0
+      }
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch
+
+    const response = await runCommand(new NextRequest('http://127.0.0.1:3054/api/actions/run-command', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-action-token',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(migrationRequest)
+    }))
+    const payload = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(payload.operation?.status, 'failed')
+    assert.equal(payload.operation?.protectedDomains, 'unverified')
+    assert.deepEqual(payload.operation?.protectedDomainMismatches, ['activation', 'settings'])
+    assert.equal(payload.operation?.executorReasonCode, 'PROTECTED_DOMAIN_MISMATCH')
+    assert.equal(payload.operation?.candidateUpdate, 0)
+    assert.equal(payload.operation?.rollbackUpdate, 0)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalToken === undefined) delete process.env.WORKBENCH_ACTION_TOKEN
+    else process.env.WORKBENCH_ACTION_TOKEN = originalToken
+    if (originalMode === undefined) delete process.env.WORKBENCH_BACKEND_MODE
+    else process.env.WORKBENCH_BACKEND_MODE = originalMode
+  }
+}
+
 async function main() {
   await testN8nExportPassesTransportValidation()
   await testMigrationPassesStrictTransportAndPreservesConfirmationGate()
   await testUnsupportedCommandKindsRemainRejected()
   await testRunCommandRoutePreservesConfirmationGate()
   await testRunCommandRoutePreservesMigrationOperation()
+  await testRunCommandRoutePreservesProtectedDomainMismatchNames()
   console.log('✓ n8n_workflow_export passes transport validation and preserves confirmation gating')
   console.log('✓ n8n_workflow_migration preserves strict nested transport and confirmation gating')
   console.log('✓ run-command route preserves the controlled migration operation separately from activity metadata')
+  console.log('✓ run-command route preserves secret-safe protected-domain mismatch names')
   console.log('✓ run-command preserves the backend confirmation token and source ID')
   console.log('✓ Unsupported command kinds remain rejected before transport')
 }

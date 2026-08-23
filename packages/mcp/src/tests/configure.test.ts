@@ -185,6 +185,48 @@ test('accepts a canonically identical existing registration and preserves a dist
   fs.rmSync(item.root, { recursive: true })
 })
 
+test('accepts a valid registered Node 20 path independent of the inspector runtime path', () => {
+  const item = fixture()
+  const alternateNode = path.join(item.root, 'alternate-node')
+  fs.copyFileSync(process.execPath, alternateNode)
+  fs.chmodSync(alternateNode, 0o700)
+
+  const configured = configureCodex({ ...item, targetProjectRoot: undefined, nodeExecutable: alternateNode, now: new Date('2026-07-22T10:00:00.000Z') })
+  assert.equal(configured.configured, true)
+
+  const inspected = inspectCodexRegistration({ ...item, targetProjectRoot: undefined })
+  assert.equal(inspected.configured, true)
+  assert.equal(inspected.command, fs.realpathSync(alternateNode))
+  fs.rmSync(item.root, { recursive: true })
+})
+
+test('rejects a Workbench registration whose executable is not a compatible Node runtime', () => {
+  const item = fixture()
+  const incompatibleNode = path.join(item.root, 'incompatible-node')
+  fs.writeFileSync(incompatibleNode, '#!/bin/sh\nprintf "v19.0.0\\n"\n', { mode: 0o700 })
+  const projectConfigPath = path.join(item.workbenchRepoRoot, '.codex', 'config.toml')
+  fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true })
+  fs.writeFileSync(projectConfigPath, [
+    '[mcp_servers.workbench]',
+    `command = "${incompatibleNode}"`,
+    `args = ["${path.join(item.workbenchRepoRoot, 'packages', 'mcp', 'dist', 'server.js')}"]`,
+    `cwd = "${item.workbenchRepoRoot}"`,
+    'enabled = true',
+    'required = true',
+    'startup_timeout_sec = 10',
+    'tool_timeout_sec = 30',
+    'default_tools_approval_mode = "writes"',
+    '',
+    '[mcp_servers.workbench.env]',
+    `WORKBENCH_MCP_CREDENTIAL_FILE = "${path.join(item.homeDir, '.buildflow', 'codex-workbench-mcp.token')}"`,
+    ''
+  ].join('\n'), { mode: 0o600 })
+
+  const inspected = inspectCodexRegistration({ ...item, targetProjectRoot: undefined })
+  assert.equal(inspected.configured, false)
+  fs.rmSync(item.root, { recursive: true })
+})
+
 test('preserves an unrelated relative entrypoint without a cwd', () => {
   const item = fixture()
   fs.appendFileSync(item.globalConfigPath, [

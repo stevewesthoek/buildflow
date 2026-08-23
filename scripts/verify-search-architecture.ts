@@ -65,6 +65,22 @@ assert.equal(boundedContent.partial, true, 'large source content search should r
 assert(boundedContent.searchedDocCount <= 8, 'large source content search must use the smaller content cap')
 assert(boundedContent.sourceWarnings.some(warning => warning.reason === 'content_search_bounded'), 'large source content search must warn when bounded')
 
+const deepContentDocs = Array.from({ length: 120 }, (_, index) => doc(
+  'deep-content',
+  `docs/module-${index}.md`,
+  index === 119
+    ? `${'unrelated preface '.repeat(400)}v1.3.8-beta — Source-Agnostic Context & Capability Federation`
+    : `context notes for module ${index}`
+))
+const deepContentSearcher = new VaultSearcher(deepContentDocs)
+const deepContent = deepContentSearcher.searchBounded('content:v1.3.8-beta — Source-Agnostic Context', 5, ['deep-content'], {
+  maxDocsPerSource: 15,
+  maxContentDocsPerSource: 8,
+  deadlineMs: 500
+})
+assert(deepContent.searchedDocCount <= 8, 'deep content discovery must preserve the bounded Fuse candidate cap')
+assert(deepContent.results.some(result => result.path === 'docs/module-119.md'), 'deep exact content must remain discoverable beyond the preview window')
+
 const noFastCandidates = largeSearcher.searchBounded('definitely-not-indexed', 5, ['brain-large'], {
   maxDocsPerSource: 15,
   maxContentDocsPerSource: 8,

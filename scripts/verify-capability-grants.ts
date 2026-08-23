@@ -34,6 +34,8 @@ const baseGrant = {
 } satisfies ControlledN8nWorkflowGrant
 
 assert.equal(controlledN8nWorkflowGrantSchema.safeParse(baseGrant).success, true)
+assert.equal(controlledN8nWorkflowGrantSchema.safeParse({ ...baseGrant, canonicalizationVersion: 2 }).success, true)
+assert.equal(controlledN8nWorkflowGrantSchema.safeParse({ ...baseGrant, canonicalizationVersion: 3 }).success, false)
 
 const valid = loadControlledN8nWorkflowGrants([baseGrant])
 assert.equal(valid.issues.length, 0)

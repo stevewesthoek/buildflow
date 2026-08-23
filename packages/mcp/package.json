@@ -1,9 +1,12 @@
 {
   "name": "@workbench/mcp",
-  "version": "1.3.3-beta",
+  "version": "1.3.12-beta",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
+  "engines": {
+    "node": ">=20.20.2 <21"
+  },
   "main": "dist/server.js",
   "exports": {
     ".": "./dist/server.js",
@@ -14,6 +17,10 @@
     "./adapter": {
       "types": "./dist/adapter-contract.d.ts",
       "default": "./dist/adapter-contract.js"
+    },
+    "./artifacts": {
+      "types": "./dist/artifact-descriptor.d.ts",
+      "default": "./dist/artifact-descriptor.js"
     },
     "./claude-adapter": {
       "types": "./dist/claude-adapter.d.ts",
@@ -31,9 +38,69 @@
       "types": "./dist/registration-policy.d.ts",
       "default": "./dist/registration-policy.js"
     },
+    "./providers": {
+      "types": "./dist/provider-lifecycle.d.ts",
+      "default": "./dist/provider-lifecycle.js"
+    },
+    "./provider-registry": {
+      "types": "./dist/provider-registry.d.ts",
+      "default": "./dist/provider-registry.js"
+    },
+    "./provider-packaging": {
+      "types": "./dist/provider-packaging.d.ts",
+      "default": "./dist/provider-packaging.js"
+    },
+    "./provider-benchmark": {
+      "types": "./dist/provider-benchmark.d.ts",
+      "default": "./dist/provider-benchmark.js"
+    },
     "./ide-adapters": {
       "types": "./dist/ide-adapters.d.ts",
       "default": "./dist/ide-adapters.js"
+    },
+    "./workspace-discovery": {
+      "types": "./dist/workspace-discovery.d.ts",
+      "default": "./dist/workspace-discovery.js"
+    },
+    "./workspace-grants": {
+      "types": "./dist/workspace-grants.d.ts",
+      "default": "./dist/workspace-grants.js"
+    },
+    "./artifact-bridge": {
+      "types": "./dist/artifact-bridge.d.ts",
+      "default": "./dist/artifact-bridge.js"
+    },
+    "./executor-broker": {
+      "types": "./dist/executor-broker.d.ts",
+      "default": "./dist/executor-broker.js"
+    },
+    "./automatic-delegation": {
+      "types": "./dist/automatic-delegation.d.ts",
+      "default": "./dist/automatic-delegation.js"
+    },
+    "./device-registry": {
+      "types": "./dist/device-registry.d.ts",
+      "default": "./dist/device-registry.js"
+    },
+    "./distributed-dispatch": {
+      "types": "./dist/distributed-dispatch.d.ts",
+      "default": "./dist/distributed-dispatch.js"
+    },
+    "./worker-fairness": {
+      "types": "./dist/worker-fairness.d.ts",
+      "default": "./dist/worker-fairness.js"
+    },
+    "./cross-device-approval": {
+      "types": "./dist/cross-device-approval.d.ts",
+      "default": "./dist/cross-device-approval.js"
+    },
+    "./encrypted-sync": {
+      "types": "./dist/encrypted-sync.d.ts",
+      "default": "./dist/encrypted-sync.js"
+    },
+    "./managed-team-policy": {
+      "types": "./dist/managed-team-policy.d.ts",
+      "default": "./dist/managed-team-policy.js"
     }
   },
   "scripts": {

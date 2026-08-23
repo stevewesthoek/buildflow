@@ -82,7 +82,7 @@ function queryTokens(query: string): string[] {
 function fastHaystack(doc: IndexedDoc, mode: SearchMode): string {
   const base = `${doc.path}\n${doc.title}\n${doc.tags.join(' ')}\n${doc.contentPreview || ''}`.toLowerCase()
   if (mode === 'path') return base
-  return base
+  return `${base}\n${doc.content.toLowerCase()}`
 }
 
 function docMatchesFastFilter(doc: IndexedDoc, tokens: string[], mode: SearchMode): boolean {
@@ -91,10 +91,24 @@ function docMatchesFastFilter(doc: IndexedDoc, tokens: string[], mode: SearchMod
   return tokens.some(token => haystack.includes(token))
 }
 
-function makeBoundedContentDocs(docs: IndexedDoc[]): IndexedDoc[] {
+function makeBoundedContentDocs(docs: IndexedDoc[], query: string): IndexedDoc[] {
+  const normalizedQuery = query.trim().toLowerCase()
+  const tokens = queryTokens(query).sort((left, right) => right.length - left.length)
   return docs.map(doc => ({
     ...doc,
-    content: doc.content.slice(0, MAX_CONTENT_CHARS_FOR_BOUNDED_FUSE)
+    content: (() => {
+      const lowerContent = doc.content.toLowerCase()
+      let matchIndex = normalizedQuery ? lowerContent.indexOf(normalizedQuery) : -1
+      if (matchIndex < 0) {
+        for (const token of tokens) {
+          matchIndex = lowerContent.indexOf(token)
+          if (matchIndex >= 0) break
+        }
+      }
+      if (matchIndex < 0) return doc.content.slice(0, MAX_CONTENT_CHARS_FOR_BOUNDED_FUSE)
+      const start = Math.max(0, matchIndex - Math.floor(MAX_CONTENT_CHARS_FOR_BOUNDED_FUSE / 3))
+      return doc.content.slice(start, start + MAX_CONTENT_CHARS_FOR_BOUNDED_FUSE)
+    })()
   }))
 }
 
@@ -216,7 +230,7 @@ export class VaultSearcher {
 
       const fuse = sourceSelection.useFullIndex
         ? parsed.mode === 'content' ? index.contentFuse : index.pathFuse
-        : parsed.mode === 'content' ? makeContentFuse(makeBoundedContentDocs(sourceSelection.docs)) : makePathFuse(sourceSelection.docs)
+        : parsed.mode === 'content' ? makeContentFuse(makeBoundedContentDocs(sourceSelection.docs, parsed.query)) : makePathFuse(sourceSelection.docs)
       const sourceResults = fuse.search(parsed.query, { limit: perSourceLimit })
       for (const result of sourceResults) {
         matches.push({ result, sourceId })
@@ -261,10 +275,21 @@ export class VaultSearcher {
 
     const tokens = queryTokens(query)
     const candidates: IndexedDoc[] = []
+    const selected = new Set<string>()
+    const normalizedQuery = query.trim().toLowerCase()
+    if (normalizedQuery) {
+      for (const doc of index.docs) {
+        if (!fastHaystack(doc, mode).includes(normalizedQuery)) continue
+        candidates.push(doc)
+        selected.add(doc.id)
+        if (candidates.length >= maxDocsPerSource) break
+      }
+    }
     for (const doc of index.docs) {
+      if (candidates.length >= maxDocsPerSource) break
+      if (selected.has(doc.id)) continue
       if (!docMatchesFastFilter(doc, tokens, mode)) continue
       candidates.push(doc)
-      if (candidates.length >= maxDocsPerSource) break
     }
 
     if (candidates.length === 0) {

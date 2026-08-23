@@ -51,10 +51,15 @@ const validManifest = {
 
 assert.equal(controlledWorkflowTopologyManifestSchema.safeParse(validManifest).success, true)
 assert.equal(validateControlledWorkflowTopologyManifest(validManifest).ok, true)
+assert.equal(validateControlledWorkflowTopologyManifest({
+  ...validManifest,
+  workflow: { ...validManifest.workflow, canonicalizationVersion: 2 }
+}).ok, true)
 
 const invalidCases: unknown[] = [
   { ...validManifest, repositoryMayAuthorizeItself: true },
   { ...validManifest, workflow: { ...validManifest.workflow, unknown: true } },
+  { ...validManifest, workflow: { ...validManifest.workflow, canonicalizationVersion: 3 } },
   { ...validManifest, artifacts: { ...validManifest.artifacts, candidatePath: '../candidate.json' } },
   { ...validManifest, invariants: { ...validManifest.invariants, activation: 'changed' } },
   { ...validManifest, nodes: { ...validManifest.nodes, add: [...validManifest.nodes.add, validManifest.nodes.add[0]] } },

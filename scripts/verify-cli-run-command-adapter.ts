@@ -224,6 +224,63 @@ if (migration.ok && migration.kind === 'migration') {
       assert.equal(Object.hasOwn(response.body, 'operationRecord'), false)
     }
   }
+  if (execute.ok && execute.kind === 'migration') {
+    const consumeMutationDispatch = () => ({ ok: true as const })
+    let capturedHost: Record<string, unknown> | undefined
+    let capturedInvocation: Record<string, unknown> | undefined
+    const response = await runControlledWorkflowMigrationCommand(execute.request, {
+      getSources: phaseSource,
+      getConfiguredGrants: () => [],
+      realpath: (value: string) => value,
+      createExecutor: ((host: Record<string, unknown>) => {
+        capturedHost = host
+        return async (invocation: Record<string, unknown>) => {
+          capturedInvocation = invocation
+          return {
+            operationId: 'cap-op-execute', workflowId: 'workflow-id', effect: 'apply_candidate',
+            classification: 'blocked', reasonCode: 'EFFECT_NOT_LEGAL'
+          }
+        }
+      }) as never,
+      execute: (async (_request: unknown, dependencies: { executor: (input: Record<string, unknown>) => Promise<unknown> }) => {
+        await dependencies.executor({
+          effect: { type: 'apply_candidate' }, operation: {}, grant: {}, consumeMutationDispatch
+        })
+        return {
+          ok: true as const, status: 'completed' as const,
+          operation: { ...projectedOperation, operationId: 'cap-op-execute', status: 'completed' }
+        }
+      }) as never
+    })
+    assert.equal(response.statusCode, 200)
+    assert.equal(capturedHost?.consumeMutationDispatch, consumeMutationDispatch)
+    assert.equal(Object.hasOwn(capturedInvocation ?? {}, 'consumeMutationDispatch'), false)
+    assert.deepEqual(capturedInvocation, { effect: { type: 'apply_candidate' }, operation: {}, grant: {} })
+  }
+  if (status.ok && status.kind === 'migration') {
+    const mismatch = await runControlledWorkflowMigrationCommand(status.request, {
+      ...phaseDependencies,
+      status: ((request: { operationId: string }) => ({
+        ok: true as const,
+        status: 'failed' as const,
+        operation: {
+          ...projectedOperation,
+          operationId: request.operationId,
+          status: 'failed',
+          reasonCode: 'PRECONDITION_UNAVAILABLE',
+          protectedDomains: 'unverified',
+          protectedDomainMismatches: ['activation', 'settings']
+        }
+      })) as never
+    })
+    assert.equal(mismatch.statusCode, 200)
+    const operation = mismatch.body.operation as {
+      protectedDomains: string
+      protectedDomainMismatches: string[]
+    }
+    assert.equal(operation.protectedDomains, 'unverified')
+    assert.deepEqual(operation.protectedDomainMismatches, ['activation', 'settings'])
+  }
   if (prepare.ok && prepare.kind === 'migration') {
     const blocked = await runControlledWorkflowMigrationCommand(prepare.request, {
       ...phaseDependencies,
@@ -257,6 +314,8 @@ assert.equal(migrationExecutable.ok, false, 'migration must reject caller-select
 
 const adapterSource = fs.readFileSync(path.resolve(__dirname, '../packages/cli/src/agent/n8n-workflow-migration-command-adapter.ts'), 'utf8')
 assert.doesNotMatch(adapterSource, /spawn\(|child_process|update-workflow|wrapperOperation|confirmationDigest|dispatchAuthorization|leaseProof/)
+assert.match(adapterSource, /const \{ consumeMutationDispatch, \.\.\.invocation \} = input/)
+assert.match(adapterSource, /\}\)\(invocation\)/, 'host-only dispatch authority must not enter the strict executor invocation')
 
 void verifyMigrationAdapter().then(() => {
   console.log('CLI runWorkbenchCommand adapter verification passed')

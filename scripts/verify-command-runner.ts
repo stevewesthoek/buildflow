@@ -57,11 +57,19 @@ async function verifyStaticAssetGitPaths() {
     put('public/other-assets/raw.bin', Buffer.from([0, 1, 2, 3]))
     put('docs/unrelated.md', 'unrelated change\n')
 
-    await expectReject('git_add_paths requires confirmation for existing untracked static assets', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'] }))
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'] })
+    assert.equal(result.status, 'needs_confirmation')
+    assert.equal(result.requiresConfirmation, true)
+    assert.equal(result.reason, 'stage_existing_static_asset')
+    assert.equal(typeof result.confirmationToken, 'string')
+    assert.deepEqual((result.details as { approvalRequirements?: Array<{ reason: string; paths: string[] }> })?.approvalRequirements, [
+      { reason: 'stage_existing_static_asset', paths: ['public/prochat-memory/assets/logo.svg'] }
+    ])
     assert.deepEqual(cachedPaths(), [])
 
-    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmedByUser: true })
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmationToken: result.confirmationToken })
     assert.equal(result.status, 'completed')
+    assert.equal(result.reason, 'stage_existing_static_asset')
     let details = result.details as {
       requestedPaths: string[]
       stagedPaths: string[]
@@ -166,15 +174,29 @@ async function verifyExtensionlessGitPaths() {
     git(['commit', '-m', 'test: seed extensionless fixtures'])
 
     put('LICENSE', 'updated license\n')
-    await expectReject('git_add_paths requires confirmation for LICENSE', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'] }))
-    await expectReject('git_add_paths rejects an invalid LICENSE confirmation token', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'], confirmationToken: 'confirm:invalid' }))
+    let result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'] })
+    assert.equal(result.status, 'needs_confirmation')
+    assert.equal(result.reason, 'confirmation_required_path')
+    assert.equal(typeof result.confirmationToken, 'string')
+    const addLicenseToken = result.confirmationToken
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'], confirmationToken: 'confirm:invalid' })
+    assert.equal(result.status, 'needs_confirmation')
+    assert.equal(result.reason, 'confirmation_required_path')
     assert.deepEqual(cachedPaths(), [])
-    let result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'], confirmedByUser: true })
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['LICENSE'], confirmationToken: addLicenseToken })
     assert.equal(result.status, 'completed')
-    await expectReject('git_commit requires confirmation for LICENSE', () => runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license' }))
-    await expectReject('git_commit rejects an invalid LICENSE confirmation token', () => runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license', confirmationToken: 'confirm:invalid' }))
-    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license', confirmedByUser: true })
+    assert.equal(result.reason, 'confirmation_required_path')
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license' })
+    assert.equal(result.status, 'needs_confirmation')
+    assert.equal(result.reason, 'confirmation_required_path')
+    assert.equal(typeof result.confirmationToken, 'string')
+    const commitLicenseToken = result.confirmationToken
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license', confirmationToken: 'confirm:invalid' })
+    assert.equal(result.status, 'needs_confirmation')
+    assert.equal(result.reason, 'confirmation_required_path')
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_commit', paths: ['LICENSE'], message: 'test: update license', confirmationToken: commitLicenseToken })
     assert.equal(result.status, 'completed')
+    assert.equal(result.reason, 'confirmation_required_path')
 
     fs.rmSync(path.join(repo, binaryExtensionless))
     await expectReject('git_add_paths rejects a deleted extensionless binary even with confirmation', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: [binaryExtensionless], confirmedByUser: true }))
@@ -372,15 +394,25 @@ write('public/assets/file.pdf', 'fake pdf\n')
 run('git', ['add', '--', 'public/assets/file.pdf'])
 run('git', ['commit', '-m', 'test: add tracked asset'])
 fs.rmSync(path.join(root, 'public/assets/file.pdf'))
-await expectReject('git_add_paths rejects tracked binary deletion without confirmation', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/file.pdf'] }))
-result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/file.pdf'], confirmedByUser: true })
+result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/file.pdf'] })
+assert.equal(result.status, 'needs_confirmation')
+assert.equal(result.reason, 'path_not_allowed')
+assert.equal(typeof result.confirmationToken, 'string')
+const addTrackedBinaryDeleteToken = result.confirmationToken
+result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/file.pdf'], confirmationToken: addTrackedBinaryDeleteToken })
 assert.equal(result.status, 'completed')
+assert.equal(result.reason, 'path_not_allowed')
 result = await runSafeCommand({ ...base, commandKind: 'git_diff_cached_name_only' })
 assert.equal(result.status, 'completed')
 assert(result.stdout.includes('public/assets/file.pdf'))
-await expectReject('git_commit rejects tracked binary deletion without confirmation', () => runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test: delete tracked asset' }))
-result = await runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test: delete tracked asset', confirmedByUser: true })
+result = await runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test: delete tracked asset' })
+assert.equal(result.status, 'needs_confirmation')
+assert.equal(result.reason, 'path_not_allowed')
+assert.equal(typeof result.confirmationToken, 'string')
+const commitTrackedBinaryDeleteToken = result.confirmationToken
+result = await runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test: delete tracked asset', confirmationToken: commitTrackedBinaryDeleteToken })
 assert.equal(result.status, 'completed')
+assert.equal(result.reason, 'path_not_allowed')
 assert(result.stdout.includes('test: delete tracked asset'))
 write('public/assets/tracked.png', 'tracked asset v1\n')
 run('git', ['add', '--', 'public/assets/tracked.png'])
@@ -390,9 +422,14 @@ await expectReject('git_add_paths rejects tracked binary asset modification even
 run('git', ['checkout', '--', 'public/assets/tracked.png'])
 
 write('public/prochat-memory/assets/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"><title>Logo</title></svg>\n')
-await expectReject('git_add_paths requires confirmation for untracked static SVG assets', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'] }))
-result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmedByUser: true })
+result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'] })
+assert.equal(result.status, 'needs_confirmation')
+assert.equal(result.reason, 'stage_existing_static_asset')
+assert.equal(typeof result.confirmationToken, 'string')
+const staticSvgToken = result.confirmationToken
+result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/prochat-memory/assets/logo.svg'], confirmationToken: staticSvgToken })
 assert.equal(result.status, 'completed')
+assert.equal(result.reason, 'stage_existing_static_asset')
 const svgDetails = result.details as { exactMatch?: boolean; stagedPaths?: string[]; staticAssets?: Array<{ path: string; bytes: number; sha256: string; textLike: boolean; validation: string }> }
 assert.equal(svgDetails.exactMatch, true)
 assert.deepEqual(svgDetails.stagedPaths, ['public/prochat-memory/assets/logo.svg'])
@@ -520,7 +557,10 @@ fs.rmSync(siblingRoot, { recursive: true, force: true })
 const rgRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'buildflow-rg-command-'))
 const rgGit = (args: string[]) => execFileSync('git', args, { cwd: rgRepo, stdio: 'pipe', encoding: 'utf8' })
 try {
-  execFileSync('rg', ['--version'], { stdio: 'pipe' })
+  const rgExecutable = process.platform === 'darwin'
+    ? ['/opt/homebrew/bin/rg', '/usr/local/bin/rg'].find(candidate => fs.existsSync(candidate)) || 'rg'
+    : 'rg'
+  execFileSync(rgExecutable, ['--version'], { stdio: 'pipe' })
   rgGit(['init'])
   rgGit(['config', 'user.email', 'buildflow@example.test'])
   rgGit(['config', 'user.name', 'BuildFlow Test'])
@@ -543,6 +583,20 @@ try {
     timeoutMs: 8_000
   }
   const alternation = 'capture/inbox|capture/failed|router/'
+  if (process.platform === 'darwin' && fs.existsSync('/opt/homebrew/bin/rg')) {
+    const originalPath = process.env.PATH
+    try {
+      process.env.PATH = '/usr/bin:/bin'
+      result = await runSafeCommand({ ...rgBase, args: ['-n', alternation, 'system/agent-context'] })
+      assert.equal(result.status, 'completed')
+      assert.equal(result.matchStatus, 'matches_found')
+      assert(result.runtime?.rgVersion?.startsWith('ripgrep '))
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH
+      else process.env.PATH = originalPath
+    }
+  }
+
   result = await runSafeCommand({ ...rgBase, args: ['-n', alternation, 'system/agent-context'] })
   assert.equal(result.status, 'completed')
   assert.equal(result.matchStatus, 'matches_found')
@@ -614,6 +668,19 @@ if (node20Available) {
   result = await runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['--version'] })
   assert.equal(result.status, 'completed')
   assert(result.runtime?.pnpmVersion)
+
+  if (process.platform === 'darwin' && fs.existsSync('/opt/homebrew/bin/pnpm')) {
+    const originalPath = process.env.PATH
+    try {
+      process.env.PATH = '/usr/bin:/bin'
+      result = await runSafeCommand({ ...exactBase, executable: 'pnpm', args: ['--version'] })
+      assert.equal(result.status, 'completed')
+      assert(result.runtime?.pnpmVersion)
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH
+      else process.env.PATH = originalPath
+    }
+  }
 
   write('scan/one.txt', 'deprecated-package\n')
   write('scan/nested/two.md', 'safe\ndeprecated-package\n')
@@ -806,6 +873,7 @@ try {
 
   result = await runSafeCommand({ ...n8nBase, confirmedByUser: true })
   assert.equal(result.status, 'completed')
+  assert.equal(result.reason, 'confirmation_required_for_brain_n8n_workflow_export')
   assert.equal(result.executable, 'tools/n8n-api.sh')
   assert.deepEqual(result.args, ['get-workflow', 'FwP5INe9qoo1OwGC'])
   assert.equal(result.shell, false)

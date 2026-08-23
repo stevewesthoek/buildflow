@@ -31,10 +31,12 @@ type Behavior = {
   rollback?: N8nWorkflowMigrationExecutorClassification
   readbacks?: Readback[]
   crash?: 'before_dispatch_consume' | 'after_dispatch_consume'
+  blockBeforeDispatchConsume?: boolean
   lockOperationStoreAfterMutation?: boolean
   bumpRevisionOnPrecondition?: boolean
 }
 type FixtureOptions = {
+  canonicalizationVersion?: 1 | 2
   candidate?: Record<string, unknown> | ((workflowId: string) => Record<string, unknown>)
   rollback?: Record<string, unknown> | ((workflowId: string) => Record<string, unknown>)
   mutateManifest?: (manifest: ControlledWorkflowTopologyManifest & Record<string, unknown>) => void
@@ -54,8 +56,8 @@ const baseWorkflow = (workflowId: string): Record<string, unknown> => ({
   tags: []
 })
 
-function canonicalHash(value: unknown): string {
-  const canonical = canonicalizeN8nWorkflow(value)
+function canonicalHash(value: unknown, canonicalizationVersion: 1 | 2 = 1): string {
+  const canonical = canonicalizeN8nWorkflow(value, canonicalizationVersion)
   if (!canonical.ok) throw new Error('synthetic workflow canonicalization failed')
   return hashCanonicalWorkflowTopology(canonical.topology, sha)
 }
@@ -70,6 +72,7 @@ function createFixture(options: FixtureOptions = {}) {
   const rollbackPath = 'operations/artifacts/rollback.json'
   const manifestPath = 'operations/manifests/manifest.json'
   const wrapperPath = 'tools/controlled-wrapper'
+  const canonicalizationVersion = options.canonicalizationVersion || 1
   const write = (relative: string, value: string | Buffer) => {
     const target = path.join(root, relative)
     fs.mkdirSync(path.dirname(target), { recursive: true })
@@ -94,10 +97,10 @@ function createFixture(options: FixtureOptions = {}) {
     kind: 'n8n-controlled-topology-migration',
     workflow: {
       id: workflowId,
-      canonicalizationVersion: 1,
-      expectedLiveCanonicalSha256: canonicalHash(rollback),
-      candidateCanonicalSha256: canonicalHash(candidate),
-      rollbackCanonicalSha256: canonicalHash(rollback)
+      canonicalizationVersion,
+      expectedLiveCanonicalSha256: canonicalHash(rollback, canonicalizationVersion),
+      candidateCanonicalSha256: canonicalHash(candidate, canonicalizationVersion),
+      rollbackCanonicalSha256: canonicalHash(rollback, canonicalizationVersion)
     },
     artifacts: {
       candidatePath,
@@ -129,7 +132,7 @@ function createFixture(options: FixtureOptions = {}) {
     allowedCandidateRoots: ['operations/workflows'],
     allowedRollbackRoots: ['operations/artifacts'],
     allowedManifestRoots: ['operations/manifests'],
-    canonicalizationVersion: 1,
+    canonicalizationVersion,
     confirmationTtlSeconds: 600,
     operationTimeoutMs: 12_000,
     maxArtifactBytes: 600_000,
@@ -218,6 +221,7 @@ function createFixture(options: FixtureOptions = {}) {
       if (input.effect.type === 'apply_candidate' || input.effect.type === 'apply_rollback') {
         const kind = input.effect.type === 'apply_candidate' ? 'candidate' : 'rollback'
         assert.equal(kind === 'candidate' ? persisted.candidateUpdateRequests : persisted.rollbackUpdateRequests, 1)
+        if (behavior.blockBeforeDispatchConsume) return result(input.effect, input.operation, 'blocked')
         if (behavior.crash === 'before_dispatch_consume') throw new Error('synthetic crash before dispatch consumption')
         const consumed = input.consumeMutationDispatch?.({
           operationId: input.operation.operationId,
@@ -284,6 +288,29 @@ async function main() {
   assert.equal(status.ok, true)
   assert.equal(valid.executorCalls(), 0)
   assert.equal((await prepareOrThrow(createFixture(), 'rollback')).operation.mode, 'rollback')
+
+  const versionTwo = createFixture({ canonicalizationVersion: 2 })
+  const versionTwoPrepared = await prepareOrThrow(versionTwo)
+  const versionTwoRecord = getCapabilityOperationRecord(
+    versionTwoPrepared.operation.operationId,
+    versionTwo.operationStore
+  )
+  assert.ok(versionTwoRecord && !('ok' in versionTwoRecord))
+  if (versionTwoRecord && !('ok' in versionTwoRecord)) {
+    assert.equal(versionTwoRecord.binding.canonicalizationVersion, 2)
+  }
+  const mismatchedCanonicalizationVersion = createFixture({
+    mutateGrant: grant => { grant.canonicalizationVersion = 2 }
+  })
+  const mismatchedCanonicalizationResult = await prepareControlledWorkflowMigration(
+    mismatchedCanonicalizationVersion.request('apply'),
+    mismatchedCanonicalizationVersion.deps
+  )
+  assert.equal(mismatchedCanonicalizationResult.ok, false)
+  if (!mismatchedCanonicalizationResult.ok) {
+    assert.equal(mismatchedCanonicalizationResult.error.code, 'grant_mismatch')
+  }
+  assert.equal(mismatchedCanonicalizationVersion.executorCalls(), 0)
 
   const prepareFailures: Array<[string, ControlledMigrationFailureCode, ReturnType<typeof createFixture>, Parameters<typeof prepareControlledWorkflowMigration>[0], Partial<ControlledMigrationCapabilityDependencies> | undefined]> = []
   const missingGrant = createFixture()
@@ -491,6 +518,25 @@ async function main() {
     if (recovered.ok) assert.equal(recovered.status, 'failed')
     assert.equal(fixture.effects.filter(effect => effect === 'apply_candidate').length, 1)
   }
+
+  const blockedBeforeConsume = createFixture()
+  blockedBeforeConsume.behavior.blockBeforeDispatchConsume = true
+  const blockedBeforeConsumePrepared = await prepareOrThrow(blockedBeforeConsume)
+  const blockedBeforeConsumeResult = await executeControlledWorkflowMigration({
+    sourceId: blockedBeforeConsume.sourceId,
+    operationId: blockedBeforeConsumePrepared.operation.operationId,
+    mode: 'apply',
+    confirmationToken: blockedBeforeConsumePrepared.confirmationToken
+  }, blockedBeforeConsume.deps)
+  assert.equal(blockedBeforeConsumeResult.ok, true)
+  if (blockedBeforeConsumeResult.ok) {
+    assert.equal(blockedBeforeConsumeResult.status, 'failed')
+    assert.equal(blockedBeforeConsumeResult.operation.reasonCode, 'CANDIDATE_MUTATION_NOT_STARTED')
+  }
+  const blockedDispatch = findCapabilityMutationDispatchRecord(blockedBeforeConsumePrepared.operation.operationId, 'candidate', blockedBeforeConsume.dispatchStore)
+  assert.ok(blockedDispatch && !('ok' in blockedDispatch))
+  if (blockedDispatch && !('ok' in blockedDispatch)) assert.equal(blockedDispatch.status, 'reconciliation_required')
+  assert.equal(blockedBeforeConsume.effects.filter(effect => effect === 'apply_candidate').length, 1)
 
   const recordedBeforeTransition = createFixture()
   recordedBeforeTransition.behavior.lockOperationStoreAfterMutation = true

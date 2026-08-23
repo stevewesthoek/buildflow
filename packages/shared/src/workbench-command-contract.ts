@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { controlledWorkflowCanonicalizationVersionSchema } from './controlled-workflow-topology'
 
 export const RUN_WORKBENCH_DIRECT_COMMAND_KINDS = [
   'git_status_short',
@@ -255,7 +256,7 @@ export const controlledWorkflowTopologyManifestMetadataSchema = z.object({
   kind: z.literal('n8n-controlled-topology-migration'),
   workflow: z.object({
     id: shortIdSchema,
-    canonicalizationVersion: z.literal(1),
+    canonicalizationVersion: controlledWorkflowCanonicalizationVersionSchema,
     expectedLiveCanonicalSha256: sha256Schema,
     candidateCanonicalSha256: sha256Schema,
     rollbackCanonicalSha256: sha256Schema

@@ -5,6 +5,7 @@ build/
 .env
 .env.local
 .env.*.local
+apps/web/.env.local.BAK
 *.log
 .DS_Store
 .buildflow/
@@ -21,3 +22,17 @@ runtime/
 
 # Commit pnpm lockfile for reproducible Docker/GitHub Actions builds
 !pnpm-lock.yaml
+preflight-test-*/
+.build/
+
+# Local lifecycle/release worktrees; never part of release source cleanliness.
+lifecycle-hardening-work/
+phase-recovery-work/
+workbench-final-build/
+
+
+
+# Quiet-window/local diagnostic artifacts; preserve locally without polluting release cleanliness.
+artifacts/benchmarks/benchmark-phase-q-e14d6a18.json
+scripts/inspect-live-scheduler-state.mjs
+scripts/validation-live-load-fixture.mjs

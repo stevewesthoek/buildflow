@@ -6,6 +6,7 @@ import { finalizeWorkbenchPacketExecution, getWorkbenchPacketRecord } from './wo
 import { advanceWorkbenchRunAfterPacket, getAgentJob, updateAgentJob } from './agent-jobs'
 import { loadConfig } from './config'
 import { runSafeCommand, type SafeCommandResult } from './command-runner'
+import { appendAgentEvent, hasPacketValidationActivityEvent } from './agent-events'
 import { completeWorkbenchExecutionJournal, markWorkbenchExecutionJournalStep, prepareWorkbenchExecutionJournal, restoreWorkbenchExecutionJournal, type WorkbenchExecutionJournal } from './workbench-execution-journal'
 import { planWorkbenchPacketExecution } from './workbench-packet-plan'
 
@@ -157,6 +158,30 @@ export async function executeWorkbenchPacket(params: {
     }
   }
 
+  const validationEvidenceRef = (index: number) => `${record.packet.packetId}:validation:${index}`
+  const projectValidationStarted = (index: number, commandKind: string): void => {
+    const evidenceRef = validationEvidenceRef(index)
+    if (hasPacketValidationActivityEvent({
+      jobId: record.packet.runId,
+      sourceId: params.sourceId,
+      packetId: record.packet.packetId,
+      evidenceRef,
+      kind: 'validation_started'
+    })) return
+    appendAgentEvent({
+      jobId: record.packet.runId,
+      sourceId: params.sourceId,
+      type: 'validation_started',
+      activityKind: 'validation_started',
+      packetId: record.packet.packetId,
+      taskId: record.packet.taskId,
+      commandKind,
+      status: 'running',
+      evidenceRefs: [{ kind: 'validation', ref: evidenceRef }],
+      message: `Packet validation ${commandKind} started`
+    })
+  }
+
   const run = getAgentJob(record.packet.runId)
   const config = loadConfig()
   const sourceAllowsAutoCommit = (config?.autoCommitSourceIds || []).includes(params.sourceId)
@@ -261,8 +286,9 @@ export async function executeWorkbenchPacket(params: {
       markWorkbenchExecutionJournalStep(params.packetId, completedSteps)
     }
 
-    for (const validation of record.packet.validation || []) {
+    for (const [validationIndex, validation] of (record.packet.validation || []).entries()) {
       assertPacketControlAllowsExecution(params.packetId)
+      projectValidationStarted(validationIndex, validation.commandKind)
       const result = await runSafeCommand({
         sourceId: params.sourceId,
         sourceRoot: params.sourceRoot,
@@ -295,6 +321,7 @@ export async function executeWorkbenchPacket(params: {
         throw new Error('Automatic commit requires all targeted validations to pass.')
       }
 
+      projectValidationStarted(validationResults.length, 'security_scan_paths')
       const securityScan = await runSafeCommand({
         sourceId: params.sourceId,
         sourceRoot: params.sourceRoot,
@@ -418,6 +445,7 @@ export async function executeWorkbenchPacket(params: {
         planHash: planResult.plan.planHash,
         completedSteps,
         failedStep: completedSteps,
+        validationResults,
         errors: [
           { code: 'PACKET_EXECUTION_FAILED', message },
           { code: 'ROLLBACK_FAILED', message: rollbackMessage }
@@ -440,6 +468,7 @@ export async function executeWorkbenchPacket(params: {
         rolledBack,
         planHash: planResult.plan.planHash,
         completedSteps,
+        validationResults,
         errors: [{ code: controlAction === 'pause' ? 'PACKET_PAUSED' : 'PACKET_CANCELLED', message }]
       }
     }
@@ -460,6 +489,7 @@ export async function executeWorkbenchPacket(params: {
       planHash: planResult.plan.planHash,
       completedSteps,
       failedStep: completedSteps,
+      validationResults,
       errors: [{ code: 'PACKET_EXECUTION_FAILED', message }]
     }
   }

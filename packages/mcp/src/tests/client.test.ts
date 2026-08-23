@@ -4,6 +4,8 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { deriveWorkbenchMcpCredential } from '@workbench/shared/workbench-mcp-auth'
+import { installWorkbenchOwnerConfig } from '@workbench/shared/workbench-owner-config'
 import { createWorkbenchClient, sanitizeWorkbenchValue } from '../client.js'
 import type { WorkbenchToolContract } from '../contracts.js'
 
@@ -69,6 +71,131 @@ test('forwards one authenticated bounded request and removes private output fiel
   fs.rmSync(authFile.directory, { recursive: true })
 })
 
+test('translates a verified derived MCP credential to the raw owner token for native ingress', async () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-mcp-native-home-'))
+  const actionToken = 'native-owner-token-1234567890'
+  installWorkbenchOwnerConfig({ actionToken, homeDir })
+  const authFile = credentialFile(deriveWorkbenchMcpCredential(actionToken))
+  let calls = 0
+
+  await withServer((request, response) => {
+    calls++
+    assert.equal(request.headers.authorization, `Bearer ${actionToken}`)
+    response.setHeader('Content-Type', 'application/json')
+    response.end(JSON.stringify({ status: 'completed' }))
+  }, async baseUrl => {
+    const invoke = createWorkbenchClient({
+      baseUrl,
+      credentialFile: authFile.file,
+      transport: 'native_helper',
+      ownerConfigHomeDir: homeDir
+    })
+    const result = await invoke(readContract, { sourceId: 'source', mode: 'search', query: 'needle' })
+    assert.equal(result.ok, true)
+    assert.equal(calls, 1)
+  })
+
+  fs.rmSync(authFile.directory, { recursive: true })
+  fs.rmSync(homeDir, { recursive: true })
+})
+
+test('reloads transport selection for each invocation on one long-running MCP client', async () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-mcp-transport-home-'))
+  const actionToken = 'native-owner-token-1234567890'
+  const derivedCredential = deriveWorkbenchMcpCredential(actionToken)
+  installWorkbenchOwnerConfig({ actionToken, homeDir })
+  const authFile = credentialFile(derivedCredential)
+  const authorizations: string[] = []
+  let selectedTransport: 'typescript_agent' | 'native_helper' = 'typescript_agent'
+
+  await withServer((request, response) => {
+    authorizations.push(String(request.headers.authorization))
+    response.setHeader('Content-Type', 'application/json')
+    response.end(JSON.stringify({ status: 'completed' }))
+  }, async baseUrl => {
+    const invoke = createWorkbenchClient({
+      baseUrl,
+      credentialFile: authFile.file,
+      ownerConfigHomeDir: homeDir,
+      transportProvider: () => selectedTransport
+    })
+    assert.equal((await invoke(readContract, {})).ok, true)
+    selectedTransport = 'native_helper'
+    assert.equal((await invoke(readContract, {})).ok, true)
+  })
+
+  assert.deepEqual(authorizations, [`Bearer ${derivedCredential}`, `Bearer ${actionToken}`])
+  fs.rmSync(authFile.directory, { recursive: true })
+  fs.rmSync(homeDir, { recursive: true })
+})
+
+test('never sends the raw owner token when dynamic transport changes on a non-loopback origin', async () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-mcp-origin-home-'))
+  const actionToken = 'native-owner-token-1234567890'
+  const derivedCredential = deriveWorkbenchMcpCredential(actionToken)
+  installWorkbenchOwnerConfig({ actionToken, homeDir })
+  const authFile = credentialFile(derivedCredential)
+  const authorizations: string[] = []
+  let selectedTransport: 'typescript_agent' | 'native_helper' = 'typescript_agent'
+
+  await withServer((request, response) => {
+    authorizations.push(String(request.headers.authorization))
+    response.setHeader('Content-Type', 'application/json')
+    response.end(JSON.stringify({ status: 'completed' }))
+  }, async localBaseUrl => {
+    const port = new URL(localBaseUrl).port
+    for (const hostname of ['external.invalid', 'localhost']) {
+      selectedTransport = 'typescript_agent'
+      const invoke = createWorkbenchClient({
+        baseUrl: `http://${hostname}:${port}`,
+        credentialFile: authFile.file,
+        ownerConfigHomeDir: homeDir,
+        transportProvider: () => selectedTransport,
+        lookup: (_hostname, options, callback) => {
+          if (options.all) callback(null, [{ address: '127.0.0.1', family: 4 }])
+          else callback(null, '127.0.0.1', 4)
+        }
+      })
+      assert.equal((await invoke(readContract, {})).ok, true)
+      selectedTransport = 'native_helper'
+      const nativeResult = await invoke(readContract, {})
+      assert.equal(nativeResult.ok, false)
+      if (!nativeResult.ok) assert.equal(nativeResult.code, 'authentication_required')
+    }
+  })
+
+  assert.deepEqual(authorizations, [`Bearer ${derivedCredential}`, `Bearer ${derivedCredential}`])
+  fs.rmSync(authFile.directory, { recursive: true })
+  fs.rmSync(homeDir, { recursive: true })
+})
+
+test('rejects a mismatched derived MCP credential before contacting native ingress', async () => {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-mcp-native-home-'))
+  const actionToken = 'native-owner-token-1234567890'
+  installWorkbenchOwnerConfig({ actionToken, homeDir })
+  const authFile = credentialFile(deriveWorkbenchMcpCredential('different-owner-token-1234567890'))
+  let calls = 0
+
+  await withServer((_request, response) => {
+    calls++
+    response.end('{}')
+  }, async baseUrl => {
+    const invoke = createWorkbenchClient({
+      baseUrl,
+      credentialFile: authFile.file,
+      transport: 'native_helper',
+      ownerConfigHomeDir: homeDir
+    })
+    const result = await invoke(readContract, { sourceId: 'source', mode: 'search', query: 'needle' })
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.equal(result.code, 'authentication_required')
+    assert.equal(calls, 0)
+  })
+
+  fs.rmSync(authFile.directory, { recursive: true })
+  fs.rmSync(homeDir, { recursive: true })
+})
+
 test('preserves bounded migration operation projection while removing private operation fields', () => {
   const sanitized = sanitizeWorkbenchValue({
     status: 'needs_confirmation',
@@ -91,6 +218,8 @@ test('preserves bounded migration operation projection while removing private op
       },
       confirmationExpiresAt: '2026-07-19T19:30:00.000Z',
       rollbackReady: true,
+      protectedDomains: 'unverified',
+      protectedDomainMismatches: ['activation', 'settings'],
       confirmationHash: 'private-confirmation-hash',
       authorization: 'private-authorization',
       authorizationDigest: 'private-authorization-digest',
@@ -120,6 +249,8 @@ test('preserves bounded migration operation projection while removing private op
   assert.equal(binding.wrapperSha256, 'd'.repeat(64))
   assert.equal(operation.confirmationExpiresAt, '2026-07-19T19:30:00.000Z')
   assert.equal(operation.rollbackReady, true)
+  assert.equal(operation.protectedDomains, 'unverified')
+  assert.deepEqual(operation.protectedDomainMismatches, ['activation', 'settings'])
   for (const privateKey of [
     'confirmationHash', 'authorization', 'authorizationDigest', 'dispatchAuthorization',
     'leaseProof', 'operationRecord', 'environment', 'env', 'headers', 'credentials',

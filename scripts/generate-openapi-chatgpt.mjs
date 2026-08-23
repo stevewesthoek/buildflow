@@ -3,7 +3,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const BASE_URL = process.env.LOCAL_DASHBOARD_BASE_URL || 'http://127.0.0.1:3054'
+// GPT Actions run outside the owner Mac. The imported schema must advertise
+// the public tunnel, while LOCAL_DASHBOARD_BASE_URL remains an explicit
+// override for local contract tests.
+const BASE_URL = process.env.LOCAL_DASHBOARD_BASE_URL || process.env.PUBLIC_BASE_URL || 'https://workbench.prochat.tools'
 const OUTPUT_FILE = path.resolve(process.cwd(), 'docs/openapi.chatgpt.json')
 const FROM_SOURCE = process.argv.includes('--from-source')
 
@@ -32,31 +35,12 @@ function assertGeneratedSchema(schema) {
   for (const required of ['sessionId', 'default', 'workspace', 'current', 'repo']) {
     if (!sourceDescription.includes(required)) throw new Error(`Generated schema lacks source-selection guidance: ${required}`)
   }
-  const examples = commandContent?.examples || {}
-  const genericExample = examples.repositoryStatusCheck?.value
-  const workflowExample = examples.workflowExportConfirmation?.value
-  if (genericExample?.version !== 2 || typeof genericExample?.sessionId !== 'string'
-    || genericExample?.command?.sourceId !== 'workbench-example-source' || genericExample?.command?.commandKind !== 'git_status_short') {
-    throw new Error('Generated schema lacks the explicit generic source-scoped command example')
-  }
-  if (workflowExample?.command?.sourceId !== 'workflow-example-source' || workflowExample?.command?.commandKind !== 'n8n_workflow_export') {
-    throw new Error('Generated schema lacks the synthetic workflow export example')
-  }
-  const migrationExample = examples.controlledMigrationPrepare?.value
-  if (migrationExample?.command?.sourceId !== 'migration-example-source' || migrationExample?.command?.commandKind !== 'n8n_workflow_migration') {
-    throw new Error('Generated schema lacks the synthetic controlled migration example')
-  }
-  if (examples.controlledMigrationExecute?.value?.command?.migration?.phase !== 'execute' || examples.controlledMigrationStatus?.value?.command?.migration?.phase !== 'status') {
-    throw new Error('Generated schema lacks synthetic controlled migration execute/status examples')
+  if (Object.prototype.hasOwnProperty.call(commandContent, 'examples')) {
+    throw new Error('Generated schema must not expose synthetic command examples')
   }
   const migration = commandProperties.migration
   if (!migration || !Array.isArray(migration.oneOf) || migration.oneOf.length !== 3) {
     throw new Error('Generated schema lacks the strict controlled migration phases')
-  }
-  const placeholderSources = new Set(['default', 'workspace', 'current', 'repo'])
-  for (const [name, example] of Object.entries(examples)) {
-    const sourceId = typeof example?.value?.command?.sourceId === 'string' ? example.value.command.sourceId.toLowerCase() : ''
-    if (placeholderSources.has(sourceId)) throw new Error(`Generated schema example ${name} uses forbidden placeholder sourceId ${sourceId}`)
   }
 }
 

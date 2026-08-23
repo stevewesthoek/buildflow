@@ -27,12 +27,13 @@ If this project helps you, please **star it, fork it, try it on a real repo, ope
 ```mermaid
 flowchart LR
   You["You in ChatGPT"] --> GPT["Custom GPT"]
-  GPT --> Endpoint["Your Workbench endpoint"]
-  Endpoint --> Web["ProChat Workbench<br/>localhost:3054"]
-  Web --> Agent["Local agent<br/>localhost:3052"]
-  Agent --> Sources["Repos · notes · docs · skills"]
-  Agent --> Writes["Verified writes"]
-  Agent --> Commands["Safe commands"]
+  GPT --> Endpoint["Public Workbench endpoint"]
+  Endpoint --> Tunnel["HTTPS / optional tunnel"]
+  Tunnel --> Ingress["Native ingress<br/>127.0.0.1:3154"]
+  Ingress --> Core["Portable Workbench core"]
+  Core --> Sources["Connected repositories"]
+  Core --> Writes["Verified writes"]
+  Core --> Commands["Allowlisted commands"]
   GPT --> Assistant["Quick mode or Goal mode"]
   Assistant --> Flow["Plan · execute packets · validate · checkpoint · continue"]
 
@@ -40,7 +41,7 @@ flowchart LR
   classDef local fill:#ecfeff,stroke:#0891b2,color:#0f172a;
   classDef safe fill:#f0fdf4,stroke:#16a34a,color:#0f172a;
 
-  class You,GPT,Endpoint,Web,Agent,Assistant,Flow dark;
+  class You,GPT,Endpoint,Tunnel,Ingress,Core,Assistant,Flow dark;
   class Sources local;
   class Writes,Commands safe;
 ```
@@ -51,7 +52,8 @@ AI coding tools are powerful, but they often work in the wrong place.
 
 A remote model may not see your local repo. A browser chat may not be able to run your local tests. A CLI agent may have strong execution but weak long-term planning context. Copying files back and forth wastes time and breaks flow.
 
-ProChat Workbench bridges that gap with a local web app, local agent, and relay.
+ProChat Workbench bridges that gap with a native macOS supervisor, a portable
+local core, and a bounded HTTPS/API adapter.
 
 It keeps ChatGPT as the main interface while your own machine remains the source of truth. Your Custom GPT can ask Workbench for exact repo context, read the files it needs, write verified changes back to disk, run allowlisted validation commands, and keep a progress trail.
 
@@ -146,7 +148,11 @@ It supports:
 - confirmation-required operations
 - verified write results with `verified:true`
 
-The current repo-maintainer profile is intentionally practical for fast repo-assistant work. It can edit normal app code, tests, docs, scripts, package manifests, framework config, Docker files, Prisma files, migrations, and source-controlled project assets without stopping for every routine change.
+The connected-repository policy is intentionally practical for engineering
+work. It permits normal files anywhere inside an explicitly connected source;
+the centralized deny policy blocks secrets, credentials, Git internals,
+protected security material, generated/runtime output, and paths outside the
+source. Folder allowlists are not the authorization model.
 
 A write is not considered successful unless Workbench verifies it on disk.
 
@@ -177,32 +183,39 @@ Workbench does **not** expose arbitrary shell execution. More command capability
 
 Named security scans use syntax-aware handling for JavaScript and TypeScript: inert comments, strings, fixtures, and source-inspection assertions are ignored, while executable `fetch` calls, prohibited clients/imports, and high-confidence network behavior remain findings. Results are projected into bounded, redacted evidence.
 
-### Fast Repo Assistant workflow
+### Quick and Goal modes
 
-Workbench has one Custom GPT workflow: fast repo assistance.
+Workbench supports Quick mode for focused work and Goal mode for substantial
+work built from persistent state and bounded packets.
 
-ChatGPT does the reasoning and coding. Workbench provides exact local context, guarded file writes, targeted validation, and explicit Git operations. It does not run a separate autonomous agent loop.
+ChatGPT remains the reasoning layer. Workbench provides exact local context,
+guarded file writes, targeted validation, persistent run state, bounded packet
+execution, compact evidence, and explicit Git operations. Workbench does not
+become an unrestricted autonomous agent runtime.
 
 Use this default flow:
 
 ```text
 Question -> minimal exact read -> answer
 Small edit -> exact read -> patch -> smallest validation -> optional commit -> stop
-Large goal -> concise plan -> first safe slice -> resume point
+Large goal -> persist plan -> bounded packet -> validate -> checkpoint -> continue when permitted
 ```
 
 Recommended task budget:
 
 ```text
-Default: 1 task per response
-Clear small batch: up to 2 tightly related tasks
-Hard action budget: 3 Workbench actions per response, preferably 1-2
+Default: one bounded task or packet
+Clear small batch: tightly related tasks with explicit acceptance
+Action requests remain bounded by the public route deadlines and payload budgets
 Push: only when explicitly requested
 ```
 
 This keeps ChatGPT powerful while avoiding the main latency failure mode: long chains of model reasoning plus action calls.
 
-Workbench should not move open-ended planning, coding, review, or repair into a server-side state machine. For speed, Workbench should only batch deterministic mechanical work when it reduces action chatter, such as exact multi-file reads, write preflight, targeted validation, compact diagnostics, and commit-specific-paths operations.
+Open-ended reasoning remains with ChatGPT. Workbench may persist goals, runs,
+packets, checkpoints, validation evidence, and bounded continuation state so
+deterministic local work can resume safely without turning the public action
+surface into a long-running request.
 
 ### Persistent resume and handoff
 
@@ -213,7 +226,7 @@ The Custom GPT should update the handoff after each meaningful chunk with comple
 That means a later conversation can say:
 
 ```text
-Resume Workbench work on source <sourceId> from the progress document.
+Resume Workbench work on <repository name> from the progress document.
 ```
 
 Workbench can then read the handoff document, verify source scope and git status, and continue from the next unchecked task.
@@ -224,12 +237,12 @@ Workbench cannot directly rename ChatGPT’s native conversation titles, batch n
 
 The practical workaround is to use one source per conversation, start prompts with the source name, and rely on persistent repo-local handoff documents. If your ChatGPT client supports manually renaming a conversation, rename it to the repo or goal.
 
-## Effective Fast Repo Assistant Prompts
+## Effective Workbench prompts
 
 Use this pattern for serious work:
 
 ```text
-Use Workbench on source <sourceId>.
+Activate <repository name>.
 
 Goal:
 <describe the feature, fix, refactor, or app you want built>
@@ -251,7 +264,7 @@ Commit only explicit paths. Push only if I explicitly ask.
 ### Example: build a feature
 
 ```text
-Use Workbench on source tradebot.
+Activate tradebot.
 
 Goal:
 Implement the missing failing endpoint fixes and make the API test suite pass.
@@ -264,7 +277,7 @@ Do not ask for intermediate approval unless Workbench requires confirmation. Com
 ### Example: build a module
 
 ```text
-Use Workbench on source my-app.
+Activate my-app.
 
 Goal:
 Build a complete project intake module with pages, API routes, validation, tests, and documentation.
@@ -275,7 +288,7 @@ Use repo-local conventions. Inspect before writing. Complete the first safe slic
 ### Example: refactor safely
 
 ```text
-Use Workbench on source prochat.
+Activate prochat.
 
 Goal:
 Refactor the account settings flow into a cleaner service/module structure without changing external behavior.
@@ -286,7 +299,7 @@ Document the current structure and risks, plan the refactor, complete the first 
 ### Example: improve a knowledge repo
 
 ```text
-Use Workbench on source brain.
+Activate brain.
 
 Goal:
 Clean up my AI skills folder, improve naming consistency, add README files where useful, and create an index of the most important skills.
@@ -297,7 +310,7 @@ Complete a bounded batch, but stop if Workbench blocks access to private or secr
 ### Example: prepare a commit
 
 ```text
-Use Workbench on source buildflow.
+Activate workbench.
 
 Goal:
 Improve the dashboard source picker onboarding flow.
@@ -309,9 +322,10 @@ Validate the change, commit it with a clear message, and stop before pushing unl
 
 ProChat Workbench currently includes:
 
-- local dashboard on `http://127.0.0.1:3054/dashboard`
-- local agent on `http://127.0.0.1:3052`
-- relay support for reachable Custom GPT endpoints
+- native macOS GUI, helper, and bundled portable core
+- native API ingress on loopback `127.0.0.1:3154`
+- public HTTPS deployment at `https://workbench.prochat.tools`
+- compatibility HTTP stack only for explicit rollback
 - source management for repos, notes, docs, skills, and local folders
 - recursive repository discovery from a root folder
 - local indexing and search
@@ -320,7 +334,7 @@ ProChat Workbench currently includes:
 - read batching for large files and large response budgets
 - safe write mode controls
 - dry-run and preflight write checks
-- practical repo-maintainer write permissions for app, docs, scripts, config, migrations, assets, and package manifests
+- full read/write scope inside explicitly connected repositories, with a centralized protected-resource deny policy
 - confirmation-gated sensitive writes
 - verified file operations
 - local activity feedback for Custom GPT actions
@@ -386,51 +400,55 @@ The goal is not to give a Custom GPT unlimited machine control. The goal is to g
 
 ## Quick start
 
-ProChat Workbench runs on your machine.
+For the owner-local macOS runtime, use the supported lifecycle runbook rather
+than starting compatibility services manually.
 
 ```bash
 pnpm install
-pnpm auth:configure -- --from-env-file /absolute/path/to/owner-only-existing.env
-pnpm local:restart
+pnpm macos:doctor
 ```
 
-`pnpm auth:configure` atomically migrates an existing canonical or legacy action token into the fixed owner-local `~/.config/workbench/runtime.env` source without printing it. The input must be an absolute owner-only regular file. `pnpm local:restart` validates that owner source before stopping a healthy runtime, starts only Workbench-owned agent, relay, and web services, and requires unified health plus an authenticated status request before reporting success. Authentication is installation-scoped and does not depend on the Workbench worktree or selected repository source.
+Build, install, restart, and release verification are defined in
+[`docs/operations/workbench-lifecycle-runbook.md`](docs/operations/workbench-lifecycle-runbook.md).
+The Action Token remains owner-local and the public Custom GPT endpoint remains
+the HTTPS service; the macOS application supplies the local connected-source
+runtime but is not itself the Custom GPT server.
 
-Then open:
+For local operator inspection, the native GUI is the primary surface. The
+native ingress is:
 
 ```text
-http://127.0.0.1:3054/dashboard
+http://127.0.0.1:3154
 ```
 
 The dashboard guides you through setup:
 
-1. confirm the local agent is running
-2. copy your OpenAPI endpoint
-3. add or discover local sources
-4. index sources
-5. choose active context
-6. review write mode
-7. create a local plan
-8. connect your Custom GPT
+1. confirm the GUI/helper/native host topology is healthy
+2. confirm connected repositories are visible
+3. verify the public OpenAPI endpoint when using Custom GPT Actions
+4. activate a repository by its human-readable name
+5. keep the returned source locked for the conversation
 
 ## Connect a Custom GPT
 
 In the Custom GPT editor, import the Workbench action schema from your own endpoint.
 
-Use one of these:
+Use the checked-in schema for inspection, and use the deployed HTTPS schema
+for Custom GPT import:
 
 ```text
 Local reference file:
 docs/openapi.chatgpt.json
 
-Local running endpoint:
-http://127.0.0.1:3054/api/openapi
+Owner-local inspection endpoint:
+http://127.0.0.1:3154/api/openapi
 
-Endpoint for a Custom GPT:
-https://<your-domain-or-tunnel>/api/openapi
+Canonical Custom GPT endpoint:
+https://workbench.prochat.tools/api/openapi
 ```
 
-Use your own tunnel, reverse proxy, or domain. The public GitHub version is self-hosted; your Custom GPT should call an endpoint you control.
+Another deployment may use its own HTTPS domain or tunnel. A Custom GPT must
+not import a localhost or native-port server URL.
 
 Then add the instructions from:
 
@@ -453,7 +471,9 @@ Read the README and suggest improvements.
 For implementation work, be explicit:
 
 ```text
-Use Workbench on source <sourceId>. Complete up to 3 small tasks, validate and commit each one, then stop with the next task.
+Activate Workbench, select the intended repository by name, and complete one
+bounded task. Validate and commit only the explicit paths, then stop unless I
+ask you to continue.
 ```
 
 For protected work, add boundaries:
@@ -491,7 +511,9 @@ ProChat Workbench exposes exactly five Custom GPT actions:
 - `commitWorkbenchChanges`
 - `runWorkbenchCommand`
 
-These actions let ChatGPT inspect, read, write, validate, commit, and continue a bounded Fast Repo Assistant flow without pretending it has unrestricted local access.
+These actions let ChatGPT inspect, read, write, validate, commit, and continue
+bounded Quick or Goal mode work without pretending it has unrestricted local
+access.
 
 There is no Custom GPT action for changing dashboard active context. The GPT locks a `sourceId` conversationally after `getWorkbenchStatus?include=sources` and passes that explicit `sourceId` on every repo action. Legacy `/api/actions/agent/*` polling routes are retired and must not be imported into the GPT schema.
 
@@ -520,7 +542,8 @@ Use it to reason, plan, inspect, read, write verified changes, run safe validati
 Useful docs:
 
 - [`docs/product/README.md`](docs/product/README.md) — product index
-- [`docs/product/agent-mode.md`](docs/product/agent-mode.md) — Bounded Sequential Mode
+- [`docs/product/philosophy.md`](docs/product/philosophy.md) — Workbench philosophy
+- [`docs/product/strategy.md`](docs/product/strategy.md) — current architecture and operating modes
 - [`docs/product/chatgpt-first-workflow.md`](docs/product/chatgpt-first-workflow.md) — ChatGPT-first strategy
 - [`docs/product/public-scope.md`](docs/product/public-scope.md) — public Workbench scope
 - [`docs/product/local/feature-scope.md`](docs/product/local/feature-scope.md) — Local feature scope

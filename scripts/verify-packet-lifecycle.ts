@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
-import {
+let testConfigDir = String(process.env.WORKBENCH_CONFIG_DIR || '')
+if (!testConfigDir || !fs.existsSync(testConfigDir)) {
+  testConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-packet-lifecycle-'))
+  process.env.WORKBENCH_CONFIG_DIR = testConfigDir
+}
+
+const {
   reserveWorkbenchPacket,
   claimNextWorkbenchPacket,
   compactWorkbenchPacketLeaseRecord,
@@ -12,15 +19,16 @@ import {
   finalizeWorkbenchPacketExecution,
   recoverStaleWorkbenchPacketLeases,
   controlWorkbenchPacketsForRun
-} from '../packages/cli/src/agent/workbench-packet-store'
-import { startAgentJob, getAgentJob } from '../packages/cli/src/agent/agent-jobs'
-import { closeWorkbenchRun } from '../packages/cli/src/agent/workbench-run-close'
-
-const testConfigDir = String(process.env.WORKBENCH_CONFIG_DIR || '')
-if (!testConfigDir || !fs.existsSync(testConfigDir)) {
-  console.error('WORKBENCH_CONFIG_DIR must be set to an existing temp directory')
-  process.exit(1)
-}
+} = require('../packages/cli/src/agent/workbench-packet-store')
+const {
+  advanceWorkbenchRunAfterPacket,
+  createWorkbenchRun,
+  getAgentJob,
+  startAgentJob,
+  updateAgentJob
+} = require('../packages/cli/src/agent/agent-jobs')
+const { listWorkbenchActivity } = require('../packages/cli/src/agent/agent-events')
+const { closeWorkbenchRun } = require('../packages/cli/src/agent/workbench-run-close')
 
 function makePacket(packetId: string, runId = 'run-test-001', sourceId = 'source-test') {
   return {
@@ -264,6 +272,90 @@ async function testCompactLeaseRecord() {
   console.log('  ✓ compact lease responses exclude packet bodies and control token visibility')
 }
 
+async function testModernRunLifecycleActivity() {
+  const sourceId = 'source-lifecycle-activity'
+  const created = createWorkbenchRun({ sourceId, goal: 'Verify lifecycle activity', autoCommit: false, autoPush: false })
+  assert.equal(created.created, true)
+  const run = created.run
+  const retry = createWorkbenchRun({ sourceId, goal: 'Verify lifecycle activity', autoCommit: false, autoPush: false })
+  assert.equal(retry.created, false)
+  assert.equal(retry.run.id, run.id)
+
+  const started = listWorkbenchActivity({ runId: run.id, sourceId, limit: 20 }).projection.events
+    .filter(event => event.kind === 'run_started')
+  assert.equal(started.length, 1)
+  assert.equal(started[0]?.occurredAt, run.createdAt)
+
+  const active = updateAgentJob(run.id, {
+    activeTaskId: 'task-001',
+    roadmapPhases: [{
+      id: 'phase-activity',
+      title: 'Activity',
+      status: 'running',
+      tasks: [
+        {
+          id: 'task-001',
+          title: 'First task',
+          status: 'running',
+          description: 'First task',
+          acceptanceCriteria: ['done'],
+          validation: ['focused verifier']
+        },
+        {
+          id: 'task-002',
+          title: 'Skipped task',
+          status: 'skipped',
+          description: 'Skipped task',
+          acceptanceCriteria: ['skipped'],
+          validation: ['focused verifier']
+        }
+      ]
+    }]
+  })
+  assert.equal(active.activeTaskId, 'task-001')
+
+  const advanced = advanceWorkbenchRunAfterPacket({
+    runId: run.id,
+    taskId: 'task-001',
+    packetId: 'pkt-lifecycle-activity',
+    completedAt: '2026-08-17T08:00:00.000Z'
+  })
+  assert.equal(advanced.status, 'completed')
+
+  const events = listWorkbenchActivity({ runId: run.id, sourceId, limit: 20 }).projection.events
+  const taskCompleted = events.filter(event => event.kind === 'task_completed')
+  assert.equal(taskCompleted.length, 1)
+  assert.equal(taskCompleted[0]?.taskId, 'task-001')
+  assert.equal(taskCompleted[0]?.packetId, 'pkt-lifecycle-activity')
+
+  const progress = events.find(event => event.kind === 'run_progress')
+  assert(progress)
+  assert.deepEqual(progress.progress, { completed: 2, total: 2, percent: 100, confidence: 'exact' })
+  assert.equal(progress.taskId, 'task-001')
+  assert.equal(progress.packetId, 'pkt-lifecycle-activity')
+  assert(events.some(event => event.kind === 'run_completed'))
+
+  const failedSourceId = 'source-lifecycle-failed-packet'
+  const failedRun = createWorkbenchRun({ sourceId: failedSourceId, goal: 'Verify failed packet isolation', autoCommit: false, autoPush: false }).run
+  const failedPacket = makePacket('pkt-lifecycle-failed', failedRun.id, failedSourceId)
+  reserveWorkbenchPacket({ packet: failedPacket, exactPaths: ['failed.md'] })
+  const failedClaim = claimNextWorkbenchPacket({ workerId: 'worker-lifecycle-failed', packetId: failedPacket.packetId })
+  assert.equal(failedClaim.ok, true)
+  if (failedClaim.ok) {
+    finalizeWorkbenchPacketExecution({
+      packetId: failedPacket.packetId,
+      leaseToken: failedClaim.record.leaseToken!,
+      status: 'failed',
+      failureReason: 'fixture rollback'
+    })
+  }
+  const failedEvents = listWorkbenchActivity({ runId: failedRun.id, sourceId: failedSourceId, limit: 20 }).projection.events
+  assert.equal(failedEvents.some(event => event.kind === 'task_completed'), false)
+  assert.equal(failedEvents.some(event => event.kind === 'run_progress'), false)
+  assert.equal(failedEvents.some(event => event.kind === 'run_completed'), false)
+  console.log('  ✓ modern run lifecycle activity is exact, idempotent, and rollback-safe')
+}
+
 async function testCloseRunRetiresPackets() {
   const sourceId = 'source-close-run'
   const run = startAgentJob({ sourceId, goal: 'verify close_run packet retirement', autoCommit: false, autoPush: false })
@@ -289,6 +381,10 @@ async function testCloseRunRetiresPackets() {
   assert.deepEqual(closed.nextActions, [])
   assert.deepEqual(closed.resumeInstructions, [])
   assert.equal(getAgentJob(run.id)?.status, 'completed')
+  const closeEvents = listWorkbenchActivity({ runId: run.id, sourceId, limit: 20 }).projection.events
+  const closeCompletion = closeEvents.find(event => event.kind === 'run_completed' && event.summary === 'All intended work is complete.')
+  assert(closeCompletion)
+  assert.equal(closeCompletion.status, 'completed')
   assert.equal(getWorkbenchPacketRecord(queuedPacket.packetId)?.status, 'cancelled')
   assert.equal(getWorkbenchPacketRecord(pausedPacket.packetId)?.status, 'cancelled')
   assert.equal(getWorkbenchPacketRecord(runningPacket.packetId)?.status, 'running')
@@ -346,6 +442,7 @@ async function main() {
   await testFinalizationClearsLease()
   await testTokenRedaction()
   await testCompactLeaseRecord()
+  await testModernRunLifecycleActivity()
   await testCloseRunRetiresPackets()
   await testIdempotentReservation()
   console.log('All packet lifecycle tests passed.')

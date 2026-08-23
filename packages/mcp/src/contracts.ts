@@ -1,7 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { Ajv, type ValidateFunction } from 'ajv'
-import { sessionAwareRunWorkbenchCommandRequestSchema } from '@workbench/shared'
+import {
+  sessionAwareRunWorkbenchCommandRequestSchema,
+  type RunWorkbenchDirectCommandKind
+} from '@workbench/shared'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 
 export const WORKBENCH_TOOL_NAMES = [
@@ -202,12 +205,64 @@ function mergeObjectSchemas(schemas: JsonSchema[]): JsonSchema {
   }
 }
 
-export function buildRunWorkbenchCommandDiscoverySchema(): JsonSchema {
+function filterSchemaByCommandKinds(
+  schema: JsonSchema,
+  admittedCommandKinds: ReadonlySet<RunWorkbenchDirectCommandKind>
+): JsonSchema | undefined {
+  if (!isObjectRecord(schema)) return schema
+  const projected: Record<string, unknown> = { ...schema }
+
+  if (isObjectRecord(schema.properties)) {
+    const properties: Record<string, unknown> = { ...schema.properties }
+    const commandKind = properties.commandKind
+    if (isObjectRecord(commandKind) && Array.isArray(commandKind.enum)) {
+      const admitted = commandKind.enum.filter(
+        (value): value is RunWorkbenchDirectCommandKind =>
+          typeof value === 'string' && admittedCommandKinds.has(value as RunWorkbenchDirectCommandKind)
+      )
+      if (admitted.length === 0) return undefined
+      properties.commandKind = { ...commandKind, enum: admitted }
+    } else if (Object.hasOwn(properties, 'validationJobOperation')) {
+      return undefined
+    }
+    if (isObjectRecord(properties.command)) {
+      const filteredCommand = filterSchemaByCommandKinds(properties.command, admittedCommandKinds)
+      if (!filteredCommand) return undefined
+      properties.command = filteredCommand
+    }
+    projected.properties = properties
+  }
+
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    if (!Array.isArray(schema[key])) continue
+    const admittedBranches = (schema[key] as JsonSchema[])
+      .map(branch => filterSchemaByCommandKinds(branch, admittedCommandKinds))
+      .filter((branch): branch is JsonSchema => branch !== undefined)
+    if (admittedBranches.length === 0) return undefined
+    projected[key] = admittedBranches
+  }
+  if (Array.isArray(schema.allOf)) {
+    const admittedBranches = (schema.allOf as JsonSchema[])
+      .map(branch => filterSchemaByCommandKinds(branch, admittedCommandKinds))
+    if (admittedBranches.some(branch => branch === undefined)) return undefined
+    projected.allOf = admittedBranches as JsonSchema[]
+  }
+
+  return projected
+}
+
+export function buildRunWorkbenchCommandDiscoverySchema(
+  admittedCommandKinds?: ReadonlySet<RunWorkbenchDirectCommandKind>
+): JsonSchema {
   const strictSchema = zodToJsonSchema(sessionAwareRunWorkbenchCommandRequestSchema, {
     target: 'openApi3',
     $refStrategy: 'none'
   }) as JsonSchema
-  return mergeObjectSchemas([strictSchema])
+  const scopedSchema = admittedCommandKinds
+    ? filterSchemaByCommandKinds(strictSchema, admittedCommandKinds)
+    : strictSchema
+  if (!scopedSchema) throw new Error('Workbench MCP runWorkbenchCommand scope admits no command kinds.')
+  return mergeObjectSchemas([scopedSchema])
 }
 
 function statusInputSchema(operation: OpenApiOperation): JsonSchema {

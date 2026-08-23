@@ -78,8 +78,8 @@ function readJsonArray<T>(filePath: string): T[] {
 export class Indexer {
   private docs: IndexedDoc[] = []
 
-  constructor() {
-    this.loadFromDisk()
+  constructor(sourceIds?: string[]) {
+    this.loadFromDisk(sourceIds)
   }
 
   async buildIndex(): Promise<void> {
@@ -287,8 +287,15 @@ export class Indexer {
     }
   }
 
-  private loadFromDisk(): void {
+  private loadFromDisk(sourceIds?: string[]): void {
     try {
+      const selectedSourceIds = Array.isArray(sourceIds)
+        ? Array.from(new Set(sourceIds.filter(sourceId => typeof sourceId === 'string' && sourceId.trim().length > 0)))
+        : []
+      if (selectedSourceIds.length > 0) {
+        this.docs = selectedSourceIds.flatMap(sourceId => readJsonArray<IndexedDoc>(getSourceIndexPath(sourceId)))
+        return
+      }
       const indexDir = getIndexDir()
       if (fs.existsSync(indexDir)) {
         const sourceIndexFiles = fs.readdirSync(indexDir).filter(file => file.endsWith('.json'))
@@ -311,5 +318,23 @@ export class Indexer {
 
   getDocs(): IndexedDoc[] {
     return this.docs
+  }
+}
+
+/// Reads only the small v2 manifest. Status and GUI source hydration must not
+/// deserialize every indexed document merely to report a count.
+export function getIndexedDocumentCountFromDisk(): number {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(getIndexPath(), 'utf-8')) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 0
+    const sources = (parsed as { sources?: unknown }).sources
+    if (!Array.isArray(sources)) return 0
+    return sources.reduce((total, source) => {
+      if (!source || typeof source !== 'object') return total
+      const count = (source as { count?: unknown }).count
+      return Number.isSafeInteger(count) && (count as number) >= 0 ? total + (count as number) : total
+    }, 0)
+  } catch {
+    return 0
   }
 }

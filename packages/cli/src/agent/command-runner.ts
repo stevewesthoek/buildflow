@@ -2,13 +2,22 @@ import fs from 'fs'
 import { createHash } from 'crypto'
 import { execFileSync, spawn } from 'child_process'
 import path from 'path'
-import { normalizeRepoRelativePath, validateWriteTarget } from './safe-access'
+import { buildWriteConfirmationToken, normalizeRepoRelativePath, validateWriteTarget } from './safe-access'
 import { runN8nWorkflowExportCapability } from './n8n-workflow-export'
 
 const MAX_OUTPUT_BYTES = 60_000
 const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_TIMEOUT_MS = 300_000
 const TEXT_SCAN_MAX_BYTES = 1_000_000
+const MACOS_GUI_COMMAND_PATHS = ['/opt/homebrew/bin', '/usr/local/bin']
+
+function getGuardedCommandPath(): string {
+  const existing = (process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  const additional = process.platform === 'darwin'
+    ? MACOS_GUI_COMMAND_PATHS.filter(candidate => fs.existsSync(candidate) && !existing.includes(candidate))
+    : []
+  return [...additional, ...existing].join(path.delimiter)
+}
 
 export type SafeCommandKind =
   | 'git_status_short'
@@ -107,6 +116,8 @@ export type SafeCommandRequest = {
   persistedValidation?: boolean
   confirmedByUser?: boolean
   confirmationToken?: string
+  /** Internal portable-host cancellation only; never accepted from a public payload. */
+  signal?: AbortSignal
 }
 
 export type SafeCommandResult = {
@@ -299,9 +310,21 @@ function hasTrackedIndexEntry(sourceRoot: string, relativePath: string): boolean
   }
 }
 
-function assertStaticStageApproved(request: SafeCommandRequest, relativePath: string): void {
-  if (hasCommandConfirmation(request, 'stage_existing_static_asset')) return
-  throw new Error(relativePath + ' requires explicit confirmation: stage_existing_static_asset')
+type GitApprovalRequirement = {
+  reason: string
+  paths: string[]
+  confirmationToken: string
+  satisfied: boolean
+}
+
+function staticStageApprovalRequirement(request: SafeCommandRequest, relativePath: string): GitApprovalRequirement {
+  const reason = 'stage_existing_static_asset'
+  return {
+    reason,
+    paths: [relativePath],
+    confirmationToken: commandConfirmationToken(request, reason),
+    satisfied: hasCommandConfirmation(request, reason)
+  }
 }
 
 function staticAssetMetadata(sourceRoot: string, relativePath: string): { path: string; bytes: number; sha256: string; textLike: boolean; validation: string } {
@@ -324,15 +347,16 @@ function staticAssetMetadata(sourceRoot: string, relativePath: string): { path: 
   }
 }
 
-function assertStaticStageAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string, status?: string): void {
+function assertStaticStageAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string, status?: string): GitApprovalRequirement {
   if (!isStaticStagePath(relativePath)) throw new Error('Static asset type or root is unsupported: ' + relativePath)
-  assertStaticStageApproved(request, relativePath)
+  const requirement = staticStageApprovalRequirement(request, relativePath)
   const trackedInIndex = hasTrackedIndexEntry(sourceRoot, relativePath)
   const stagedAddition = Boolean(status && status.startsWith('A'))
   const untrackedExisting = !trackedInIndex && fs.existsSync(path.resolve(sourceRoot, relativePath))
   const textLike = isTextLikeStaticStagePath(relativePath)
   if (!untrackedExisting && !stagedAddition && !textLike) throw new Error('Static asset modification is blocked: ' + relativePath)
   staticAssetMetadata(sourceRoot, relativePath)
+  return requirement
 }
 
 function buildStaticAssetMetadata(sourceRoot: string, paths: string[]): Array<{ path: string; bytes: number; sha256: string; textLike: boolean; validation: string }> {
@@ -461,21 +485,40 @@ function assertExtensionlessGitTextPath(sourceRoot: string, relativePath: string
   if (sample.includes(0)) throw new Error(`Binary path is blocked: ${relativePath}`)
 }
 
-function assertGitWriteAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string, changeType: 'patch' | 'delete_file'): void {
-  const validation = validateWriteTarget({
+function assertGitWriteAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string, changeType: 'patch' | 'delete_file'): GitApprovalRequirement | undefined {
+  const validate = (confirmedByUser?: boolean, confirmationToken?: string) => validateWriteTarget({
     sourceId: request.sourceId,
     sourceRoot,
     requestedPath: relativePath,
     changeType,
-    confirmedByUser: request.confirmedByUser,
-    confirmationToken: request.confirmationToken
+    confirmedByUser,
+    confirmationToken
   })
-  if (validation.ok === true) return
-  const blocked = validation as Extract<typeof validation, { ok: false }>
-  if (blocked.error.code === 'REQUIRES_EXPLICIT_CONFIRMATION') {
-    throw new Error(`${relativePath} requires explicit confirmation: ${blocked.error.code}`)
+  const validation = validate(request.confirmedByUser, request.confirmationToken)
+  if (validation.ok === true) {
+    const unconfirmed = validate(false, undefined)
+    if (unconfirmed.ok === true) return undefined
+    const unconfirmedBlocked = unconfirmed as Extract<typeof unconfirmed, { ok: false }>
+    const confirmedProbe = validate(true, undefined)
+    if (confirmedProbe.ok !== true) return undefined
+    return {
+      reason: unconfirmedBlocked.error.reason,
+      paths: [relativePath],
+      confirmationToken: buildWriteConfirmationToken(request.sourceId, changeType, relativePath),
+      satisfied: true
+    }
   }
-  if (blocked.error.code === 'PATH_NOT_ALLOWED' && !path.extname(relativePath) && isTrackedInIndexOrHead(sourceRoot, relativePath)) return
+  const blocked = validation as Extract<typeof validation, { ok: false }>
+  if (blocked.error.code === 'PATH_NOT_ALLOWED' && !path.extname(relativePath) && isTrackedInIndexOrHead(sourceRoot, relativePath)) return undefined
+  const confirmedProbe = validate(true, undefined)
+  if (blocked.error.code === 'REQUIRES_EXPLICIT_CONFIRMATION' || confirmedProbe.ok === true) {
+    return {
+      reason: blocked.error.reason,
+      paths: [relativePath],
+      confirmationToken: buildWriteConfirmationToken(request.sourceId, changeType, relativePath),
+      satisfied: false
+    }
+  }
   throw new Error(`${relativePath} is blocked by write policy: ${blocked.error.code}`)
 }
 
@@ -491,44 +534,40 @@ function getStagedPathStatuses(sourceRoot: string): Array<{ status: string; path
   }).filter(item => item.path)
 }
 
-function assertStagePathAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string): void {
+function assertStagePathAllowed(request: SafeCommandRequest, sourceRoot: string, relativePath: string): GitApprovalRequirement | undefined {
   const trackedDeletion = isTrackedDeletionInWorktree(sourceRoot, relativePath)
   assertGitFilesystemPathAllowed(sourceRoot, relativePath, trackedDeletion)
   if (trackedDeletion) {
     assertExtensionlessGitTextPath(sourceRoot, relativePath)
-    assertGitWriteAllowed(request, sourceRoot, relativePath, 'delete_file')
-    return
+    return assertGitWriteAllowed(request, sourceRoot, relativePath, 'delete_file')
   }
   if (isStaticStagePath(relativePath)) {
-    assertStaticStageAllowed(request, sourceRoot, relativePath)
-    return
+    return assertStaticStageAllowed(request, sourceRoot, relativePath)
   }
   if (isStaticStageRootPath(relativePath) && !isTrackedTextSourceUnderStaticRoot(request, sourceRoot, relativePath)) {
     throw new Error('Static asset type or root is unsupported: ' + relativePath)
   }
   if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error('Binary path is blocked: ' + relativePath)
   assertExtensionlessGitTextPath(sourceRoot, relativePath)
-  assertGitWriteAllowed(request, sourceRoot, relativePath, 'patch')
+  return assertGitWriteAllowed(request, sourceRoot, relativePath, 'patch')
 }
 
-function assertCommitPathAllowed(request: SafeCommandRequest, sourceRoot: string, item: { status: string; path: string }): void {
+function assertCommitPathAllowed(request: SafeCommandRequest, sourceRoot: string, item: { status: string; path: string }): GitApprovalRequirement | undefined {
   const deletion = item.status.startsWith('D')
   assertGitFilesystemPathAllowed(sourceRoot, item.path, deletion && isTrackedInIndexOrHead(sourceRoot, item.path))
   if (deletion) {
     assertExtensionlessGitTextPath(sourceRoot, item.path)
-    assertGitWriteAllowed(request, sourceRoot, item.path, 'delete_file')
-    return
+    return assertGitWriteAllowed(request, sourceRoot, item.path, 'delete_file')
   }
   if (isStaticStagePath(item.path)) {
-    assertStaticStageAllowed(request, sourceRoot, item.path, item.status)
-    return
+    return assertStaticStageAllowed(request, sourceRoot, item.path, item.status)
   }
   if (isStaticStageRootPath(item.path) && !isTrackedTextSourceUnderStaticRoot(request, sourceRoot, item.path)) {
     throw new Error('Static asset type or root is unsupported: ' + item.path)
   }
   if (BINARY_EXTENSIONS.has(path.extname(item.path).toLowerCase())) throw new Error('Binary path is blocked: ' + item.path)
   assertExtensionlessGitTextPath(sourceRoot, item.path)
-  assertGitWriteAllowed(request, sourceRoot, item.path, 'patch')
+  return assertGitWriteAllowed(request, sourceRoot, item.path, 'patch')
 }
 
 function commandConfirmationToken(request: SafeCommandRequest, reason: string): string {
@@ -540,8 +579,27 @@ function hasCommandConfirmation(request: SafeCommandRequest, reason: string): bo
   return request.confirmedByUser === true || request.confirmationToken === commandConfirmationToken(request, reason)
 }
 
-function needsConfirmationResult(request: SafeCommandRequest, reason: string): SafeCommandResult {
+function approvalRequirementMetadata(requirements: GitApprovalRequirement[]): Array<{ reason: string; paths: string[] }> {
+  return requirements.map(requirement => ({ reason: requirement.reason, paths: [...requirement.paths] }))
+}
+
+function withApprovalRequirementDetails(result: SafeCommandResult, requirements: GitApprovalRequirement[]): SafeCommandResult {
+  if (requirements.length === 0) return result
+  const existingDetails = result.details && typeof result.details === 'object' && !Array.isArray(result.details)
+    ? result.details as Record<string, unknown>
+    : {}
   return {
+    ...result,
+    reason: result.reason || requirements[0]?.reason,
+    details: {
+      ...existingDetails,
+      approvalRequirements: approvalRequirementMetadata(requirements)
+    }
+  }
+}
+
+function needsConfirmationResult(request: SafeCommandRequest, reason: string, options: { confirmationToken?: string; paths?: string[] } = {}): SafeCommandResult {
+  const result: SafeCommandResult = {
     status: 'needs_confirmation',
     commandKind: request.commandKind,
     command: ['buildflow', request.commandKind],
@@ -553,9 +611,12 @@ function needsConfirmationResult(request: SafeCommandRequest, reason: string): S
     outputTruncated: false,
     durationMs: 0,
     requiresConfirmation: true,
-    confirmationToken: commandConfirmationToken(request, reason),
+    confirmationToken: options.confirmationToken || commandConfirmationToken(request, reason),
     reason
   }
+  return options.paths && options.paths.length > 0
+    ? { ...result, details: { approvalRequirements: [{ reason, paths: [...options.paths] }] } }
+    : result
 }
 
 function appendLimited(current: string, chunk: Buffer, state: { bytes: number; truncated: boolean }): string {
@@ -585,7 +646,7 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
       shell: false,
       detached: process.platform !== 'win32',
       env: {
-        PATH: process.env.PATH || '',
+        PATH: getGuardedCommandPath(),
         HOME: process.env.HOME || '',
         CI: '1',
         NO_COLOR: '1',
@@ -598,6 +659,7 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let cancelled = false
     let killTimer: NodeJS.Timeout | undefined
     const signalProcess = (signal: NodeJS.Signals) => {
       if (child.pid && process.platform !== 'win32') {
@@ -620,9 +682,20 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
       }, 500)
     }, timeoutMs)
 
+    const cancel = () => {
+      cancelled = true
+      signalProcess('SIGTERM')
+      killTimer = setTimeout(() => {
+        if (!child.killed || child.exitCode === null) signalProcess('SIGKILL')
+      }, 500)
+    }
+    if (request.signal?.aborted) cancel()
+    else request.signal?.addEventListener('abort', cancel, { once: true })
+
     const clearTimers = () => {
       clearTimeout(timer)
       if (killTimer) clearTimeout(killTimer)
+      request.signal?.removeEventListener('abort', cancel)
     }
 
     child.stdout.on('data', chunk => {
@@ -638,7 +711,7 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
     child.on('close', (exitCode, signal) => {
       clearTimers()
       resolve({
-        status: timedOut ? 'timed_out' : exitCode === 0 ? 'completed' : 'failed',
+        status: timedOut ? 'timed_out' : exitCode === 0 && !cancelled ? 'completed' : 'failed',
         commandKind: request.commandKind,
         command,
         cwd: resolvedCwd,
@@ -647,7 +720,8 @@ async function runProcess(request: SafeCommandRequest, command: string[], cwd: s
         stdout,
         stderr,
         outputTruncated: outputState.truncated,
-        durationMs: Date.now() - startedAt
+        durationMs: Date.now() - startedAt,
+        ...(cancelled ? { reason: 'cancelled' } : {})
       })
     })
   })
@@ -841,6 +915,7 @@ function getGitOutput(sourceRoot: string, args: string[]): string {
     encoding: 'utf8',
     env: {
       ...process.env,
+      PATH: getGuardedCommandPath(),
       GIT_TERMINAL_PROMPT: '0',
       GH_PROMPT_DISABLED: '1'
     }
@@ -854,6 +929,7 @@ function getGithubRepoSlug(sourceRoot: string, remote: string): string {
       encoding: 'utf8',
       env: {
         ...process.env,
+        PATH: getGuardedCommandPath(),
         GH_PROMPT_DISABLED: '1'
       }
     }).trim()
@@ -1627,10 +1703,10 @@ async function runExactCommand(request: SafeCommandRequest): Promise<SafeCommand
   const pnpmCandidates = runtime ? [
     path.join(runtime.binDir, pnpmName),
     process.env.PNPM_HOME ? path.join(process.env.PNPM_HOME, pnpmName) : undefined,
-    ...(process.env.PATH || '').split(path.delimiter).filter(Boolean).map(entry => path.join(entry, pnpmName))
+    ...getGuardedCommandPath().split(path.delimiter).filter(Boolean).map(entry => path.join(entry, pnpmName))
   ].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0) : []
   const rgName = process.platform === 'win32' ? 'rg.exe' : 'rg'
-  const rgCandidates = (process.env.PATH || '').split(path.delimiter).filter(Boolean).map(entry => path.join(entry, rgName))
+  const rgCandidates = getGuardedCommandPath().split(path.delimiter).filter(Boolean).map(entry => path.join(entry, rgName))
   const executablePath = request.executable === 'node'
     ? runtime!.nodeExecutable
     : request.executable === 'pnpm'
@@ -1778,14 +1854,25 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
     const requestedInputPaths = assertExplicitPaths(request.paths, { allowBinaryPaths: true })
     const expansion = expandApprovedPathScopes(sourceRoot, requestedInputPaths)
     const paths = expansion.paths
-    for (const relPath of paths) assertStagePathAllowed(request, sourceRoot, relPath)
+    const approvalRequirements: GitApprovalRequirement[] = []
+    for (const relPath of paths) {
+      const requirement = assertStagePathAllowed(request, sourceRoot, relPath)
+      if (!requirement) continue
+      if (!requirement.satisfied) {
+        return needsConfirmationResult(request, requirement.reason, {
+          confirmationToken: requirement.confirmationToken,
+          paths: requirement.paths
+        })
+      }
+      approvalRequirements.push(requirement)
+    }
     const pathsToStage = paths.filter(relPath => !isStagedDeletion(sourceRoot, relPath))
     const result = pathsToStage.length > 0
       ? await runProcess(request, ['git', 'add', '--', ...pathsToStage], sourceRoot)
       : structuredLocalResult(request, 'completed', ['git', 'add', '--'], '')
     if (result.status !== 'completed') return result
     const evidence = buildExactStagingEvidence(paths, getStagedPathStatuses(sourceRoot))
-    return {
+    return withApprovalRequirementDetails({
       ...result,
       details: {
         ...evidence,
@@ -1793,7 +1880,7 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
         expandedPathScopes: expansion.expandedPathScopes,
         staticAssets: buildStaticAssetMetadata(sourceRoot, paths)
       }
-    }
+    }, approvalRequirements)
   }
 
   if (request.commandKind === 'git_commit') {
@@ -1821,14 +1908,26 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
         return mismatch
       }
     }
-    for (const item of stagedStatuses) assertCommitPathAllowed(request, sourceRoot, item)
+    const approvalRequirements: GitApprovalRequirement[] = []
+    for (const item of stagedStatuses) {
+      const requirement = assertCommitPathAllowed(request, sourceRoot, item)
+      if (!requirement) continue
+      if (!requirement.satisfied) {
+        return needsConfirmationResult(request, requirement.reason, {
+          confirmationToken: requirement.confirmationToken,
+          paths: requirement.paths
+        })
+      }
+      approvalRequirements.push(requirement)
+    }
     const message = typeof request.message === 'string' ? request.message.trim() : ''
     const body = typeof request.body === 'string' ? request.body.trim() : ''
     if (!message || /[\r\n]/.test(message) || message.length > 200) throw new Error('message must be a short single-line string')
     if (body && body.length > 2000) throw new Error('body is too long')
     assertNoSecretLikeText(message, 'message')
     if (body) assertNoSecretLikeText(body, 'body')
-    return runAndAppendGitLog(request, ['git', 'commit', '-m', message, ...(body ? ['-m', body] : [])], sourceRoot)
+    const result = await runAndAppendGitLog(request, ['git', 'commit', '-m', message, ...(body ? ['-m', body] : [])], sourceRoot)
+    return result.status === 'completed' ? withApprovalRequirementDetails(result, approvalRequirements) : result
   }
 
   if (request.commandKind === 'git_push') {

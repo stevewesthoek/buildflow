@@ -2,10 +2,13 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { verifyWorkbenchMcpCredential } from '@workbench/shared/workbench-mcp-auth'
+import { loadWorkbenchOwnerConfig } from '@workbench/shared/workbench-owner-config'
+import { loadWorkbenchTransportConfig, type WorkbenchTransport } from '@workbench/shared/workbench-transport-config'
 import type { WorkbenchToolContract } from './contracts.js'
 
 export const WORKBENCH_MCP_CREDENTIAL_FILE = path.join(os.homedir(), '.buildflow', 'codex-workbench-mcp.token')
-export const WORKBENCH_ACTION_BASE_URL = 'http://127.0.0.1:3054'
+export const WORKBENCH_ACTION_BASE_URL = process.env.WORKBENCH_ACTION_BASE_URL || 'http://127.0.0.1:3154'
 export const MAX_ACTION_REQUEST_BYTES = 64 * 1024
 export const MAX_ACTION_RESPONSE_BYTES = 64 * 1024
 export const CONNECTION_TIMEOUT_MS = 2_000
@@ -30,6 +33,9 @@ export type BridgeResult =
 export type WorkbenchClientOptions = {
   baseUrl?: string
   credentialFile?: string
+  transport?: WorkbenchTransport
+  transportProvider?: () => WorkbenchTransport
+  ownerConfigHomeDir?: string
   connectionTimeoutMs?: number
   totalTimeoutMs?: number
   maxRequestBytes?: number
@@ -94,6 +100,25 @@ export function readActionCredential(credentialFile = WORKBENCH_MCP_CREDENTIAL_F
   return bearerValue
 }
 
+function resolveBearerValue(
+  credentialFile: string,
+  transport: WorkbenchTransport,
+  ownerConfigHomeDir?: string
+): string {
+  const configuredCredential = readActionCredential(credentialFile)
+  if (transport !== 'native_helper') return configuredCredential
+
+  const actionToken = loadWorkbenchOwnerConfig({ homeDir: ownerConfigHomeDir }).actionToken
+  if (!verifyWorkbenchMcpCredential(configuredCredential, actionToken)) {
+    throw new Error('authentication_required')
+  }
+  return actionToken
+}
+
+function isLiteralLoopbackHostname(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
+}
+
 function statusCodeResult(statusCode: number, body: unknown): BridgeResult {
   if (statusCode === 401 || statusCode === 403) {
     return { ok: false, code: 'authentication_failed', message: 'Workbench rejected the configured action credential.' }
@@ -127,15 +152,28 @@ export function createWorkbenchClient(options: WorkbenchClientOptions = {}) {
     throw new Error('Workbench MCP client requires a fixed plain local HTTP origin.')
   }
   const credentialFile = options.credentialFile ?? process.env.WORKBENCH_MCP_CREDENTIAL_FILE ?? WORKBENCH_MCP_CREDENTIAL_FILE
+  const transportProvider = options.transportProvider ?? (options.transport
+    ? () => options.transport as WorkbenchTransport
+    : options.baseUrl === undefined
+      ? () => loadWorkbenchTransportConfig({ homeDir: options.ownerConfigHomeDir }).transport
+      : () => 'typescript_agent')
   const connectionTimeoutMs = options.connectionTimeoutMs ?? CONNECTION_TIMEOUT_MS
   const totalTimeoutMs = options.totalTimeoutMs ?? TOTAL_TIMEOUT_MS
   const maxRequestBytes = options.maxRequestBytes ?? MAX_ACTION_REQUEST_BYTES
   const maxResponseBytes = options.maxResponseBytes ?? MAX_ACTION_RESPONSE_BYTES
 
   return async function invoke(contract: WorkbenchToolContract, input: Record<string, unknown>, signal?: AbortSignal): Promise<BridgeResult> {
+    if (signal?.aborted) {
+      return { ok: false, code: 'workbench_unavailable', message: 'Workbench MCP request was cancelled.' }
+    }
+
     let bearerValue: string
     try {
-      bearerValue = readActionCredential(credentialFile)
+      const transport = transportProvider()
+      if (transport === 'native_helper' && !isLiteralLoopbackHostname(baseUrl.hostname)) {
+        throw new Error('native_helper requires a literal loopback origin')
+      }
+      bearerValue = resolveBearerValue(credentialFile, transport, options.ownerConfigHomeDir)
     } catch {
       return { ok: false, code: 'authentication_required', message: 'A protected Workbench action credential is required.' }
     }

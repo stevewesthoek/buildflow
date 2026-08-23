@@ -198,7 +198,8 @@ export async function prepareControlledWorkflowMigration(
   if (!validatedManifest.ok) return fail('manifest_invalid', 'Topology manifest failed strict validation.')
   const manifest = validatedManifest.manifest
   if (manifest.workflow.id !== request.workflowId || manifest.artifacts.candidatePath !== candidate.path || manifest.artifacts.rollbackPath !== rollback.path || manifest.artifacts.candidateSha256 !== candidate.sha256 || manifest.artifacts.rollbackSha256 !== rollback.sha256) return fail('manifest_invalid', 'Manifest artifact bindings do not match.')
-  const canonicalCandidate = canonicalizeN8nWorkflow(candidateJson); const canonicalRollback = canonicalizeN8nWorkflow(rollbackJson)
+  if (grant.canonicalizationVersion !== manifest.workflow.canonicalizationVersion) return fail('grant_mismatch', 'Grant and manifest canonicalization versions do not match.')
+  const canonicalCandidate = canonicalizeN8nWorkflow(candidateJson, grant.canonicalizationVersion); const canonicalRollback = canonicalizeN8nWorkflow(rollbackJson, grant.canonicalizationVersion)
   if (!canonicalCandidate.ok || !canonicalRollback.ok) return fail('canonicalization_failed', 'Candidate or rollback workflow cannot be canonicalized.')
   const candidateCanonicalSha256 = hashCanonicalWorkflowTopology(canonicalCandidate.topology, env.digest)
   const rollbackCanonicalSha256 = hashCanonicalWorkflowTopology(canonicalRollback.topology, env.digest)
@@ -211,7 +212,7 @@ export async function prepareControlledWorkflowMigration(
   const decision = decidePreparation({
     operationId, now: now.toISOString(), confirmationExpiresAt, sourceId: source.sourceId,
     sourceRootFingerprint: source.rootFingerprint, workflowId: request.workflowId, mode: request.mode,
-    grant: { grantId: grant.grantId, version: grant.version, sourceId: grant.sourceId, workflowId: grant.workflowId, wrapperPath: grant.wrapperPath, wrapperSha256: grant.wrapperSha256, canonicalizationVersion: 1, ...(grant.apiOriginFingerprint ? { apiOriginFingerprint: grant.apiOriginFingerprint } : {}) },
+    grant: { grantId: grant.grantId, version: grant.version, sourceId: grant.sourceId, workflowId: grant.workflowId, wrapperPath: grant.wrapperPath, wrapperSha256: grant.wrapperSha256, canonicalizationVersion: grant.canonicalizationVersion, ...(grant.apiOriginFingerprint ? { apiOriginFingerprint: grant.apiOriginFingerprint } : {}) },
     manifest, manifestArtifact: { path: manifestArtifact.path, sha256: manifestArtifact.sha256 },
     candidate: { path: candidate.path, sha256: candidate.sha256, canonicalSha256: candidateCanonicalSha256 },
     rollback: { path: rollback.path, sha256: rollback.sha256, canonicalSha256: rollbackCanonicalSha256 },
@@ -397,12 +398,46 @@ export async function executeControlledWorkflowMigration(
       const resultMatchesInvocation = result.operationId === current.operationId
         && result.workflowId === current.binding.workflowId
         && result.effect === effect.type
+      let forcedCandidateResult: 'not_started' | 'ambiguous' | 'succeeded' | 'definitively_failed' | 'timed_out' | undefined
+      let forcedRollbackResult: 'not_attempted' | 'ambiguous' | 'succeeded' | 'definitively_failed' | 'timed_out' | undefined
       if ((effect.type === 'apply_candidate' || effect.type === 'apply_rollback') && pendingDispatch) {
-        const outcome = !resultMatchesInvocation || result.classification === 'blocked' ? 'ambiguous' : result.classification
-        const recorded = recordCapabilityMutationDispatchOutcome({ dispatchId: pendingDispatch.dispatchId, operationId: current.operationId, sourceId: current.binding.sourceId, workflowId: current.binding.workflowId, kind: pendingDispatch.kind, artifactSha256: effect.artifactSha256, wrapperSha256: current.binding.wrapperSha256, outcome, store: deps.dispatchStore })
-        if (recorded.ok === false) return fail(recorded.code === 'MUTATION_DISPATCH_STORE_CORRUPT' ? 'dispatch_store_corrupt' : 'dispatch_conflict', recorded.message)
+        const dispatch = findCapabilityMutationDispatchRecord(current.operationId, pendingDispatch.kind, deps.dispatchStore)
+        if (isDispatchFailure(dispatch)) return fail('dispatch_store_corrupt', dispatch.message)
+        if (!dispatch) return fail('dispatch_conflict', 'Reserved mutation dispatch could not be reloaded.')
+        if (dispatch.status === 'dispatched') {
+          const outcome = !resultMatchesInvocation || result.classification === 'blocked' ? 'ambiguous' : result.classification
+          const recorded = recordCapabilityMutationDispatchOutcome({ dispatchId: pendingDispatch.dispatchId, operationId: current.operationId, sourceId: current.binding.sourceId, workflowId: current.binding.workflowId, kind: pendingDispatch.kind, artifactSha256: effect.artifactSha256, wrapperSha256: current.binding.wrapperSha256, outcome, store: deps.dispatchStore })
+          if (recorded.ok === false) return fail(recorded.code === 'MUTATION_DISPATCH_STORE_CORRUPT' ? 'dispatch_store_corrupt' : 'dispatch_conflict', recorded.message)
+        } else if (dispatch.status === 'reserved') {
+          const marked = requireMutationDispatchReconciliation(dispatch.dispatchId, deps.dispatchStore)
+          if (marked.ok === false) return fail(marked.code === 'MUTATION_DISPATCH_STORE_CORRUPT' ? 'dispatch_store_corrupt' : 'dispatch_conflict', marked.message)
+          console.error(JSON.stringify({
+            event: 'controlled_migration_dispatch_not_consumed',
+            operationId: current.operationId,
+            effect: effect.type,
+            operationStatus: current.status,
+            bindingMode: current.binding.mode,
+            artifactPathMatches: effect.artifactPath === (effect.type === 'apply_candidate' ? current.binding.candidatePath : current.binding.rollbackPath),
+            artifactSha256Matches: effect.artifactSha256 === (effect.type === 'apply_candidate' ? current.binding.candidateSha256 : current.binding.rollbackSha256),
+            executorClassification: result.classification,
+            executorReasonCode: result.reasonCode,
+            executorField: (result as { field?: string }).field
+          }))
+          if (effect.type === 'apply_candidate') forcedCandidateResult = resultMatchesInvocation && result.classification === 'blocked' ? 'not_started' : 'ambiguous'
+          else forcedRollbackResult = resultMatchesInvocation && result.classification === 'blocked' ? 'not_attempted' : 'ambiguous'
+        } else if (dispatch.status === 'outcome_recorded' && dispatch.outcome) {
+          if (effect.type === 'apply_candidate') forcedCandidateResult = dispatch.outcome
+          else forcedRollbackResult = dispatch.outcome
+        } else {
+          if (effect.type === 'apply_candidate') forcedCandidateResult = 'ambiguous'
+          else forcedRollbackResult = 'ambiguous'
+        }
       }
-      const event = resultMatchesInvocation
+      const event = forcedCandidateResult !== undefined && effect.type === 'apply_candidate'
+        ? { type: 'mutation_result', result: forcedCandidateResult, at: env.now().toISOString() } as const
+        : forcedRollbackResult !== undefined && effect.type === 'apply_rollback'
+          ? { type: 'rollback_result', result: forcedRollbackResult, at: env.now().toISOString() } as const
+          : resultMatchesInvocation
         ? toControlledWorkflowMigrationEvent(result, env.now().toISOString())
         : effect.type === 'apply_candidate'
           ? { type: 'mutation_result', result: 'ambiguous', at: env.now().toISOString() } as const

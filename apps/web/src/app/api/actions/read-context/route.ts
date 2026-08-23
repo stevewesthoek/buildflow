@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchWorkbenchRead, dispatchWorkbenchInspect, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchRead, dispatchWorkbenchInspect } from '@/lib/actions/portable-operation-adapters'
+import { unwrapActionError } from '@/lib/actions/gpt'
 import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
 import { executeAction } from '@/lib/actions/transport'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'

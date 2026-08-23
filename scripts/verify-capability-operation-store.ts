@@ -131,13 +131,68 @@ function main() {
     assert.ok(expiredStatus && !('ok' in expiredStatus))
     if (expiredStatus && !('ok' in expiredStatus)) assert.equal(expiredStatus.status, 'expired')
     const validPayload = JSON.parse(fs.readFileSync(path.join(rootDir, 'workbench-capability-operations.json'), 'utf8'))
+    const validProtectedDomainPayload = structuredClone(validPayload)
+    validProtectedDomainPayload.operations[0].evidence = {
+      protectedDomains: 'unverified',
+      executorReasonCode: 'PROTECTED_DOMAIN_MISMATCH',
+      protectedDomainMismatches: ['activation', 'settings']
+    }
+    fs.writeFileSync(
+      path.join(rootDir, 'workbench-capability-operations.json'),
+      JSON.stringify(validProtectedDomainPayload),
+      { mode: 0o600 }
+    )
+    const persistedProtectedDomains = getCapabilityOperationRecord(validProtectedDomainPayload.operations[0].operationId, store)
+    assert.ok(
+      persistedProtectedDomains && !('ok' in persistedProtectedDomains),
+      JSON.stringify(persistedProtectedDomains)
+    )
+    if (persistedProtectedDomains && !('ok' in persistedProtectedDomains)) {
+      assert.deepEqual(persistedProtectedDomains.evidence?.protectedDomainMismatches, ['activation', 'settings'])
+    }
+
+    const validVersionTwoPayload = structuredClone(validProtectedDomainPayload)
+    validVersionTwoPayload.operations[0].binding.canonicalizationVersion = 2
+    fs.writeFileSync(
+      path.join(rootDir, 'workbench-capability-operations.json'),
+      JSON.stringify(validVersionTwoPayload),
+      { mode: 0o600 }
+    )
+    const persistedVersionTwo = getCapabilityOperationRecord(validVersionTwoPayload.operations[0].operationId, store)
+    assert.ok(persistedVersionTwo && !('ok' in persistedVersionTwo))
+    if (persistedVersionTwo && !('ok' in persistedVersionTwo)) assert.equal(persistedVersionTwo.binding.canonicalizationVersion, 2)
     const invalidRevision = structuredClone(validPayload)
     invalidRevision.operations[0].revision = -1
     const invalidStatus = structuredClone(validPayload)
     invalidStatus.operations[0].status = 'unknown'
     const invalidLease = structuredClone(validPayload)
     invalidLease.operations[0].lease = { leaseProof: 'x', owner: 'bad', acquiredAt: now.toISOString(), expiresAt: new Date(now.getTime() + 1000).toISOString() }
-    for (const payload of ['{', JSON.stringify({ version: 2, updatedAt: now.toISOString(), operations: [] }), JSON.stringify({ version: 1, updatedAt: now.toISOString(), operations: [{}] }), JSON.stringify(invalidRevision), JSON.stringify(invalidStatus), JSON.stringify(invalidLease)]) {
+    const invalidProtectedDomain = structuredClone(validProtectedDomainPayload)
+    invalidProtectedDomain.operations[0].evidence.protectedDomainMismatches = ['activation', 'workflow']
+    const invalidProtectedDomainOrder = structuredClone(validProtectedDomainPayload)
+    invalidProtectedDomainOrder.operations[0].evidence.protectedDomainMismatches = ['settings', 'activation']
+    const invalidDuplicateProtectedDomain = structuredClone(validProtectedDomainPayload)
+    invalidDuplicateProtectedDomain.operations[0].evidence.protectedDomainMismatches = ['activation', 'activation']
+    const invalidEmptyProtectedDomains = structuredClone(validProtectedDomainPayload)
+    invalidEmptyProtectedDomains.operations[0].evidence.protectedDomainMismatches = []
+    const invalidProtectedDomainState = structuredClone(validProtectedDomainPayload)
+    invalidProtectedDomainState.operations[0].evidence.protectedDomains = 'unchanged'
+    const invalidProtectedDomainReason = structuredClone(validProtectedDomainPayload)
+    invalidProtectedDomainReason.operations[0].evidence.executorReasonCode = 'READ_SUCCEEDED'
+    for (const payload of [
+      '{',
+      JSON.stringify({ version: 2, updatedAt: now.toISOString(), operations: [] }),
+      JSON.stringify({ version: 1, updatedAt: now.toISOString(), operations: [{}] }),
+      JSON.stringify(invalidRevision),
+      JSON.stringify(invalidStatus),
+      JSON.stringify(invalidLease),
+      JSON.stringify(invalidProtectedDomain),
+      JSON.stringify(invalidProtectedDomainOrder),
+      JSON.stringify(invalidDuplicateProtectedDomain),
+      JSON.stringify(invalidEmptyProtectedDomains),
+      JSON.stringify(invalidProtectedDomainState),
+      JSON.stringify(invalidProtectedDomainReason)
+    ]) {
       fs.writeFileSync(path.join(rootDir, 'workbench-capability-operations.json'), payload, { mode: 0o600 })
       const corruptRead = getCompactCapabilityOperation('missing', store)
       assert.ok(corruptRead && 'ok' in corruptRead)

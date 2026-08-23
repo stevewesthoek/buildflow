@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchWorkbenchCommand, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchCommand } from '@/lib/actions/portable-operation-adapters'
+import { unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 import { dispatchAfterExactStaging, type StagedSetGuardInput } from '@/lib/actions/staged-set-guard'

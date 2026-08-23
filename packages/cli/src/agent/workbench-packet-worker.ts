@@ -1,5 +1,5 @@
 import crypto from 'crypto'
-import { appendAgentEvent } from './agent-events'
+import { appendAgentEvent, hasPacketValidationActivityEvent } from './agent-events'
 import { getAgentJob, updateAgentJob } from './agent-jobs'
 import { executeWorkbenchPacket, type WorkbenchPacketExecutionResult } from './workbench-packet-executor'
 import { recordWorkbenchContinuationDecision } from './workbench-continuation-decisions'
@@ -21,6 +21,31 @@ function recordWorkbenchPacketResult(
   params: Parameters<typeof persistWorkbenchPacketResult>[0]
 ): WorkbenchPacketCompactResult {
   const result = persistWorkbenchPacketResult(params)
+  const packetRecord = getWorkbenchPacketRecord(result.packetId)
+  for (const [validationIndex, validation] of result.validation.entries()) {
+    const evidenceRef = `${result.packetId}:validation:${validationIndex}`
+    const kind = validation.status === 'completed' ? 'validation_completed' : 'validation_failed'
+    if (hasPacketValidationActivityEvent({
+      jobId: result.runId,
+      sourceId: result.sourceId,
+      packetId: result.packetId,
+      evidenceRef,
+      kind
+    })) continue
+    appendAgentEvent({
+      jobId: result.runId,
+      sourceId: result.sourceId,
+      type: kind,
+      activityKind: kind,
+      packetId: result.packetId,
+      taskId: packetRecord?.packet.taskId,
+      commandKind: validation.commandKind,
+      status: validation.status,
+      evidenceRefs: [{ kind: 'validation', ref: evidenceRef }],
+      telemetry: { durationMs: validation.durationMs },
+      message: `Packet validation ${validation.commandKind} ${validation.status}`
+    })
+  }
   if (!['completed', 'failed', 'paused', 'cancelled'].includes(result.status)) return result
 
   const run = getAgentJob(result.runId)
@@ -290,6 +315,18 @@ export async function runNextWorkbenchPacket(params: {
             ? `Packet ${packetId} cancelled after rollback at ${execution.completedSteps} verified step(s).`
             : `Packet ${packetId} failed after ${execution.completedSteps} verified step(s).`
     })
+    if (execution.status === 'completed' && record.exactPaths.length > 0) {
+      appendAgentEvent({
+        jobId: runId,
+        sourceId,
+        type: 'file_changed',
+        activityKind: 'file_changed',
+        packetId,
+        paths: record.exactPaths,
+        status: 'completed',
+        message: `Packet ${packetId} changed ${record.exactPaths.length} path${record.exactPaths.length === 1 ? '' : 's'}.`
+      })
+    }
     recordWorkbenchPacketResult({
       packetId,
       runId,

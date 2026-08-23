@@ -4,6 +4,7 @@ import {
   type AgentJob,
 } from './agent-jobs'
 import { controlWorkbenchPacketsForRun } from './workbench-packet-store'
+import { appendAgentEvent } from './agent-events'
 
 export function closeWorkbenchRun(params: {
   sourceId: string
@@ -32,9 +33,18 @@ export function closeWorkbenchRun(params: {
     reason: `Run closed: ${summary}`
   })
 
-  return updateAgentJob(run.id, {
+  const closed = updateAgentJob(run.id, {
     status: 'completed',
     summary,
     nextActions: [],
   })
+  appendAgentEvent({
+    jobId: closed.id,
+    sourceId: closed.sourceId,
+    type: 'job_completed',
+    activityKind: 'run_completed',
+    message: summary,
+    status: closed.status
+  })
+  return closed
 }

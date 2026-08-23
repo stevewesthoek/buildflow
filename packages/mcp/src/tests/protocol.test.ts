@@ -108,6 +108,20 @@ test('advertises and enforces an installation-admitted tool and nested-command s
     assert.deepEqual(listed.tools.map(tool => tool.name), [
       'getWorkbenchStatus', 'readWorkbenchContext', 'runWorkbenchCommand'
     ])
+    const runWorkbenchCommand = listed.tools.find(tool => tool.name === 'runWorkbenchCommand')
+    assert(runWorkbenchCommand)
+    const runInputSchema = runWorkbenchCommand.inputSchema as {
+      properties?: Record<string, unknown>
+    }
+    const runCommandSchema = runInputSchema.properties?.command as {
+      properties?: Record<string, unknown>
+    }
+    const runCommandProperties = runCommandSchema.properties || {}
+    assert.deepEqual(
+      (runCommandProperties.commandKind as { enum?: string[] }).enum,
+      ['n8n_workflow_migration']
+    )
+    assert.equal(runCommandProperties.validationJobOperation, undefined)
     await assert.rejects(
       client.callTool({ name: 'applyWorkbenchFileChange', arguments: {} }),
       /Unknown or unadmitted Workbench MCP tool/
@@ -118,6 +132,34 @@ test('advertises and enforces an installation-admitted tool and nested-command s
     })
     assert.equal(denied.isError, true)
     assert(JSON.stringify(denied).includes('mcp_scope_denied'))
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
+test('does not advertise or invoke runWorkbenchCommand without admitted command kinds', async () => {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  const server = createWorkbenchMcpServer({
+    repoRoot,
+    scope: loadWorkbenchMcpScope({
+      WORKBENCH_MCP_ALLOWED_TOOLS: 'getWorkbenchStatus,runWorkbenchCommand',
+      WORKBENCH_MCP_ALLOWED_COMMAND_KINDS: ''
+    })
+  })
+  const client = new Client({ name: 'workbench-mcp-empty-scope-test', version: '1.0.0' })
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  try {
+    const listed = await client.listTools()
+    assert.deepEqual(listed.tools.map(tool => tool.name), ['getWorkbenchStatus'])
+    await assert.rejects(
+      client.callTool({
+        name: 'runWorkbenchCommand',
+        arguments: sessionCommand({ sourceId: 'brain', commandKind: 'n8n_workflow_migration' })
+      }),
+      /Unknown or unadmitted Workbench MCP tool/
+    )
   } finally {
     await client.close()
     await server.close()
@@ -266,6 +308,53 @@ test('preserves prepared migration operation through tools/call and supports str
       }
     }))
     assert.equal(status.success, true)
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
+test('preserves only protected-domain mismatch names in migration status projection', async () => {
+  const failedResult = {
+    status: 'failed',
+    sourceId: 'brain',
+    commandKind: 'n8n_workflow_migration',
+    migrationMode: 'apply',
+    migrationPhase: 'status',
+    operation: {
+      operationId: 'cap-op-failed',
+      status: 'failed',
+      reasonCode: 'PRECONDITION_UNAVAILABLE',
+      executorReasonCode: 'PROTECTED_DOMAIN_MISMATCH',
+      protectedDomains: 'unverified',
+      protectedDomainMismatches: ['activation', 'settings'],
+      requestCounters: { candidateUpdate: 0, rollbackUpdate: 0, readback: 1 }
+    }
+  }
+  const { client, server } = await connectedPair(async () => ({ ok: true, result: failedResult }))
+  try {
+    const response = await client.callTool({
+      name: 'runWorkbenchCommand',
+      arguments: sessionCommand({
+        sourceId: 'brain',
+        commandKind: 'n8n_workflow_migration',
+        migration: { mode: 'apply', phase: 'status', operationId: 'cap-op-failed' }
+      })
+    })
+    assert.equal(response.isError, false)
+    const structured = response.structuredContent as typeof failedResult
+    assert.deepEqual(structured.operation.protectedDomainMismatches, ['activation', 'settings'])
+    assert.deepEqual(structured.operation.requestCounters, {
+      candidateUpdate: 0,
+      rollbackUpdate: 0,
+      readback: 1
+    })
+    const text = (response.content as Array<{ type: string; text?: string }>)[0]?.text
+    assert.equal(typeof text, 'string')
+    assert.deepEqual(
+      (JSON.parse(text as string) as typeof failedResult).operation.protectedDomainMismatches,
+      ['activation', 'settings']
+    )
   } finally {
     await client.close()
     await server.close()

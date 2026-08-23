@@ -1,4 +1,12 @@
-import type { ControlledWorkflowTopologyManifest } from './controlled-workflow-topology'
+import {
+  isControlledWorkflowCanonicalizationVersion,
+  type ControlledWorkflowCanonicalizationVersion,
+  type ControlledWorkflowTopologyManifest
+} from './controlled-workflow-topology'
+import {
+  isCanonicalControlledWorkflowProtectedDomainList,
+  type ControlledWorkflowProtectedDomain
+} from './controlled-workflow-canonicalization'
 
 export const CONTROLLED_WORKFLOW_MIGRATION_STATE_VERSION = 1 as const
 
@@ -100,7 +108,7 @@ export type ControlledWorkflowMigrationBinding = {
   manifestSha256: string
   wrapperPath: string
   wrapperSha256: string
-  canonicalizationVersion: 1
+  canonicalizationVersion: ControlledWorkflowCanonicalizationVersion
   candidateCanonicalSha256: string
   rollbackCanonicalSha256: string
   expectedLiveCanonicalSha256: string
@@ -172,6 +180,7 @@ export type ControlledWorkflowMigrationExecutorDiagnostic = {
 export type ControlledWorkflowMigrationEvidence = ControlledWorkflowMigrationExecutorDiagnostic & {
   observedCanonicalSha256?: string
   protectedDomains?: 'unchanged' | 'unverified'
+  protectedDomainMismatches?: ControlledWorkflowProtectedDomain[]
   mutationResult?: ControlledWorkflowMutationResult
   readbackResult?: ControlledWorkflowReadbackResult
   rollbackResult?: ControlledWorkflowRollbackResult
@@ -228,7 +237,7 @@ export type ControlledWorkflowMigrationPrepareInput = {
     workflowId: string
     wrapperPath: string
     wrapperSha256: string
-    canonicalizationVersion: 1
+    canonicalizationVersion: ControlledWorkflowCanonicalizationVersion
     apiOriginFingerprint?: string
   }
   manifest: ControlledWorkflowTopologyManifest
@@ -259,7 +268,7 @@ export type ControlledWorkflowMigrationPublicEvidence = {
   manifestPath: string
   manifestSha256: string
   wrapperSha256: string
-  canonicalizationVersion: 1
+  canonicalizationVersion: ControlledWorkflowCanonicalizationVersion
   candidateCanonicalSha256: string
   rollbackCanonicalSha256: string
   expectedLiveCanonicalSha256: string
@@ -299,6 +308,7 @@ export type ControlledWorkflowMigrationEvent =
       result: ControlledWorkflowReadbackResult
       observedCanonicalSha256?: string
       protectedDomains?: 'unchanged' | 'unverified'
+      protectedDomainMismatches?: ControlledWorkflowProtectedDomain[]
       at: string
     } & ControlledWorkflowMigrationExecutorDiagnostic)
   | {
@@ -326,6 +336,7 @@ export type ControlledWorkflowMigrationEvent =
       result: ControlledWorkflowReadbackResult
       observedCanonicalSha256?: string
       protectedDomains?: 'unchanged' | 'unverified'
+      protectedDomainMismatches?: ControlledWorkflowProtectedDomain[]
       at: string
     } & ControlledWorkflowMigrationExecutorDiagnostic)
   | {
@@ -436,6 +447,7 @@ export type ControlledWorkflowMigrationStatusProjection = {
     readback: number
   }
   protectedDomains: 'unchanged' | 'unverified'
+  protectedDomainMismatches?: ControlledWorkflowProtectedDomain[]
   confirmationExpiresAt: string
   createdAt: string
   updatedAt: string
@@ -589,7 +601,8 @@ export function prepareControlledWorkflowMigration(
   if (input.workflowId !== input.grant.workflowId || input.workflowId !== input.manifest.workflow.id) {
     addIssue('WORKFLOW_ID_MISMATCH', 'workflowId')
   }
-  if (input.grant.canonicalizationVersion !== 1 || input.manifest.workflow.canonicalizationVersion !== 1) {
+  if (!isControlledWorkflowCanonicalizationVersion(input.grant.canonicalizationVersion)
+    || input.grant.canonicalizationVersion !== input.manifest.workflow.canonicalizationVersion) {
     addIssue('CANONICALIZATION_VERSION_MISMATCH', 'canonicalizationVersion')
   }
   if (
@@ -640,7 +653,7 @@ export function prepareControlledWorkflowMigration(
     manifestSha256: input.manifestArtifact.sha256,
     wrapperPath: input.wrapper.path,
     wrapperSha256: input.wrapper.sha256,
-    canonicalizationVersion: 1,
+    canonicalizationVersion: input.grant.canonicalizationVersion,
     candidateCanonicalSha256: input.candidate.canonicalSha256,
     rollbackCanonicalSha256: input.rollback.canonicalSha256,
     expectedLiveCanonicalSha256: input.manifest.workflow.expectedLiveCanonicalSha256,
@@ -731,9 +744,15 @@ function handlePreconditionReadback(
     || (event.executorWorkflowId && event.executorWorkflowId !== operation.binding.workflowId)) {
     return noChange(operation, 'INVALID_TRANSITION')
   }
+  const protectedDomainMismatches = event.protectedDomains === 'unverified'
+    && event.executorReasonCode === 'PROTECTED_DOMAIN_MISMATCH'
+    && isCanonicalControlledWorkflowProtectedDomainList(event.protectedDomainMismatches)
+    ? [...event.protectedDomainMismatches]
+    : undefined
   const evidence = operationEvidence(operation, {
     readbackResult: event.result,
     protectedDomains: event.protectedDomains === 'unchanged' ? 'unchanged' : 'unverified',
+    protectedDomainMismatches,
     ...(isSha256(event.observedCanonicalSha256) ? { observedCanonicalSha256: event.observedCanonicalSha256 } : {}),
     ...(event.executorClassification ? { executorClassification: event.executorClassification } : {}),
     ...(event.executorReasonCode ? { executorReasonCode: event.executorReasonCode } : {}),
@@ -891,9 +910,15 @@ function handleReadbackResult(
     || (event.executorWorkflowId && event.executorWorkflowId !== operation.binding.workflowId)) {
     return noChange(operation, 'INVALID_TRANSITION')
   }
+  const protectedDomainMismatches = event.protectedDomains === 'unverified'
+    && event.executorReasonCode === 'PROTECTED_DOMAIN_MISMATCH'
+    && isCanonicalControlledWorkflowProtectedDomainList(event.protectedDomainMismatches)
+    ? [...event.protectedDomainMismatches]
+    : undefined
   const evidence = operationEvidence(operation, {
     readbackResult: event.result,
     protectedDomains: event.protectedDomains === 'unchanged' ? 'unchanged' : 'unverified',
+    protectedDomainMismatches,
     ...(isSha256(event.observedCanonicalSha256) ? { observedCanonicalSha256: event.observedCanonicalSha256 } : {}),
     ...(event.executorClassification ? { executorClassification: event.executorClassification } : {}),
     ...(event.executorReasonCode ? { executorReasonCode: event.executorReasonCode } : {}),
@@ -1082,6 +1107,9 @@ export function projectControlledWorkflowMigrationStatus(
       readback: Math.max(0, Math.min(Math.trunc(operation.readbackRequests), 10_000))
     },
     protectedDomains: evidence.protectedDomains || 'unverified',
+    ...(evidence.protectedDomainMismatches?.length
+      ? { protectedDomainMismatches: [...evidence.protectedDomainMismatches] }
+      : {}),
     confirmationExpiresAt: operation.confirmationExpiresAt,
     createdAt: operation.createdAt,
     updatedAt: operation.updatedAt,

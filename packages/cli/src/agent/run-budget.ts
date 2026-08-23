@@ -154,6 +154,36 @@ export function consumeRunRepairAttempt(budget: RunExecutionBudget, now: string)
   }, { now, operation: 'continue' }).budget
 }
 
+/**
+ * Freeze the wall-clock budget while a run is paused. The remaining active
+ * execution allowance is narrowed; time spent paused is never counted.
+ */
+export function pauseRunExecutionBudget(budget: RunExecutionBudget, now: string): RunExecutionBudget {
+  const evaluated = evaluateRunExecutionBudget(budget, { now, operation: 'continue' }).budget
+  if (evaluated.exhausted) return evaluated
+  const nowMs = Date.parse(now)
+  const startedMs = Date.parse(budget.executionWindowStartedAt)
+  const elapsedMs = Number.isFinite(nowMs) && Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0
+  return {
+    ...evaluated,
+    maxElapsedMs: Math.max(1, evaluated.maxElapsedMs - elapsedMs),
+    executionWindowStartedAt: normalizeIso(now, evaluated.executionWindowStartedAt),
+    exhausted: false,
+    reasonCode: undefined
+  }
+}
+
+/** Rebase a non-exhausted paused run onto a new active execution window. */
+export function resumeRunExecutionBudget(budget: RunExecutionBudget, now: string): RunExecutionBudget {
+  if (budget.exhausted) return budget
+  return evaluateRunExecutionBudget({
+    ...budget,
+    executionWindowStartedAt: normalizeIso(now, budget.executionWindowStartedAt),
+    exhausted: false,
+    reasonCode: undefined
+  }, { now, operation: 'continue' }).budget
+}
+
 export function evaluateRunExecutionBudget(
   budgetInput: RunExecutionBudget,
   params: { now: string; roadmapProgressDelta?: number; operation?: 'continue' | 'repair' }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +18,7 @@ import {
   canonicalProjectRoot,
   canonicalNodeExecutable,
   parseConfigureCliArgs,
+  validateNodeContract,
   type WorkbenchMcpProfile
 } from './configure-core.js'
 
@@ -209,6 +211,30 @@ function requireSafeNodeExecutable(value: string): string {
   return canonicalNodeExecutable(value)
 }
 
+function registeredNodeExecutable(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const executable = canonicalNodeExecutable(value)
+    const version = execFileSync(executable, ['--version'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      shell: false
+    }).trim()
+    return validateNodeContract(version).valid ? executable : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function definitionsMatchRegisteredNode(definition: TomlDocument, expected: TomlDocument): boolean {
+  const executable = registeredNodeExecutable(definition.command)
+  if (!executable) return false
+  return definitionsMatch(
+    { ...definition, command: executable },
+    { ...expected, command: executable }
+  )
+}
+
 function projectConfigPath(targetProjectRoot: string): string {
   const codexDirectory = path.join(targetProjectRoot, '.codex')
   if (fs.existsSync(codexDirectory)) {
@@ -258,7 +284,7 @@ export function inspectCodexRegistration(options: ConfigureOptions): CodexRegist
   const projectDefinitions = serverEntries(projectDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
   const definition = projectDefinitions.find(([name]) => name === SERVER_NAME)?.[1]
   const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable, profile)
-  const configured = !!definition && definitionsMatch(definition, expected)
+  const configured = !!definition && definitionsMatchRegisteredNode(definition, expected)
   return {
     configured,
     serverName: SERVER_NAME,
@@ -281,6 +307,9 @@ export function inspectCodexRegistration(options: ConfigureOptions): CodexRegist
 
 export function configureCodex(options: ConfigureOptions, hooks?: ConfigureHooks): CodexRegistrationStatus & { backupPath: string } {
   const profile: WorkbenchMcpProfile = options.profile ?? 'workbench'
+  const nodeCheck = validateNodeContract()
+  if (!nodeCheck.valid) throw new Error(`Cannot configure MCP: ${nodeCheck.reason}`)
+
   const paths = configPaths(options)
   if (!fs.existsSync(paths.globalConfigPath)) throw new Error(`Codex global config not found: ${paths.globalConfigPath}`)
   if (mode(paths.globalConfigPath) !== '0600') throw new Error('Codex global config must have mode 0600 before registration.')

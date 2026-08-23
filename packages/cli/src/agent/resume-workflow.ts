@@ -1,7 +1,7 @@
 import type { AgentJob } from './agent-jobs'
 import type { WorkbenchPacketRecord } from './workbench-packet-store'
 import { buildResumeProjection, isResumeProjectionFresh, type ResumeProjection } from './resume-projection'
-import { evaluateRunExecutionBudget } from './run-budget'
+import { evaluateRunExecutionBudget, resumeRunExecutionBudget } from './run-budget'
 
 export type ResumeStopReason =
   | 'no_active_run'
@@ -32,9 +32,15 @@ export type ResumeWorkflowInput = {
 
 export function evaluateResumeWorkflow(input: ResumeWorkflowInput): ResumeWorkflowDecision {
   const sourceId = String(input.lockedSourceId || '').trim()
-  const run = input.run
-  if (!run) return { eligible: false, reason: 'no_active_run', nextAction: 'Create a bounded Workbench run.', rebuiltProjection: false }
-  if (!sourceId || run.sourceId !== sourceId) return { eligible: false, reason: 'source_mismatch', nextAction: 'Lock the correct source before resuming.', rebuiltProjection: false }
+  const persistedRun = input.run
+  if (!persistedRun) return { eligible: false, reason: 'no_active_run', nextAction: 'Create a bounded Workbench run.', rebuiltProjection: false }
+  if (!sourceId || persistedRun.sourceId !== sourceId) return { eligible: false, reason: 'source_mismatch', nextAction: 'Lock the correct source before resuming.', rebuiltProjection: false }
+
+  // A paused run owns an active-time budget, not a wall-clock deadline. Rebase
+  // before projection/admission so an overnight pause remains resumable.
+  const run = persistedRun.status === 'paused'
+    ? { ...persistedRun, executionBudget: resumeRunExecutionBudget(persistedRun.executionBudget, input.now) }
+    : persistedRun
 
   const terminal = ['completed', 'failed', 'cancelled'].includes(run.status)
   if (terminal) return { eligible: false, reason: 'terminal_run', nextAction: 'Start a new bounded run or use an explicit recovery contract.', rebuiltProjection: false }

@@ -1,0 +1,17 @@
+{
+  "corpusVersion": 1,
+  "corpusId": "workbench-action-round-trip-v1",
+  "executionReadiness": "native_ready_with_adapter_replacement",
+  "portability": "product_agnostic_with_installation_adapter",
+  "scenarios": [
+    { "id": "documentation-edit", "title": "Focused documentation edit", "category": "documentation_edit", "expectedOutcome": "success", "deterministicSeed": 101, "requiresConfirmation": false, "operations": ["read_paths", "patch", "validate"] },
+    { "id": "focused-code-change", "title": "Single-module code change", "category": "focused_code_change", "expectedOutcome": "success", "deterministicSeed": 102, "requiresConfirmation": false, "operations": ["read_symbol", "patch", "type_check"] },
+    { "id": "multi-file-change", "title": "Bounded multi-file packet", "category": "multi_file_change", "expectedOutcome": "success", "deterministicSeed": 103, "requiresConfirmation": false, "operations": ["read_paths", "packet_preflight", "packet_execute"] },
+    { "id": "validation-only", "title": "Validation without mutation", "category": "validation_only", "expectedOutcome": "success", "deterministicSeed": 104, "requiresConfirmation": false, "operations": ["run_package_test"] },
+    { "id": "rollback-after-failure", "title": "Rollback after failed validation", "category": "rollback", "expectedOutcome": "rolled_back", "deterministicSeed": 105, "requiresConfirmation": false, "operations": ["packet_execute", "rollback"] },
+    { "id": "bounded-timeout", "title": "Bounded command timeout", "category": "timeout", "expectedOutcome": "timeout", "deterministicSeed": 106, "requiresConfirmation": false, "operations": ["run_package_test"] },
+    { "id": "stale-head-rejection", "title": "Expected HEAD mismatch", "category": "stale_head", "expectedOutcome": "blocked", "deterministicSeed": 107, "requiresConfirmation": false, "operations": ["packet_preflight"] },
+    { "id": "confirmation-boundary", "title": "Confirmation-gated mutation", "category": "confirmation_boundary", "expectedOutcome": "blocked", "deterministicSeed": 108, "requiresConfirmation": true, "operations": ["packet_execute"] },
+    { "id": "explicit-safe-failure", "title": "Explicit deterministic failure", "category": "explicit_failure", "expectedOutcome": "failure", "deterministicSeed": 109, "requiresConfirmation": false, "operations": ["validate_json_files"] }
+  ]
+}

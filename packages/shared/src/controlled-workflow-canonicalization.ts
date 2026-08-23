@@ -1,4 +1,8 @@
-import type { ControlledWorkflowTopologyManifest, WorkflowConnectionSpec } from './controlled-workflow-topology'
+import type {
+  ControlledWorkflowCanonicalizationVersion,
+  ControlledWorkflowTopologyManifest,
+  WorkflowConnectionSpec
+} from './controlled-workflow-topology'
 
 export type CanonicalJsonValue = null | boolean | number | string | CanonicalJsonValue[] | { [key: string]: CanonicalJsonValue }
 export type CanonicalWorkflowIssue = { code: string; path: string; message: string }
@@ -14,7 +18,7 @@ export type CanonicalWorkflowNode = {
 }
 
 export type CanonicalWorkflowTopology = {
-  canonicalizationVersion: 1
+  canonicalizationVersion: ControlledWorkflowCanonicalizationVersion
   workflowId: string
   nodes: CanonicalWorkflowNode[]
   connections: WorkflowConnectionSpec[]
@@ -23,9 +27,10 @@ export type CanonicalWorkflowTopology = {
 export type PresenceValue = { state: 'missing' } | { state: 'present'; value: CanonicalJsonValue }
 export type CredentialReference = { nodeId: string; credentialType: string; id?: string; name?: string }
 export type ProtectedTriggerSnapshot = { nodeId: string; nodeType: string; parameters: CanonicalJsonValue }
+export type ProtectedWorkflowSharingAssignment = { projectId: string; role: string }
 
 export type ProtectedWorkflowSnapshot = {
-  canonicalizationVersion: 1
+  canonicalizationVersion: ControlledWorkflowCanonicalizationVersion
   workflowId: string
   activation: PresenceValue
   settings: PresenceValue
@@ -34,6 +39,41 @@ export type ProtectedWorkflowSnapshot = {
   credentials: CredentialReference[]
   webhooks: ProtectedTriggerSnapshot[]
   schedules: ProtectedTriggerSnapshot[]
+}
+
+export type ControlledWorkflowProtectedDomain = Exclude<
+  keyof ProtectedWorkflowSnapshot,
+  'canonicalizationVersion' | 'workflowId'
+>
+
+const CONTROLLED_WORKFLOW_PROTECTED_DOMAIN_MAP = {
+  activation: true,
+  settings: true,
+  tags: true,
+  sharing: true,
+  credentials: true,
+  webhooks: true,
+  schedules: true
+} satisfies Record<ControlledWorkflowProtectedDomain, true>
+
+export const CONTROLLED_WORKFLOW_PROTECTED_DOMAINS = Object.freeze(
+  Object.keys(CONTROLLED_WORKFLOW_PROTECTED_DOMAIN_MAP) as ControlledWorkflowProtectedDomain[]
+)
+
+export function isCanonicalControlledWorkflowProtectedDomainList(
+  value: unknown
+): value is ControlledWorkflowProtectedDomain[] {
+  if (!Array.isArray(value)
+    || value.length === 0
+    || value.length > CONTROLLED_WORKFLOW_PROTECTED_DOMAINS.length) return false
+  let previousIndex = -1
+  for (const domain of value) {
+    if (typeof domain !== 'string') return false
+    const index = (CONTROLLED_WORKFLOW_PROTECTED_DOMAINS as readonly string[]).indexOf(domain)
+    if (index <= previousIndex) return false
+    previousIndex = index
+  }
+  return true
 }
 
 export type CanonicalWorkflowResult =
@@ -97,6 +137,73 @@ function presence(record: Record<string, unknown>, key: string, path: string, is
   if (!Object.prototype.hasOwnProperty.call(record, key)) return { state: 'missing' }
   const value = canonicalJson(record[key], path, issues)
   return value === undefined ? { state: 'missing' } : { state: 'present', value }
+}
+
+function semanticSharingPresence(
+  workflow: Record<string, unknown>,
+  workflowId: string,
+  issues: CanonicalWorkflowIssue[]
+): PresenceValue {
+  const hasShared = Object.prototype.hasOwnProperty.call(workflow, 'shared')
+  const hasSharing = Object.prototype.hasOwnProperty.call(workflow, 'sharing')
+  if (!hasShared && !hasSharing) return { state: 'missing' }
+  if (hasShared && hasSharing) {
+    issues.push({
+      code: 'AMBIGUOUS_SHARING_FIELDS',
+      path: '/sharing',
+      message: 'workflow may contain only one sharing representation'
+    })
+    return { state: 'missing' }
+  }
+
+  const key = hasShared ? 'shared' : 'sharing'
+  const raw = workflow[key]
+  if (!Array.isArray(raw)) {
+    issues.push({ code: 'INVALID_SHARING', path: `/${key}`, message: 'sharing must be an array' })
+    return { state: 'missing' }
+  }
+
+  const assignments: ProtectedWorkflowSharingAssignment[] = []
+  const seenProjects = new Set<string>()
+  raw.forEach((value, index) => {
+    const basePath = `/${key}/${index}`
+    if (!isRecord(value)) {
+      issues.push({ code: 'INVALID_SHARING_ENTRY', path: basePath, message: 'sharing entry must be an object' })
+      return
+    }
+    const projectId = typeof value.projectId === 'string' && value.projectId === value.projectId.trim()
+      && value.projectId.length > 0 && value.projectId.length <= 200
+      ? value.projectId
+      : ''
+    const role = typeof value.role === 'string' && value.role === value.role.trim()
+      && value.role.length > 0 && value.role.length <= 160
+      ? value.role
+      : ''
+    if (!projectId) issues.push({ code: 'INVALID_SHARING_PROJECT_ID', path: `${basePath}/projectId`, message: 'sharing project ID is required' })
+    if (!role) issues.push({ code: 'INVALID_SHARING_ROLE', path: `${basePath}/role`, message: 'sharing role is required' })
+    if (Object.prototype.hasOwnProperty.call(value, 'workflowId') && value.workflowId !== workflowId) {
+      issues.push({ code: 'SHARING_WORKFLOW_ID_MISMATCH', path: `${basePath}/workflowId`, message: 'sharing workflow ID does not match the workflow' })
+    }
+    if (Object.prototype.hasOwnProperty.call(value, 'project')) {
+      if (!isRecord(value.project)) {
+        issues.push({ code: 'INVALID_SHARING_PROJECT', path: `${basePath}/project`, message: 'expanded sharing project must be an object' })
+      } else if (Object.prototype.hasOwnProperty.call(value.project, 'id') && value.project.id !== projectId) {
+        issues.push({ code: 'SHARING_PROJECT_ID_MISMATCH', path: `${basePath}/project/id`, message: 'expanded project ID does not match the sharing project ID' })
+      }
+    }
+    if (!projectId || !role) return
+    if (seenProjects.has(projectId)) {
+      issues.push({ code: 'DUPLICATE_SHARING_PROJECT', path: `${basePath}/projectId`, message: 'sharing project IDs must be unique' })
+      return
+    }
+    seenProjects.add(projectId)
+    assignments.push({ projectId, role })
+  })
+  assignments.sort((left, right) => compareText(
+    JSON.stringify([left.projectId, left.role]),
+    JSON.stringify([right.projectId, right.role])
+  ))
+  return { state: 'present', value: assignments }
 }
 
 function credentialReferences(node: Record<string, unknown>, nodeId: string): CredentialReference[] {
@@ -173,7 +280,10 @@ function extractConnections(workflow: Record<string, unknown>, nodeIdsByName: Ma
   return edges
 }
 
-export function canonicalizeN8nWorkflow(input: unknown): CanonicalWorkflowResult {
+export function canonicalizeN8nWorkflow(
+  input: unknown,
+  canonicalizationVersion: ControlledWorkflowCanonicalizationVersion = 1
+): CanonicalWorkflowResult {
   if (!isRecord(input)) return { ok: false, issues: [{ code: 'INVALID_WORKFLOW', path: '/', message: 'workflow must be an object' }] }
   const issues: CanonicalWorkflowIssue[] = []
   const workflowId = typeof input.id === 'string' && input.id.length > 0 ? input.id : ''
@@ -222,19 +332,21 @@ export function canonicalizeN8nWorkflow(input: unknown): CanonicalWorkflowResult
   const connections = extractConnections(input, idsByName, issues)
   const sharingKey = Object.prototype.hasOwnProperty.call(input, 'shared') ? 'shared' : Object.prototype.hasOwnProperty.call(input, 'sharing') ? 'sharing' : ''
   const protectedSnapshot: ProtectedWorkflowSnapshot = {
-    canonicalizationVersion: 1,
+    canonicalizationVersion,
     workflowId,
     activation: presence(input, 'active', '/active', issues),
     settings: presence(input, 'settings', '/settings', issues),
     tags: presence(input, 'tags', '/tags', issues),
-    sharing: sharingKey ? presence(input, sharingKey, `/${sharingKey}`, issues) : { state: 'missing' },
+    sharing: canonicalizationVersion === 2
+      ? semanticSharingPresence(input, workflowId, issues)
+      : sharingKey ? presence(input, sharingKey, `/${sharingKey}`, issues) : { state: 'missing' },
     credentials: credentials.sort((a, b) => compareText(JSON.stringify([a.nodeId, a.credentialType]), JSON.stringify([b.nodeId, b.credentialType]))),
     webhooks: webhooks.sort((a, b) => compareText(a.nodeId, b.nodeId)),
     schedules: schedules.sort((a, b) => compareText(a.nodeId, b.nodeId))
   }
   if (issues.length > 0) return { ok: false, issues: issues.slice(0, 100) }
   nodes.sort((a, b) => compareText(a.id, b.id))
-  return { ok: true, topology: { canonicalizationVersion: 1, workflowId, nodes, connections }, protected: protectedSnapshot }
+  return { ok: true, topology: { canonicalizationVersion, workflowId, nodes, connections }, protected: protectedSnapshot }
 }
 
 export function hashCanonicalWorkflowTopology(topology: CanonicalWorkflowTopology, digest: Sha256Digest): string {
@@ -285,8 +397,9 @@ export function compareControlledWorkflowCandidate(params: {
   manifest: ControlledWorkflowTopologyManifest
   digest: Sha256Digest
 }): ControlledWorkflowComparison {
-  const live = canonicalizeN8nWorkflow(params.live)
-  const candidate = canonicalizeN8nWorkflow(params.candidate)
+  const version = params.manifest.workflow.canonicalizationVersion
+  const live = canonicalizeN8nWorkflow(params.live, version)
+  const candidate = canonicalizeN8nWorkflow(params.candidate, version)
   const issues: CanonicalWorkflowIssue[] = []
   if (live.ok === false || candidate.ok === false) {
     if (live.ok === false) issues.push(...live.issues.map(issue => ({ ...issue, path: `/live${issue.path}` })))
@@ -348,16 +461,9 @@ export function compareControlledWorkflowCandidate(params: {
   params.manifest.routes.required.forEach(route => { if (!candidateEdges.has(edgeKey(route))) issues.push({ code: 'MISSING_REQUIRED_ROUTE', path: '/routes/required', message: 'required route is absent' }) })
   params.manifest.routes.forbidden.forEach(route => { if (candidateEdges.has(edgeKey(route))) issues.push({ code: 'FORBIDDEN_ROUTE_PRESENT', path: '/routes/forbidden', message: 'forbidden route is present' }) })
 
-  const protectedDomains: Array<[string, unknown, unknown]> = [
-    ['activation', live.protected.activation, candidate.protected.activation],
-    ['settings', live.protected.settings, candidate.protected.settings],
-    ['tags', live.protected.tags, candidate.protected.tags],
-    ['sharing', live.protected.sharing, candidate.protected.sharing],
-    ['credentials', live.protected.credentials, candidate.protected.credentials],
-    ['webhooks', live.protected.webhooks, candidate.protected.webhooks],
-    ['schedules', live.protected.schedules, candidate.protected.schedules]
-  ]
-  protectedDomains.forEach(([domain, before, after]) => {
+  CONTROLLED_WORKFLOW_PROTECTED_DOMAINS.forEach(domain => {
+    const before = live.protected[domain]
+    const after = candidate.protected[domain]
     if (stableSerializeCanonicalValue(before) !== stableSerializeCanonicalValue(after)) issues.push({ code: 'PROTECTED_DOMAIN_CHANGED', path: `/invariants/${domain}`, message: `protected domain ${domain} changed` })
   })
 

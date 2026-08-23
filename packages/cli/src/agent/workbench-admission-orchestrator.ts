@@ -58,6 +58,24 @@ export type WorkbenchAdmissionOptions = {
   now?: string
 }
 
+export type WorkbenchAdmissionLease = {
+  requestId: string
+  sessionId: string
+  sourceId: string
+  operation: WorkbenchAdmissionOperation
+  operationKind: string
+  workerClass: WorkbenchWorkerClass
+  repositoryClass?: RepositoryScheduleClass
+  budgetLeaseId: string
+  budgetLeaseProof: string
+  repositoryRequestId?: string
+  repositoryLeaseProof?: string
+}
+
+export type WorkbenchAdmissionLeaseResult =
+  | { ok: true; lease: WorkbenchAdmissionLease }
+  | WorkbenchAdmissionFailure
+
 export function classifyWorkbenchAdmissionOperation(operation: WorkbenchAdmissionOperation): WorkbenchAdmissionClassification {
   switch (operation) {
     case 'status':
@@ -88,15 +106,14 @@ function isRepositoryFailure<T extends { ok: boolean }>(value: T | RepositorySch
   return value.ok === false
 }
 
-export async function executeWithWorkbenchAdmission<T>(input: {
+export function acquireWorkbenchAdmission(input: {
   requestId?: string
   sessionId: string
   sourceId: string
   operation: WorkbenchAdmissionOperation
   operationKind: string
   cost?: number
-  execute: () => Promise<T> | T
-}, options: WorkbenchAdmissionOptions = {}): Promise<{ ok: true; result: T } | WorkbenchAdmissionFailure> {
+}, options: WorkbenchAdmissionOptions = {}): WorkbenchAdmissionLeaseResult {
   const session = getWorkbenchSession(input.sessionId, options.session)
   if (!session || isSessionFailure(session) || session.status !== 'active') {
     return {
@@ -125,7 +142,8 @@ export async function executeWithWorkbenchAdmission<T>(input: {
     return { ok: false, code: 'ADMISSION_BUDGET_REJECTED', message: budget.message, cause: budget }
   }
 
-  let repositoryLease: { requestId: string; leaseProof: string } | undefined
+  let repositoryRequestId: string | undefined
+  let repositoryLeaseProof: string | undefined
   if (classification.repositoryClass) {
     const queued = enqueueRepositoryWork({
       requestId,
@@ -150,17 +168,92 @@ export async function executeWithWorkbenchAdmission<T>(input: {
       releaseWorkbenchBudget({ leaseId: budget.lease.leaseId, leaseProof: budget.leaseProof, outcome: 'cancelled', now: options.now }, options.budget)
       return { ok: false, code: 'ADMISSION_REPOSITORY_REJECTED', message: claimed.message, cause: claimed }
     }
-    repositoryLease = { requestId, leaseProof: claimed.leaseProof }
+    repositoryRequestId = requestId
+    repositoryLeaseProof = claimed.leaseProof
   }
+
+  return {
+    ok: true,
+    lease: {
+      requestId,
+      sessionId: input.sessionId,
+      sourceId: input.sourceId,
+      operation: input.operation,
+      operationKind: input.operationKind,
+      workerClass: classification.workerClass,
+      ...(classification.repositoryClass ? { repositoryClass: classification.repositoryClass } : {}),
+      budgetLeaseId: budget.lease.leaseId,
+      budgetLeaseProof: budget.leaseProof,
+      ...(repositoryRequestId ? { repositoryRequestId } : {}),
+      ...(repositoryLeaseProof ? { repositoryLeaseProof } : {})
+    }
+  }
+}
+
+export function releaseWorkbenchAdmission(
+  lease: WorkbenchAdmissionLease,
+  options: WorkbenchAdmissionOptions = {},
+  outcome: 'released' | 'cancelled' = 'released'
+): { ok: true } | WorkbenchAdmissionFailure {
+  let repositoryFailure: RepositorySchedulerFailure | undefined
+  if (lease.repositoryRequestId) {
+    const repositoryResult = outcome === 'cancelled'
+      ? cancelRepositoryWork({ requestId: lease.repositoryRequestId, now: options.now }, options.repository)
+      : lease.repositoryLeaseProof
+        ? completeRepositoryWork({ requestId: lease.repositoryRequestId, leaseProof: lease.repositoryLeaseProof, now: options.now }, options.repository)
+        : { ok: false as const, code: 'SCHEDULER_LEASE_PROOF_INVALID' as const, message: 'Repository lease proof is missing.' }
+    if (isRepositoryFailure(repositoryResult)) {
+      if (repositoryResult.code === 'SCHEDULER_LEASE_CONFLICT') {
+        const fallback = cancelRepositoryWork({ requestId: lease.repositoryRequestId, now: options.now }, options.repository)
+        if (isRepositoryFailure(fallback)) repositoryFailure = repositoryResult
+      } else {
+        repositoryFailure = repositoryResult
+      }
+    }
+  }
+
+  const budgetResult = releaseWorkbenchBudget({
+    leaseId: lease.budgetLeaseId,
+    leaseProof: lease.budgetLeaseProof,
+    outcome,
+    now: options.now
+  }, options.budget)
+
+  if (repositoryFailure) {
+    return { ok: false, code: 'ADMISSION_REPOSITORY_REJECTED', message: repositoryFailure.message, cause: repositoryFailure }
+  }
+  if (isBudgetFailure(budgetResult)) {
+    return { ok: false, code: 'ADMISSION_BUDGET_REJECTED', message: budgetResult.message, cause: budgetResult }
+  }
+  return { ok: true }
+}
+
+export async function executeWithWorkbenchAdmission<T>(input: {
+  requestId?: string
+  sessionId: string
+  sourceId: string
+  operation: WorkbenchAdmissionOperation
+  operationKind: string
+  cost?: number
+  execute: () => Promise<T> | T
+}, options: WorkbenchAdmissionOptions = {}): Promise<{ ok: true; result: T } | WorkbenchAdmissionFailure> {
+  const acquired = acquireWorkbenchAdmission({
+    requestId: input.requestId,
+    sessionId: input.sessionId,
+    sourceId: input.sourceId,
+    operation: input.operation,
+    operationKind: input.operationKind,
+    cost: input.cost
+  }, options)
+  if (acquired.ok === false) return acquired
 
   try {
     const result = await input.execute()
-    if (repositoryLease) completeRepositoryWork({ requestId: repositoryLease.requestId, leaseProof: repositoryLease.leaseProof, now: options.now }, options.repository)
-    releaseWorkbenchBudget({ leaseId: budget.lease.leaseId, leaseProof: budget.leaseProof, now: options.now }, options.budget)
+    const released = releaseWorkbenchAdmission(acquired.lease, options, 'released')
+    if (released.ok === false) return released
     return { ok: true, result }
   } catch (error) {
-    if (repositoryLease) cancelRepositoryWork({ requestId: repositoryLease.requestId, now: options.now }, options.repository)
-    releaseWorkbenchBudget({ leaseId: budget.lease.leaseId, leaseProof: budget.leaseProof, outcome: 'cancelled', now: options.now }, options.budget)
+    releaseWorkbenchAdmission(acquired.lease, options, 'cancelled')
     return { ok: false, code: 'ADMISSION_EXECUTION_FAILED', message: error instanceof Error ? error.message : String(error) }
   }
 }

@@ -3,6 +3,7 @@ import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } fr
 import { createWorkbenchClient, MAX_ACTION_REQUEST_BYTES, type BridgeResult } from './client.js'
 import {
   WORKBENCH_TOOL_NAMES,
+  buildRunWorkbenchCommandDiscoverySchema,
   loadWorkbenchToolContracts,
   validateToolInput,
   type WorkbenchToolContract,
@@ -23,12 +24,19 @@ function toolResponse(result: BridgeResult) {
   }
 }
 
-export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: InvokeWorkbench; scope?: WorkbenchMcpScope }) {
+export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: InvokeWorkbench; scope?: WorkbenchMcpScope; contextIntelligenceSessionId?: string }) {
   const contracts = loadWorkbenchToolContracts(params.repoRoot)
   const invoke = params.invoke ?? createWorkbenchClient()
   const scope = params.scope ?? loadWorkbenchMcpScope()
-  const admittedToolNames = WORKBENCH_TOOL_NAMES.filter(name => scope.tools.has(name))
-  const server = new Server({ name: 'workbench', version: '1.3.3-beta' }, {
+  const runWorkbenchCommandAdmitted = scope.tools.has('runWorkbenchCommand') && scope.commandKinds.size > 0
+  const admittedToolNames = WORKBENCH_TOOL_NAMES.filter(name =>
+    scope.tools.has(name) && (name !== 'runWorkbenchCommand' || runWorkbenchCommandAdmitted)
+  )
+  const admittedToolNameSet = new Set<WorkbenchToolName>(admittedToolNames)
+  const runWorkbenchCommandDiscoverySchema = runWorkbenchCommandAdmitted
+    ? buildRunWorkbenchCommandDiscoverySchema(scope.commandKinds)
+    : undefined
+  const server = new Server({ name: 'workbench', version: '1.3.12-beta' }, {
     capabilities: { tools: {} },
     instructions: 'Use only the admitted bounded Workbench actions. Workbench remains authoritative for source selection, policy, confirmation, grants, dispatch, audit, and execution. Never retry mutation-capable calls after ambiguous transport results.'
   })
@@ -40,7 +48,9 @@ export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: In
         name,
         title: contract.title,
         description: contract.description,
-        inputSchema: contract.inputSchema as { type: 'object'; [key: string]: unknown },
+        inputSchema: (name === 'runWorkbenchCommand'
+          ? runWorkbenchCommandDiscoverySchema
+          : contract.inputSchema) as { type: 'object'; [key: string]: unknown },
         annotations: {
           readOnlyHint: !contract.mutationCapable,
           destructiveHint: contract.mutationCapable,
@@ -54,7 +64,7 @@ export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: In
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name as WorkbenchToolName
     const contract = contracts.get(name)
-    if (!contract || !scope.tools.has(name)) throw new McpError(ErrorCode.MethodNotFound, 'Unknown or unadmitted Workbench MCP tool.')
+    if (!contract || !admittedToolNameSet.has(name)) throw new McpError(ErrorCode.MethodNotFound, 'Unknown or unadmitted Workbench MCP tool.')
     if (Buffer.byteLength(JSON.stringify(request.params.arguments ?? {}), 'utf8') > MAX_ACTION_REQUEST_BYTES) {
       return toolResponse({
         ok: false,
@@ -62,7 +72,23 @@ export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: In
         message: 'Workbench MCP request exceeded the allowed size.'
       })
     }
-    const parsed = validateToolInput(contract, request.params.arguments ?? {})
+    const rawInput = request.params.arguments ?? {}
+    if (contract.name === 'runWorkbenchCommand') {
+      const command = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput)
+        ? (rawInput as Record<string, unknown>).command
+        : undefined
+      const commandKind = command && typeof command === 'object' && !Array.isArray(command)
+        ? (command as Record<string, unknown>).commandKind
+        : undefined
+      if (typeof commandKind === 'string' && !scope.commandKinds.has(commandKind as never)) {
+        return toolResponse({
+          ok: false,
+          code: 'mcp_scope_denied',
+          message: 'Workbench MCP command kind is outside the admitted scope.'
+        })
+      }
+    }
+    const parsed = validateToolInput(contract, rawInput)
     if (!parsed.ok) {
       return toolResponse({
         ok: false,
@@ -84,7 +110,10 @@ export function createWorkbenchMcpServer(params: { repoRoot: string; invoke?: In
         })
       }
     }
-    return toolResponse(await invoke(contract, parsed.value, extra.signal))
+    const invokeInput = params.contextIntelligenceSessionId
+      ? { ...parsed.value, contextIntelligenceSessionId: params.contextIntelligenceSessionId }
+      : parsed.value
+    return toolResponse(await invoke(contract, invokeInput, extra.signal))
   })
 
   return server

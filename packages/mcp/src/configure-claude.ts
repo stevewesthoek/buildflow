@@ -14,6 +14,7 @@ import {
   canonicalProjectRoot,
   canonicalNodeExecutable,
   parseConfigureCliArgs,
+  validateNodeContract,
   type WorkbenchMcpProfile
 } from './configure-core.js'
 
@@ -46,6 +47,12 @@ export type ClaudeConfigureHooks = {
   afterCliAdd?: () => void
 }
 
+export type ClaudeRegistrationAssessment = {
+  operational: boolean
+  failures: string[]
+  warnings: string[]
+}
+
 export type ClaudeRegistrationStatus = {
   configured: boolean
   serverName: string
@@ -55,6 +62,12 @@ export type ClaudeRegistrationStatus = {
   credentialMode?: string
   command?: string
   args?: string[]
+  commandMatchesExpected: boolean
+  commandExecutableValid: boolean
+  argsMatchExpected: boolean
+  environmentMatchesExpected: boolean
+  unexpectedEnvironmentKeys: string[]
+  missingEnvironmentKeys: string[]
   duplicateCount: number
   userMatchCount: number
   localMatchCount: number
@@ -69,6 +82,15 @@ function mode(file: string): string | undefined {
     return (fs.statSync(file).mode & 0o777).toString(8).padStart(4, '0')
   } catch {
     return undefined
+  }
+}
+
+function registeredNodeCommandIsExecutable(command: string | undefined): boolean {
+  if (!command || !path.isAbsolute(command)) return false
+  try {
+    return path.basename(canonicalNodeExecutable(command)) === 'node'
+  } catch {
+    return false
   }
 }
 
@@ -153,16 +175,32 @@ function buildExpectedEntry(spec: ReturnType<typeof buildWorkbenchMcpServerSpec>
   }
 }
 
-function entriesMatch(actual: ClaudeMcpEntry, expected: ClaudeMcpEntry): boolean {
-  if (actual.command !== expected.command) return false
-  if (JSON.stringify(actual.args ?? []) !== JSON.stringify(expected.args ?? [])) return false
-  const actualEnv = actual.env ?? {}
+function entryMatchDiagnostics(actual: ClaudeMcpEntry | undefined, expected: ClaudeMcpEntry): {
+  commandMatchesExpected: boolean
+  argsMatchExpected: boolean
+  environmentMatchesExpected: boolean
+  unexpectedEnvironmentKeys: string[]
+  missingEnvironmentKeys: string[]
+} {
+  const actualEnv = actual?.env ?? {}
   const expectedEnv = expected.env ?? {}
-  const allKeys = new Set([...Object.keys(actualEnv), ...Object.keys(expectedEnv)])
-  for (const key of allKeys) {
-    if (actualEnv[key] !== expectedEnv[key]) return false
+  const unexpectedEnvironmentKeys = Object.keys(actualEnv).filter(key => !(key in expectedEnv)).sort()
+  const missingEnvironmentKeys = Object.keys(expectedEnv).filter(key => !(key in actualEnv)).sort()
+  const environmentMatchesExpected = unexpectedEnvironmentKeys.length === 0 &&
+    missingEnvironmentKeys.length === 0 &&
+    Object.keys(expectedEnv).every(key => actualEnv[key] === expectedEnv[key])
+  return {
+    commandMatchesExpected: actual?.command === expected.command,
+    argsMatchExpected: JSON.stringify(actual?.args ?? []) === JSON.stringify(expected.args ?? []),
+    environmentMatchesExpected,
+    unexpectedEnvironmentKeys,
+    missingEnvironmentKeys
   }
-  return true
+}
+
+function entriesMatch(actual: ClaudeMcpEntry, expected: ClaudeMcpEntry): boolean {
+  const diagnostics = entryMatchDiagnostics(actual, expected)
+  return diagnostics.commandMatchesExpected && diagnostics.argsMatchExpected && diagnostics.environmentMatchesExpected
 }
 
 function credentialIsReferenced(doc: ClaudeJsonDocument, credentialFile: string): boolean {
@@ -251,7 +289,8 @@ export function inspectClaudeRegistration(options: ClaudeConfigureOptions): Clau
   const localEntry = localServers[SERVER_NAME]
   const spec = buildWorkbenchMcpServerSpec(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable, profile)
   const expected = buildExpectedEntry(spec)
-  const configured = !!localEntry && entriesMatch(localEntry, expected)
+  const diagnostics = entryMatchDiagnostics(localEntry, expected)
+  const configured = !!localEntry && diagnostics.commandMatchesExpected && diagnostics.argsMatchExpected && diagnostics.environmentMatchesExpected
 
   return {
     configured,
@@ -262,6 +301,12 @@ export function inspectClaudeRegistration(options: ClaudeConfigureOptions): Clau
     credentialMode: mode(paths.credentialFile),
     command: localEntry?.command,
     args: localEntry?.args,
+    commandMatchesExpected: diagnostics.commandMatchesExpected,
+    commandExecutableValid: registeredNodeCommandIsExecutable(localEntry?.command),
+    argsMatchExpected: diagnostics.argsMatchExpected,
+    environmentMatchesExpected: diagnostics.environmentMatchesExpected,
+    unexpectedEnvironmentKeys: diagnostics.unexpectedEnvironmentKeys,
+    missingEnvironmentKeys: diagnostics.missingEnvironmentKeys,
     duplicateCount: userMatches.length + localMatches.length,
     userMatchCount: userMatches.length,
     localMatchCount: localMatches.length,
@@ -270,6 +315,34 @@ export function inspectClaudeRegistration(options: ClaudeConfigureOptions): Clau
     scope: 'local',
     targetProjectRoot: paths.targetProjectRoot
   }
+}
+
+export function assessClaudeRegistration(status: ClaudeRegistrationStatus): ClaudeRegistrationAssessment {
+  const failures: string[] = []
+  const warnings: string[] = []
+
+  if (status.userMatchCount > 0) failures.push(`Found ${status.userMatchCount} Workbench definition(s) at Claude user scope.`)
+  if (status.localMatchCount !== 1) failures.push(`Expected exactly 1 local Workbench definition; found ${status.localMatchCount}.`)
+  if (status.duplicateCount !== 1) failures.push(`Expected exactly 1 total Workbench definition; found ${status.duplicateCount}.`)
+  if (!status.commandExecutableValid) failures.push('Registered Workbench command is not a valid executable Node binary.')
+  if (!status.argsMatchExpected) failures.push('Registered Workbench arguments do not match the canonical server entrypoint.')
+  if (!status.environmentMatchesExpected) {
+    const details = [
+      status.unexpectedEnvironmentKeys.length > 0 ? `unexpected keys: ${status.unexpectedEnvironmentKeys.join(', ')}` : '',
+      status.missingEnvironmentKeys.length > 0 ? `missing keys: ${status.missingEnvironmentKeys.join(', ')}` : ''
+    ].filter(Boolean).join('; ')
+    failures.push(`Registered Workbench environment does not match the canonical credential/profile contract${details ? ` (${details})` : ''}.`)
+  }
+  if (status.credentialMode !== '0600') failures.push(`Credential file mode must be 0600 (found: ${status.credentialMode ?? 'missing'}).`)
+
+  if (!status.commandMatchesExpected && status.commandExecutableValid) {
+    warnings.push(`Registered Node executable differs from the Node executable running this inspection (${status.command ?? 'missing'}). Strict configure/audit may report drift; operational health must be validated under the supported Node 20 runtime.`)
+  }
+  if (status.claudeJsonMode !== '0600') {
+    warnings.push(`~/.claude.json mode is ${status.claudeJsonMode ?? 'missing'} rather than 0600. The credential remains separately protected by its required 0600 file; treat this as configuration-hardening debt, not a runtime connectivity failure.`)
+  }
+
+  return { operational: failures.length === 0, failures, warnings }
 }
 
 function resolveClaudeBin(options: ClaudeConfigureOptions): string {
@@ -286,6 +359,9 @@ function resolveClaudeBin(options: ClaudeConfigureOptions): string {
 
 export function configureClaude(options: ClaudeConfigureOptions, hooks?: ClaudeConfigureHooks): ClaudeRegistrationStatus {
   const profile: WorkbenchMcpProfile = options.profile ?? 'workbench'
+  const nodeCheck = validateNodeContract()
+  if (!nodeCheck.valid) throw new Error(`Cannot configure MCP: ${nodeCheck.reason}`)
+
   const paths = configPaths(options)
 
   const preDoc = readClaudeJson(paths.claudeJsonPath)

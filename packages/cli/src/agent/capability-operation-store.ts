@@ -4,7 +4,10 @@ import path from 'node:path'
 import { getConfigDir } from '../utils/paths'
 import { recordGitLockTelemetry } from './git-lock-telemetry'
 import {
+  isCanonicalControlledWorkflowProtectedDomainList,
+  isControlledWorkflowCanonicalizationVersion,
   isControlledWorkflowMigrationStateTransition,
+  type ControlledWorkflowCanonicalizationVersion,
   type ControlledWorkflowMigrationEvidence,
   type ControlledWorkflowMigrationOperation,
   type ControlledWorkflowMigrationReasonCode
@@ -39,7 +42,7 @@ export type CapabilityOperationBinding = {
   manifestSha256: string
   wrapperPath: string
   wrapperSha256: string
-  canonicalizationVersion: 1
+  canonicalizationVersion: ControlledWorkflowCanonicalizationVersion
   candidateCanonicalSha256: string
   rollbackCanonicalSha256: string
   expectedLiveCanonicalSha256: string
@@ -148,7 +151,7 @@ function isBinding(value: unknown): value is CapabilityOperationBinding {
     && typeof binding.rollbackPath === 'string' && binding.rollbackPath.length > 0
     && typeof binding.manifestPath === 'string' && binding.manifestPath.length > 0
     && typeof binding.wrapperPath === 'string' && binding.wrapperPath.length > 0
-    && binding.canonicalizationVersion === 1
+    && isControlledWorkflowCanonicalizationVersion(binding.canonicalizationVersion)
     && [binding.candidateSha256, binding.rollbackSha256, binding.manifestSha256, binding.wrapperSha256, binding.candidateCanonicalSha256, binding.rollbackCanonicalSha256, binding.expectedLiveCanonicalSha256].every(item => typeof item === 'string' && SHA256.test(item))
     && (binding.apiOriginFingerprint === undefined || (typeof binding.apiOriginFingerprint === 'string' && SHA256.test(binding.apiOriginFingerprint)))
 }
@@ -157,8 +160,14 @@ function isEvidence(value: unknown): value is ControlledWorkflowMigrationEvidenc
   if (value === undefined) return true
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const evidence = value as ControlledWorkflowMigrationEvidence
+  const protectedDomainMismatches = evidence.protectedDomainMismatches
   return (evidence.observedCanonicalSha256 === undefined || SHA256.test(evidence.observedCanonicalSha256))
     && (evidence.protectedDomains === undefined || evidence.protectedDomains === 'unchanged' || evidence.protectedDomains === 'unverified')
+    && (protectedDomainMismatches === undefined || (
+      evidence.protectedDomains === 'unverified'
+      && evidence.executorReasonCode === 'PROTECTED_DOMAIN_MISMATCH'
+      && isCanonicalControlledWorkflowProtectedDomainList(protectedDomainMismatches)
+    ))
     && (evidence.mutationResult === undefined || ['not_started', 'succeeded', 'definitively_failed', 'ambiguous', 'timed_out'].includes(evidence.mutationResult))
     && (evidence.readbackResult === undefined || ['matches_candidate', 'matches_rollback', 'matches_pre_mutation', 'unexpected_state', 'unavailable'].includes(evidence.readbackResult))
     && (evidence.rollbackResult === undefined || ['not_attempted', 'succeeded', 'definitively_failed', 'ambiguous', 'timed_out'].includes(evidence.rollbackResult))

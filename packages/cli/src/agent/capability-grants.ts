@@ -1,5 +1,6 @@
 import * as path from 'node:path'
 import { z } from 'zod'
+import { controlledWorkflowCanonicalizationVersionSchema } from '@workbench/shared'
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
 const sourceIdSchema = z.string().trim().min(1).max(160)
@@ -23,7 +24,7 @@ export const controlledN8nWorkflowGrantSchema = z.object({
   allowedCandidateRoots: z.array(repositoryRelativePathSchema).min(1).max(20),
   allowedRollbackRoots: z.array(repositoryRelativePathSchema).min(1).max(20),
   allowedManifestRoots: z.array(repositoryRelativePathSchema).min(1).max(20),
-  canonicalizationVersion: z.literal(1),
+  canonicalizationVersion: controlledWorkflowCanonicalizationVersionSchema,
   confirmationTtlSeconds: z.number().int().min(30).max(3600),
   operationTimeoutMs: z.number().int().min(1000).max(900_000),
   maxArtifactBytes: z.number().int().min(1024).max(10 * 1024 * 1024),

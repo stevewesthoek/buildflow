@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { sessionAwareRunWorkbenchCommandRequestSchema } from '@workbench/shared'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { dispatchWorkbenchCommand, sourceSelectionRequired, unwrapActionError } from '@/lib/actions/gpt'
+import { dispatchWorkbenchCommand } from '@/lib/actions/portable-operation-adapters'
+import { sourceSelectionRequired, unwrapActionError } from '@/lib/actions/gpt'
 import { buildActionErrorEnvelope, stripBloat } from '@/lib/actions/action-response'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 import {
-  jsonResponseBytes,
+  buildRunCommandRouteTelemetryInput,
   recordRunCommandTelemetry,
   type RunCommandTelemetryInput
 } from '@/lib/actions/run-command-telemetry'
@@ -41,12 +42,9 @@ function suggestedNextAction(commandKind: string): string {
 function jsonWithRunCommandTelemetry(
   payload: unknown,
   init: ResponseInit | undefined,
-  telemetry: Omit<RunCommandTelemetryInput, 'responseBytes'>
+  telemetry: Omit<RunCommandTelemetryInput, 'responseBytes' | 'renderedBytes' | 'actionRoundTrips' | 'retries' | 'interruptions'>
 ) {
-  recordRunCommandTelemetry({
-    ...telemetry,
-    responseBytes: jsonResponseBytes(payload)
-  })
+  recordRunCommandTelemetry(buildRunCommandRouteTelemetryInput(payload, telemetry))
   return NextResponse.json(payload, init)
 }
 
@@ -54,6 +52,7 @@ export async function POST(request: NextRequest) {
   const requestStartedAt = Date.now()
   let telemetrySourceId: string | undefined
   let telemetryCommandKind: string | undefined
+  let telemetryRequestId: string | undefined
 
   return withGptActionDeadline({
     operationId: 'runBuildFlowCommand',
@@ -61,6 +60,7 @@ export async function POST(request: NextRequest) {
     deadlineMs: GPT_ACTION_DEADLINES_MS.runCommand,
     suggestedNextAction: 'Run slow validation in a separate prompt.'
   }, async (deadline) => {
+    telemetryRequestId = deadline.requestId
     deadline.setPhase('authenticate')
     const auth = checkActionAuth(request)
     deadline.markStage('authentication_complete', { authValid: auth.valid })
@@ -85,6 +85,7 @@ export async function POST(request: NextRequest) {
         diagnostics: deadline.diagnostics({ phase: 'invalid_command_request' })
       }
       return jsonWithRunCommandTelemetry(payload, { status: 400, headers: { 'Cache-Control': 'no-store' } }, {
+        requestId: deadline.requestId,
         disposition: 'rejected',
         reasonCode: 'invalid_request',
         requestDurationMs: Date.now() - requestStartedAt
@@ -103,6 +104,7 @@ export async function POST(request: NextRequest) {
         diagnostics: deadline.diagnostics({ phase: 'source_selection_required' })
       }
       return jsonWithRunCommandTelemetry(payload, { status: 400 }, {
+        requestId: deadline.requestId,
         disposition: 'rejected',
         reasonCode: 'source_selection_required',
         requestDurationMs: Date.now() - requestStartedAt
@@ -187,6 +189,7 @@ export async function POST(request: NextRequest) {
         activity: clean.activity
       }
       return jsonWithRunCommandTelemetry(payload, { headers: { 'Cache-Control': 'no-store' } }, {
+        requestId: deadline.requestId,
         disposition: 'timed_out',
         reasonCode: 'command_timed_out',
         requestDurationMs: Date.now() - requestStartedAt,
@@ -221,6 +224,7 @@ export async function POST(request: NextRequest) {
     const payload = {
       ok: terminalSucceeded,
       status: clean.status,
+      requestId: deadline.requestId,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
       commandKind,
       validationJobOperation,
@@ -266,6 +270,7 @@ export async function POST(request: NextRequest) {
       ? clean.durationMs
       : typeof job?.durationMs === 'number' ? job.durationMs : undefined
     return jsonWithRunCommandTelemetry(payload, { headers: { 'Cache-Control': 'no-store' } }, {
+      requestId: deadline.requestId,
       disposition: terminalDisposition,
       reasonCode: terminalReason,
       requestDurationMs: Date.now() - requestStartedAt,
@@ -280,7 +285,9 @@ export async function POST(request: NextRequest) {
       message: String(error),
       status: 'error'
     })
+    if (!telemetryRequestId) return NextResponse.json(payload, { status, headers: { 'Cache-Control': 'no-store' } })
     return jsonWithRunCommandTelemetry(payload, { status, headers: { 'Cache-Control': 'no-store' } }, {
+      requestId: telemetryRequestId,
       disposition: 'failure',
       reasonCode: 'transport_error',
       requestDurationMs: Date.now() - requestStartedAt,

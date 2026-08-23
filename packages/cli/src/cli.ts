@@ -14,6 +14,7 @@ import { treeCommand } from './commands/tree'
 import { grepCommand } from './commands/grep'
 import { contextCommand } from './commands/context'
 import { diagnosticRedactionCommand } from './commands/diagnose-redaction'
+import { doctorCommand } from './commands/doctor'
 
 function getVersion(): string {
   try {
@@ -67,6 +68,14 @@ export function main(invocationName: string) {
     .command('status')
     .description('Show Workbench status')
     .action(() => statusCommand())
+
+  program
+    .command('doctor')
+    .description('Show internal Context Intelligence diagnostics')
+    .option('--json', 'Emit bounded machine-readable JSON')
+    .action(async (options) => {
+      process.exitCode = await doctorCommand(Boolean(options.json))
+    })
 
   program
     .command('workspace <action>')

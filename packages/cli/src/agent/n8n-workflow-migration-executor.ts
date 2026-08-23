@@ -5,13 +5,17 @@ import { spawn } from 'node:child_process'
 import {
   canonicalizeN8nWorkflow,
   hashCanonicalWorkflowTopology,
+  isControlledWorkflowCanonicalizationVersion,
   stableSerializeCanonicalValue,
   validateControlledWorkflowTopologyManifest,
   parseControlledN8nWrapperContract,
   CONTROLLED_N8N_WRAPPER_CONTRACT_V1,
+  CONTROLLED_WORKFLOW_PROTECTED_DOMAINS,
   type ControlledWorkflowMigrationEffect,
   type ControlledWorkflowMigrationEvent,
   type ControlledWorkflowMigrationOperation,
+  type ControlledWorkflowProtectedDomain,
+  type ProtectedWorkflowSnapshot,
   type ControlledWorkflowReadbackResult
 } from '@workbench/shared'
 import {
@@ -151,6 +155,7 @@ export type N8nWorkflowMigrationExecutorResult = {
   readbackResult?: ControlledWorkflowReadbackResult
   readPurpose?: 'precondition' | 'reconciliation'
   protectedDomains?: 'unchanged' | 'unverified'
+  protectedDomainMismatches?: ControlledWorkflowProtectedDomain[]
   reasonCode: N8nWorkflowMigrationExecutorReasonCode
   reason: string
   issues: N8nWorkflowMigrationExecutorIssue[]
@@ -336,6 +341,7 @@ function baseResult(params: {
   readbackResult?: ControlledWorkflowReadbackResult
   readPurpose?: 'precondition' | 'reconciliation'
   protectedDomains?: 'unchanged' | 'unverified'
+  protectedDomainMismatches?: ControlledWorkflowProtectedDomain[]
 }): N8nWorkflowMigrationExecutorResult {
   const exitCode = typeof params.exitCode === 'number'
     && Number.isInteger(params.exitCode)
@@ -367,6 +373,9 @@ function baseResult(params: {
     ...(params.readbackResult ? { readbackResult: params.readbackResult } : {}),
     ...(params.readPurpose ? { readPurpose: params.readPurpose } : {}),
     ...(protectedDomains ? { protectedDomains } : {}),
+    ...(params.protectedDomainMismatches?.length
+      ? { protectedDomainMismatches: [...params.protectedDomainMismatches] }
+      : {}),
     reasonCode: params.reasonCode,
     reason: boundedReason(params.reasonCode),
     issues: params.reasonCode === 'READ_SUCCEEDED'
@@ -396,7 +405,7 @@ function parseOperation(value: unknown): ControlledWorkflowMigrationOperation {
   if (requiredStrings.some(key => typeof binding[key] !== 'string')) {
     return fail('INVALID_INVOCATION', 'operation.binding')
   }
-  if (typeof binding.grantVersion !== 'number' || binding.canonicalizationVersion !== 1) {
+  if (typeof binding.grantVersion !== 'number' || !isControlledWorkflowCanonicalizationVersion(binding.canonicalizationVersion)) {
     return fail('INVALID_INVOCATION', 'operation.binding')
   }
   if (binding.mode !== 'apply' && binding.mode !== 'rollback') {
@@ -587,9 +596,15 @@ function containsCredentialMaterial(raw: string, configuredValues: string[]): bo
   return configuredValues.some(value => raw.includes(value))
 }
 
-function parseWorkflowArtifact(raw: string, workflowId: string, field: string, configuredValues: string[]): {
+function parseWorkflowArtifact(
+  raw: string,
+  workflowId: string,
+  field: string,
+  configuredValues: string[],
+  canonicalizationVersion: ControlledWorkflowMigrationOperation['binding']['canonicalizationVersion']
+): {
   canonicalSha256: string
-  protectedSnapshot: string
+  protectedSnapshot: ProtectedWorkflowSnapshot
 } {
   if (containsCredentialMaterial(raw, configuredValues)) return fail('CREDENTIAL_MATERIAL_DETECTED', field)
   let value: unknown
@@ -599,12 +614,21 @@ function parseWorkflowArtifact(raw: string, workflowId: string, field: string, c
     return fail('ARTIFACT_INVALID', field)
   }
   if (!isRecord(value) || value.id !== workflowId) return fail('ARTIFACT_INVALID', field)
-  const canonical = canonicalizeN8nWorkflow(value)
+  const canonical = canonicalizeN8nWorkflow(value, canonicalizationVersion)
   if (!canonical.ok) return fail('ARTIFACT_INVALID', field)
   return {
     canonicalSha256: hashCanonicalWorkflowTopology(canonical.topology, sha256Text),
-    protectedSnapshot: stableSerializeCanonicalValue(canonical.protected)
+    protectedSnapshot: canonical.protected
   }
+}
+
+function changedProtectedWorkflowDomains(
+  expected: ProtectedWorkflowSnapshot,
+  observed: ProtectedWorkflowSnapshot
+): ControlledWorkflowProtectedDomain[] {
+  return CONTROLLED_WORKFLOW_PROTECTED_DOMAINS.filter(domain => (
+    stableSerializeCanonicalValue(expected[domain]) !== stableSerializeCanonicalValue(observed[domain])
+  ))
 }
 
 function validateManifest(params: {
@@ -650,7 +674,7 @@ function validateBinding(params: {
   sourceRoot: string
   wrapperPath: string
   timeoutMs: number
-  protectedSnapshot: string
+  protectedSnapshot: ProtectedWorkflowSnapshot
 } {
   const { effect, operation, grant } = params.invocation
   const { binding } = operation
@@ -674,7 +698,8 @@ function validateBinding(params: {
   if (grant.wrapperPath !== binding.wrapperPath || grant.wrapperSha256 !== binding.wrapperSha256) {
     return fail('WRAPPER_BINDING_MISMATCH', 'wrapper')
   }
-  if (grant.canonicalizationVersion !== binding.canonicalizationVersion || binding.canonicalizationVersion !== 1) {
+  if (grant.canonicalizationVersion !== binding.canonicalizationVersion
+    || !isControlledWorkflowCanonicalizationVersion(binding.canonicalizationVersion)) {
     return fail('CANONICALIZATION_VERSION_MISMATCH', 'canonicalizationVersion')
   }
   if (grant.apiOriginFingerprint !== binding.apiOriginFingerprint
@@ -711,13 +736,15 @@ function validateBinding(params: {
     candidateRaw,
     binding.workflowId,
     'candidatePath',
-    params.configuredCredentialValues
+    params.configuredCredentialValues,
+    binding.canonicalizationVersion
   )
   const rollback = parseWorkflowArtifact(
     rollbackRaw,
     binding.workflowId,
     'rollbackPath',
-    params.configuredCredentialValues
+    params.configuredCredentialValues,
+    binding.canonicalizationVersion
   )
   if (candidate.canonicalSha256 !== binding.candidateCanonicalSha256) {
     return fail('CANDIDATE_BINDING_MISMATCH', 'candidateCanonicalSha256')
@@ -725,7 +752,8 @@ function validateBinding(params: {
   if (rollback.canonicalSha256 !== binding.rollbackCanonicalSha256) {
     return fail('ROLLBACK_BINDING_MISMATCH', 'rollbackCanonicalSha256')
   }
-  if (candidate.protectedSnapshot !== rollback.protectedSnapshot) {
+  if (stableSerializeCanonicalValue(candidate.protectedSnapshot)
+    !== stableSerializeCanonicalValue(rollback.protectedSnapshot)) {
     return fail('PROTECTED_DOMAIN_MISMATCH', 'approvedArtifacts.protectedDomains')
   }
   validateManifest({ raw: manifestRaw, operation, grant })
@@ -1083,7 +1111,7 @@ export function createN8nWorkflowMigrationExecutor(host: ExecutorHost) {
         readPurpose: readPurpose(invocation.effect)
       })
     }
-    const canonical = canonicalizeN8nWorkflow(workflow)
+    const canonical = canonicalizeN8nWorkflow(workflow, invocation.operation.binding.canonicalizationVersion)
     if (!canonical.ok) {
       return baseResult({
         effect: invocation.effect.type,
@@ -1100,7 +1128,12 @@ export function createN8nWorkflowMigrationExecutor(host: ExecutorHost) {
         readPurpose: readPurpose(invocation.effect)
       })
     }
-    if (stableSerializeCanonicalValue(canonical.protected) !== validated.protectedSnapshot) {
+    if (stableSerializeCanonicalValue(canonical.protected)
+      !== stableSerializeCanonicalValue(validated.protectedSnapshot)) {
+      const protectedDomainMismatches = changedProtectedWorkflowDomains(
+        validated.protectedSnapshot,
+        canonical.protected
+      )
       return baseResult({
         effect: invocation.effect.type,
         classification: 'definitively_failed',
@@ -1111,6 +1144,7 @@ export function createN8nWorkflowMigrationExecutor(host: ExecutorHost) {
         stderrBytes,
         responseParsed: true,
         reasonCode: 'PROTECTED_DOMAIN_MISMATCH',
+        ...(protectedDomainMismatches.length > 0 ? { protectedDomainMismatches } : {}),
         exitCode: processResult.exitCode,
         signal: processResult.signal,
         readPurpose: readPurpose(invocation.effect)
@@ -1339,6 +1373,9 @@ export function toControlledWorkflowMigrationEvent(
       type: 'precondition_readback',
       result: readbackResult,
       ...(result.protectedDomains ? { protectedDomains: result.protectedDomains } : {}),
+      ...(result.protectedDomainMismatches?.length
+        ? { protectedDomainMismatches: [...result.protectedDomainMismatches] }
+        : {}),
       ...(result.observedCanonicalSha256 ? { observedCanonicalSha256: result.observedCanonicalSha256 } : {}),
       executorClassification: result.classification,
       executorReasonCode: result.reasonCode,
@@ -1353,6 +1390,9 @@ export function toControlledWorkflowMigrationEvent(
     type: 'readback_result',
     result: readbackResult,
     ...(result.protectedDomains ? { protectedDomains: result.protectedDomains } : {}),
+    ...(result.protectedDomainMismatches?.length
+      ? { protectedDomainMismatches: [...result.protectedDomainMismatches] }
+      : {}),
     ...(result.observedCanonicalSha256 ? { observedCanonicalSha256: result.observedCanonicalSha256 } : {}),
     executorClassification: result.classification,
     executorReasonCode: result.reasonCode,

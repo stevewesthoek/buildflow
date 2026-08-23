@@ -73,6 +73,7 @@ export type KnowledgeSource = {
   autoIndexEnabled?: boolean
   autoIndexIntervalMinutes?: number
   lastAutoIndexedAt?: string
+  writePolicy?: Record<string, unknown>
 }
 
 export type DiscoveredRepository = {

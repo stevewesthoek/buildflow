@@ -240,6 +240,7 @@ export async function runN8nWorkflowExportCapability(
     workflowVersion,
     workflowUpdatedAt,
     networkWriteRequested: false,
+    reason,
     exitCode: execution.exitCode,
     signal: execution.signal,
     stdout: JSON.stringify(metadata),

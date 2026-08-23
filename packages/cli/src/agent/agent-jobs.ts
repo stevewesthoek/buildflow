@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
 import { evaluateResumeWorkflow } from './resume-workflow'
+import { appendAgentEvent } from './agent-events'
 import { synchronizeWorkbenchRunSession, workbenchSessionIdForRun } from './workbench-run-session'
 import {
   createRunExecutionBudget,
@@ -11,6 +12,8 @@ import {
   consumeRunPacketCycle,
   consumeRunRepairAttempt,
   evaluateRunExecutionBudget,
+  pauseRunExecutionBudget,
+  resumeRunExecutionBudget,
   synchronizeRunRepairAttempts,
   type RunExecutionBudget,
   type RunExecutionBudgetLimits
@@ -193,6 +196,7 @@ export type CompactAgentJob = Pick<
 }
 
 const jobs = new Map<string, AgentJob>()
+let loadedJobsFileSignature: string | undefined
 const MAX_GOAL_LENGTH = 3000
 const MAX_ITERATIONS = 40
 const JOB_STORE_PATH = path.join(getConfigDir(), 'agent-jobs.json')
@@ -460,14 +464,31 @@ function coerceJob(raw: unknown): AgentJob | null {
   }
 }
 
-function loadJobsFromDisk(): void {
+function jobsFileSignature(): string | undefined {
   try {
-    if (!fs.existsSync(JOB_STORE_PATH)) return
+    const stat = fs.statSync(JOB_STORE_PATH)
+    return `${stat.mtimeMs}:${stat.size}`
+  } catch {
+    return undefined
+  }
+}
+
+function loadJobsFromDisk(): void {
+  const signature = jobsFileSignature()
+  if (signature === loadedJobsFileSignature) return
+  try {
+    if (!signature) {
+      jobs.clear()
+      loadedJobsFileSignature = undefined
+      return
+    }
     const parsed = JSON.parse(fs.readFileSync(JOB_STORE_PATH, 'utf8')) as { jobs?: unknown[] }
+    jobs.clear()
     for (const raw of parsed.jobs || []) {
       const job = coerceJob(raw)
       if (job) jobs.set(job.id, job)
     }
+    loadedJobsFileSignature = signature
   } catch {
     // Ignore corrupted job state; repo-local handoff docs remain the recovery source of truth.
   }
@@ -484,6 +505,7 @@ function persistJobs(): void {
   const temporaryPath = `${JOB_STORE_PATH}.tmp`
   fs.writeFileSync(temporaryPath, JSON.stringify(payload), 'utf8')
   fs.renameSync(temporaryPath, JOB_STORE_PATH)
+  loadedJobsFileSignature = jobsFileSignature()
 }
 
 function requireWorkbenchRunSession(job: AgentJob): void {
@@ -615,7 +637,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
 }
 
 export function getAgentJob(jobId: string): AgentJob | undefined {
-  if (jobs.size === 0) loadJobsFromDisk()
+  loadJobsFromDisk()
   return jobs.get(jobId)
 }
 
@@ -739,6 +761,16 @@ function persistRunBudgetState(job: AgentJob, budget: RunExecutionBudget, reason
     updatedAt: new Date().toISOString()
   }
   persistJobTransition(job, updated)
+  if (reasonCode && job.blockedReason !== blockedReason) {
+    appendAgentEvent({
+      jobId: updated.id,
+      sourceId: updated.sourceId,
+      type: 'job_blocked',
+      activityKind: 'run_blocked',
+      message: blockedReason!,
+      status: updated.status
+    })
+  }
   return updated
 }
 
@@ -861,11 +893,64 @@ export function advanceWorkbenchRunAfterPacket(params: {
       ? `Packet ${params.packetId} completed task ${params.taskId}; all roadmap tasks are complete.`
       : `Packet ${params.packetId} completed task ${params.taskId}; next task is ${nextTaskId}.`
   })
+
+  const persisted = getAgentJob(params.runId)
+  if (!persisted) throw new Error(`Agent job not found after roadmap advancement: ${params.runId}`)
+  const persistedTasks = persisted.roadmapPhases.flatMap(phase => phase.tasks)
+  const completedTasks = persistedTasks.filter(task => task.status === 'completed' || task.status === 'skipped').length
+  const totalTasks = persistedTasks.length
+  const percent = boundedPercent(completedTasks, totalTasks)
+
+  if (newlyAcceptedTaskCount > 0) {
+    appendAgentEvent({
+      jobId: persisted.id,
+      sourceId: persisted.sourceId,
+      type: 'packet_completed',
+      activityKind: 'task_completed',
+      message: `Task completed: ${params.taskId}`,
+      taskId: params.taskId,
+      packetId: params.packetId,
+      status: 'completed'
+    })
+  }
+
+  appendAgentEvent({
+    jobId: persisted.id,
+    sourceId: persisted.sourceId,
+    type: 'packet_completed',
+    activityKind: 'run_progress',
+    message: `Run progress: ${completedTasks}/${totalTasks} tasks complete`,
+    taskId: params.taskId,
+    packetId: params.packetId,
+    status: persisted.status,
+    progress: {
+      completed: completedTasks,
+      total: totalTasks,
+      percent,
+      confidence: 'exact'
+    }
+  })
+
+  if (persisted.status === 'completed' || persisted.status === 'blocked' || persisted.status === 'failed') {
+    appendAgentEvent({
+      jobId: persisted.id,
+      sourceId: persisted.sourceId,
+      type: persisted.status === 'completed' ? 'job_completed' : persisted.status === 'blocked' ? 'job_blocked' : 'job_failed',
+      activityKind: persisted.status === 'completed' ? 'run_completed' : persisted.status === 'blocked' ? 'run_blocked' : 'run_failed',
+      message: persisted.status === 'completed'
+        ? `Workbench run completed after task ${params.taskId}`
+        : persisted.blockedReason || persisted.summary,
+      taskId: params.taskId,
+      packetId: params.packetId,
+      status: persisted.status
+    })
+  }
+
   return recordWorkbenchRunPacketCycle(params.runId, params.packetId, completedAt)
 }
 
 export function listAgentJobs(): AgentJob[] {
-  if (jobs.size === 0) loadJobsFromDisk()
+  loadJobsFromDisk()
   return Array.from(jobs.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
@@ -1022,18 +1107,27 @@ export function controlAgentJob(jobId: string, action: AgentJobControlAction, re
   const safeReason = reason ? String(reason).slice(0, COMPACT_TEXT_LIMIT) : undefined
   if (action === 'pause') {
     if (job.status !== 'running' && job.status !== 'queued') throw new Error(`Cannot pause job in ${job.status} state`)
+    const now = new Date().toISOString()
+    const budget = pauseRunExecutionBudget(job.executionBudget, now)
+    const budgetedJob = persistRunBudgetState(job, budget, budget.reasonCode)
     return updateAgentJob(jobId, {
       status: 'paused',
       summary: safeReason ? `Sequential run paused: ${safeReason}` : 'Sequential run paused.',
-      nextActions: ['Resume, cancel, or ask Custom GPT for targeted reasoning/coding before continuing.']
+      nextActions: ['Resume, cancel, or ask Custom GPT for targeted reasoning/coding before continuing.'],
+      blockedReason: budgetedJob.blockedReason
     })
   }
   if (action === 'resume') {
     if (job.status !== 'paused') throw new Error(`Cannot resume job in ${job.status} state`)
+    const now = new Date().toISOString()
+    const budget = resumeRunExecutionBudget(job.executionBudget, now)
+    if (budget.exhausted) throw new Error(`Cannot resume job: Run budget exhausted: ${budget.reasonCode || 'unknown'}`)
+    persistRunBudgetState(job, budget)
     return updateAgentJob(jobId, {
       status: 'running',
       summary: safeReason ? `Sequential run resumed: ${safeReason}` : 'Sequential run resumed.',
-      nextActions: ['Local deterministic runtime can continue. Poll compact status/events for progress.']
+      nextActions: ['Local deterministic runtime can continue. Poll compact status/events for progress.'],
+      blockedReason: undefined
     })
   }
   if (action === 'cancel') {
@@ -1110,7 +1204,15 @@ export function createWorkbenchRun(params: Parameters<typeof startAgentJob>[0]):
     }
     throw new Error(`Source already has an active Workbench run: ${existing.id}`)
   }
-  return { run: startAgentJob(params), created: true }
+  const run = startAgentJob(params)
+  appendAgentEvent({
+    jobId: run.id,
+    sourceId: run.sourceId,
+    type: 'job_started',
+    message: `Workbench run started: ${run.goal}`,
+    status: run.status
+  }, { now: () => new Date(run.createdAt) })
+  return { run, created: true }
 }
 
 export function resumeWorkbenchRun(params: { sourceId: string; runId?: string }): AgentJob {
@@ -1119,10 +1221,14 @@ export function resumeWorkbenchRun(params: { sourceId: string; runId?: string })
   const run = params.runId
     ? getAgentJob(params.runId)
     : listAgentJobs().find(job => job.sourceId === sourceId && !['completed', 'failed', 'cancelled'].includes(job.status))
+  const now = new Date().toISOString()
+  const resumeCandidate = run?.status === 'paused'
+    ? { ...run, executionBudget: resumeRunExecutionBudget(run.executionBudget, now) }
+    : run
   const decision = evaluateResumeWorkflow({
     lockedSourceId: sourceId,
-    run,
-    now: new Date().toISOString()
+    run: resumeCandidate,
+    now
   })
   if (!decision.eligible || !run) {
     throw new Error(`Workbench run cannot resume: ${decision.reason || 'not_eligible'}; ${decision.nextAction}`)
@@ -1131,13 +1237,15 @@ export function resumeWorkbenchRun(params: { sourceId: string; runId?: string })
     requireWorkbenchRunSession(run)
     return run
   }
+  if (resumeCandidate?.executionBudget) persistRunBudgetState(run, resumeCandidate.executionBudget)
   return updateAgentJob(run.id, {
     status: 'running',
     metrics: {
       ...run.metrics,
       userSupervisionEvents: run.metrics.userSupervisionEvents + 1
     },
-    summary: `Workbench run resumed from projection ${decision.projection?.contentHash || 'rebuilt'}. ${decision.nextAction}`
+    summary: `Workbench run resumed from projection ${decision.projection?.contentHash || 'rebuilt'}. ${decision.nextAction}`,
+    blockedReason: undefined
   })
 }
 

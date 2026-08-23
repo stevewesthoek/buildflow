@@ -130,6 +130,14 @@ function verifyStatusOperationContract(ops) {
 function ensureSchemaRules(schema) {
   const schemaBytes = byteLength(schema)
   assert(schemaBytes < MAX_SCHEMA_BYTES, `OpenAPI schema too large: ${schemaBytes} bytes`)
+  assert(schema.openapi === '3.1.0', 'OpenAPI version must be exactly 3.1.0')
+  assert(Array.isArray(schema.servers) && schema.servers.length === 1, 'OpenAPI must declare exactly one public server')
+  assert(schema.servers[0]?.url === 'https://workbench.prochat.tools', 'OpenAPI server must be the public Workbench origin')
+  assert(!schema.servers.some(server => /localhost|127\.0\.0\.1/i.test(String(server?.url || ''))), 'OpenAPI must not advertise loopback servers')
+  assert(schema.components && typeof schema.components === 'object' && !Array.isArray(schema.components), 'OpenAPI components must be an object')
+  assert(schema.components.schemas && typeof schema.components.schemas === 'object' && !Array.isArray(schema.components.schemas), 'OpenAPI components.schemas must be an object')
+  assert(schema.components.securitySchemes?.bearerAuth?.type === 'http', 'OpenAPI bearerAuth must use HTTP authentication')
+  assert(schema.components.securitySchemes?.bearerAuth?.scheme === 'bearer', 'OpenAPI bearerAuth scheme must be bearer')
 
   const ops = collectOperations(schema)
   const ids = ops.map(op => op.operationId)
@@ -143,6 +151,10 @@ function ensureSchemaRules(schema) {
   for (const op of ops) {
     assert(Array.isArray(op.security) && op.security.length > 0, `${op.operationId} missing security`)
     assert(op['x-openai-isConsequential'] === false, `${op.operationId} must be non-consequential for GPT action confirmation UX`)
+    if (op.method === 'post') {
+      assert(op.requestBody?.required === true, `${op.operationId} POST requestBody must be required`)
+      assert(op.requestBody?.content?.['application/json']?.schema && typeof op.requestBody.content['application/json'].schema === 'object', `${op.operationId} POST request schema must be present`)
+    }
   }
 
   for (const routePath of REQUIRED_ACTION_PATHS) {
@@ -150,7 +162,8 @@ function ensureSchemaRules(schema) {
   }
 
   const schemaText = JSON.stringify(schema)
-  for (const legacy of ['setBuildFlowContext', 'executeBuildFlowTask', 'manageBuildFlowAgent', '/api/actions/agent/execute-task', '/api/actions/agent/manage', 'action=list_sources', 'action=get_active', 'action=set_active', '/api/actions/sources', '/api/actions/context/active']) {
+  assert(!schemaText.includes('create_run, resume_run, or active_run'), 'Schema must use Workbench run lifecycle wording')
+  for (const legacy of ['setBuildFlowContext', 'executeBuildFlowTask', 'manageBuildFlowAgent', '/api/actions/agent/execute-task', '/api/actions/agent/manage', 'action=list_sources', 'action=get_active', 'action=set_active', '/api/actions/sources', '/api/actions/context/active', 'git_push']) {
     assert(!schemaText.includes(legacy), `Legacy reference exposed in schema: ${legacy}`)
   }
   assert(!schemaText.includes('/api/actions/agent/'), 'Schema must not expose agent-mode action routes')
@@ -159,6 +172,7 @@ function ensureSchemaRules(schema) {
   const readSchema = readContext?.requestBody?.content?.['application/json']?.schema
   const readProps = readSchema?.properties || {}
   const modes = readProps.mode?.enum || []
+  assert(readProps.mode?.description === 'Mode determines operation. Use graph_context for unknown areas; use exact read modes for known paths or symbols. Persistent workflow continuation is handled through supported Workbench lifecycle mechanisms, not through context reads.', 'readWorkbenchContext mode description must use lifecycle wording')
   for (const mode of ['grep_context', 'read_range', 'read_symbol']) {
     assert(modes.includes(mode), `readWorkbenchContext schema missing focused mode: ${mode}`)
   }
@@ -174,6 +188,9 @@ function ensureSchemaRules(schema) {
   const envelopeSchema = commandContent?.schema || {}
   const envelopeProps = envelopeSchema.properties || {}
   const commandProps = envelopeProps.command?.properties || {}
+  const publicCommandKinds = commandProps.commandKind?.enum || []
+  assert(!publicCommandKinds.includes('git_push'), 'runWorkbenchCommand must not expose git_push without an approved push workflow')
+  assert(commandProps.executable?.description?.includes('explicitly allowlisted repository-supported deterministic operations'), 'run_exact_command must describe its explicit allowlist safety boundary')
   assert((envelopeSchema.required || []).includes('version'), 'runWorkbenchCommand must require envelope version')
   assert((envelopeSchema.required || []).includes('sessionId'), 'runWorkbenchCommand must require sessionId')
   assert((envelopeSchema.required || []).includes('command'), 'runWorkbenchCommand must require nested command')
@@ -188,29 +205,14 @@ function ensureSchemaRules(schema) {
   for (const required of ['sessionId', 'default', 'workspace', 'current', 'repo']) {
     assert(sourceDescription.includes(required), `runWorkbenchCommand sourceId guidance missing ${required}`)
   }
-  const examples = commandContent?.examples || {}
-  assert(examples.repositoryStatusCheck?.value?.version === 2, 'Generated examples must use the strict v2 envelope')
-  assert(typeof examples.repositoryStatusCheck?.value?.sessionId === 'string', 'Generated examples must use a run-bound session ID')
-  assert(examples.repositoryStatusCheck?.value?.command?.sourceId === 'workbench-example-source', 'Generated schema must include the explicit generic source example')
-  assert(examples.repositoryStatusCheck?.value?.command?.commandKind === 'git_status_short', 'Generic source example must use git_status_short')
-  assert(examples.workflowExportConfirmation?.value?.command?.sourceId === 'workflow-example-source', 'Generated schema must include a synthetic workflow source example')
-  assert(examples.workflowExportConfirmation?.value?.command?.commandKind === 'n8n_workflow_export', 'Workflow example must use n8n_workflow_export')
-  assert(examples.controlledMigrationPrepare?.value?.command?.sourceId === 'migration-example-source', 'Migration example must use a synthetic source ID')
-  assert(examples.controlledMigrationPrepare?.value?.command?.commandKind === 'n8n_workflow_migration', 'Migration example must use n8n_workflow_migration')
-  assert(examples.controlledMigrationPrepare?.value?.command?.migration?.phase === 'prepare', 'Migration example must use prepare phase')
-  assert(examples.controlledMigrationPrepare?.value?.command?.migration?.networkAccess === true, 'Migration prepare example must explicitly require network access')
-  assert(examples.controlledMigrationExecute?.value?.command?.migration?.phase === 'execute', 'Migration execute example must use execute phase')
-  assert(examples.controlledMigrationStatus?.value?.command?.migration?.phase === 'status', 'Migration status example must use status phase')
+  assert(!Object.prototype.hasOwnProperty.call(commandContent || {}, 'examples'), 'Generated schema must not expose command examples')
   assert(Array.isArray(commandProps.migration?.oneOf) && commandProps.migration.oneOf.length === 3, 'Generated schema must expose strict prepare, execute, and status migration schemas')
   const migrationPhaseProperties = commandProps.migration.oneOf.flatMap(phase => Object.keys(phase.properties || {}))
   for (const forbidden of ['executable', 'args', 'shell', 'environment', 'wrapperOperation', 'confirmationDigest', 'dispatchAuthorization', 'leaseProof', 'credential']) {
     assert(!migrationPhaseProperties.includes(forbidden), `Migration schema must not expose ${forbidden}`)
   }
   const placeholderSources = new Set(['default', 'workspace', 'current', 'repo'])
-  for (const [name, example] of Object.entries(examples)) {
-    const sourceId = typeof example?.value?.command?.sourceId === 'string' ? example.value.command.sourceId.toLowerCase() : ''
-    assert(!placeholderSources.has(sourceId), `Generated schema example ${name} uses forbidden placeholder sourceId ${sourceId}`)
-  }
+  assert(!placeholderSources.has(String(commandProps.sourceId?.default || '').toLowerCase()), 'Schema must not define a placeholder command sourceId')
 }
 
 function ensureInstructions() {
@@ -224,22 +226,17 @@ function ensureInstructions() {
   }
   for (const required of [
     'sourceId',
-    'maxBytesPerFile',
     'Quick Mode',
     'Goal Mode',
-    'persistent run',
-    'bounded deterministic packet',
-    'persisted continuation state',
-    'confirmation is required',
-    'single automatic repair attempt is exhausted',
-    'Never force push'
+    'Workbench lifecycle',
+    'Never derive sessionId from sourceId',
+    'Continue only inside approved scope',
+    'Never:',
+    'Never make indefinite requests'
   ]) {
     assert(text.includes(required), `Instructions must include ${required}`)
   }
   assert(/deadline|fail fast|timeout/i.test(text), 'Instructions must include timeout/deadline guidance')
-  for (const mode of ['grep_context', 'read_range', 'read_symbol']) {
-    assert(text.includes(mode), `Instructions must mention ${mode}`)
-  }
   for (const forbidden of [
     '8–12 short actions',
     'Until persistent packet APIs are implemented',
@@ -300,6 +297,7 @@ function ensureSourceDeadlineLayer() {
     readContext: path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'),
     runCommand: path.join(ROOT, 'apps/web/src/app/api/actions/run-command/route.ts'),
     openapi: path.join(ROOT, 'apps/web/src/app/api/openapi/route.ts'),
+    canonicalSchema: path.join(ROOT, 'apps/web/src/lib/openapi-chatgpt.json'),
     schemaGenerator: path.join(ROOT, 'scripts/generate-openapi-chatgpt.mjs'),
     localStack: path.join(ROOT, 'scripts/workbench-local-stack.sh')
   }
@@ -322,11 +320,17 @@ function ensureSourceDeadlineLayer() {
     assert(gptActionsText.includes(placeholder), `Source-selection helper must reject ${placeholder}`)
   }
   const openapiText = fs.readFileSync(files.openapi, 'utf8')
-  for (const required of ['repositoryStatusCheck', "sourceId: 'workbench-example-source'", 'workflowExportConfirmation', "sourceId: 'workflow-example-source'", 'controlledMigrationPrepare', 'controlledMigrationExecute', 'controlledMigrationStatus', 'migration-example-source', 'sessionAwareCommandExample', 'sessionId']) {
-    assert(openapiText.includes(required), `OpenAPI source must include ${required}`)
+  const canonicalSchemaText = fs.readFileSync(files.canonicalSchema, 'utf8')
+  assert(openapiText.includes('canonicalOpenApiSchema'), 'OpenAPI route must use the canonical schema artifact')
+  assert(
+    JSON.stringify(readJson(files.canonicalSchema)) === JSON.stringify(readJson(DOCS_SCHEMA_FILE)),
+    'Checked-in OpenAPI docs artifact must match the canonical schema artifact'
+  )
+  for (const required of ['sessionId']) {
+    assert(canonicalSchemaText.includes(required), `Canonical OpenAPI schema must include ${required}`)
   }
   const generatorText = fs.readFileSync(files.schemaGenerator, 'utf8')
-  for (const required of ['n8n_workflow_export', 'n8n_workflow_migration', 'workflowId', 'outputPath', 'migration', 'sessionId', 'repositoryStatusCheck', 'workflowExportConfirmation', 'controlledMigrationPrepare', 'current', 'repo', 'fs.renameSync']) {
+  for (const required of ['n8n_workflow_export', 'n8n_workflow_migration', 'workflowId', 'outputPath', 'migration', 'sessionId', 'current', 'repo', 'fs.renameSync']) {
     assert(generatorText.includes(required), `Schema generator must validate or atomically write ${required}`)
   }
   const localStackText = fs.readFileSync(files.localStack, 'utf8')
@@ -372,9 +376,9 @@ function ensureRetiredAgentActionRoutes() {
 
 function ensureActionBudgetAndTimeoutLanguage() {
   const text = fs.readFileSync(INSTRUCTIONS_FILE, 'utf8')
-  assert(text.includes('Prefer the smallest useful action set'), 'Instructions must preserve bounded quick-mode action guidance')
-  assert(text.includes('exact resume action') || text.includes('exact resume point'), 'Instructions must include exact resume guidance for stop conditions')
-  assert(text.includes('Do not stop after an arbitrary action count'), 'Goal mode must not use a hard per-turn action limit')
+  assert(text.includes('Use the smallest safe mode'), 'Instructions must preserve bounded mode guidance')
+  assert(text.includes('Stop when:'), 'Instructions must define Goal Mode stop conditions')
+  assert(text.includes('loop indefinitely'), 'Instructions must prohibit unbounded continuation')
   assert(/fail fast|deadline|timeout/i.test(text), 'Instructions must include fail-fast, deadline, or timeout language')
 
   const deadlineText = fs.readFileSync(path.join(ROOT, 'apps/web/src/lib/actions/deadline.ts'), 'utf8')
@@ -382,6 +386,7 @@ function ensureActionBudgetAndTimeoutLanguage() {
 }
 
 function ensureFocusedModeGuardrails() {
+  const instructionsText = fs.readFileSync(INSTRUCTIONS_FILE, 'utf8')
   const readContextText = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'), 'utf8')
   assert(readContextText.includes('boundedInt(body.maxBytesPerFile'), 'read-context must clamp maxBytesPerFile with boundedInt')
   assert(readContextText.includes('needsNarrowerScope'), 'read-context must enforce needsNarrowerScope guardrail')
@@ -397,9 +402,13 @@ function ensureFocusedModeGuardrails() {
   assert(!graphContextText.includes('graphify update'), 'graph-context must not build/update Graphify graphs inside GPT actions')
 
   const safeAccessText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/safe-access.ts'), 'utf8')
-  assert(safeAccessText.includes("'.gitignore'"), 'write policy must allow root .gitignore for repo hygiene')
-  assert(safeAccessText.includes("'.buildflow/**', '.gitignore', '.graphifyignore', 'README.md'"), 'write policy summary must expose root .gitignore and .graphifyignore as allowed')
-  assert(safeAccessText.includes("'.env', '.env.*'"), 'write policy must keep environment files blocked')
+  assert(safeAccessText.includes("allowedRoots: ['**']"), 'write policy must use the connected repository as its scope')
+  assert(safeAccessText.includes("blockedGlobs: ['.env', '.env.*'"), 'write policy must keep environment files blocked')
+  assert(safeAccessText.includes('evaluateConnectedRepositoryPath'), 'write policy must use the centralized connected-repository deny policy')
+  assert(instructionsText.includes('Activate Workbench'), 'instructions must define natural Workbench activation')
+  assert(instructionsText.includes('normalizing common separators'), 'instructions must normalize common repository-name separators')
+  assert(instructionsText.includes('workbench` matches `Workbench Private'), 'instructions must cover the hyphen/space repository-name variant')
+  assert(instructionsText.includes('Never guess between matches'), 'instructions must require explicit disambiguation')
 
   const focusedReadFile = path.join(ROOT, 'packages/cli/src/agent/focused-read.ts')
   if (fs.existsSync(focusedReadFile)) {
@@ -442,12 +451,11 @@ async function runLiveSmokeChecks() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'update' })
   })
-  assert(retiredAgentStatus.response.status === 200, `retired agent status returned HTTP ${retiredAgentStatus.response.status}`)
-  assert(retiredAgentStatus.json?.error?.code === 'WORKBENCH_AGENT_ACTION_RETIRED', 'retired agent status must return WORKBENCH_AGENT_ACTION_RETIRED')
+  assert(retiredAgentStatus.response.status === 404, `retired agent status must be unavailable, returned HTTP ${retiredAgentStatus.response.status}`)
   return {
     skipped: false,
     statusBytes: status.bytes,
-    retiredAgentStatus: retiredAgentStatus.json?.status,
+    retiredAgentStatus: 'unavailable',
     targetBytes: TARGET_ACTION_RESPONSE_BYTES,
     hardBudgetBytes: HARD_ACTION_RESPONSE_BYTES,
     statusOverTarget: status.bytes > TARGET_ACTION_RESPONSE_BYTES
@@ -477,12 +485,12 @@ function ensureWorkbenchRunModel() {
   assert(serverText.includes("'/api/workbench-runs/active'"), 'Local server must expose the active-run endpoint')
 
   const routeText = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/api/actions/read-context/route.ts'), 'utf8')
-  assert(routeText.includes("mode === 'active_run'"), 'Read-context route must dispatch active_run')
+  assert(routeText.includes("mode === 'active_run'"), 'Internal read-context route must retain active_run support')
 
   const schema = readJson(DOCS_SCHEMA_FILE)
   const readSchema = schema.paths?.['/api/actions/read-context']?.post?.requestBody?.content?.['application/json']?.schema
   const modes = readSchema?.properties?.mode?.enum || []
-  assert(modes.includes('active_run'), 'OpenAPI schema must expose active_run')
+  assert(!modes.includes('active_run'), 'OpenAPI schema must not expose active_run')
 
   for (const required of ['createWorkbenchRun', 'resumeWorkbenchRun']) {
     assert(modelText.includes(required), `Workbench run model must include ${required}`)
@@ -492,11 +500,9 @@ function ensureWorkbenchRunModel() {
   }
   const applySchema = schema.paths?.['/api/actions/apply-file-change']?.post?.requestBody?.content?.['application/json']?.schema
   const changeTypes = applySchema?.properties?.changeType?.enum || []
-  for (const changeType of ['create_run', 'resume_run']) {
-    assert(changeTypes.includes(changeType), `OpenAPI schema must expose ${changeType}`)
-  }
-  assert(applySchema?.properties?.goal, 'OpenAPI schema must include goal for create_run')
-  assert(applySchema?.properties?.runId, 'OpenAPI schema must include runId for resume_run')
+  assert(JSON.stringify(changeTypes) === JSON.stringify(['create', 'overwrite', 'patch', 'append', 'delete_file', 'move']), 'OpenAPI schema must expose only file mutation changeTypes')
+  assert(JSON.stringify(Object.keys(applySchema?.properties || {}).sort()) === JSON.stringify(['allowMultiple', 'changeType', 'confirmationToken', 'confirmedByUser', 'content', 'dryRun', 'find', 'path', 'reason', 'replace', 'sourceId', 'to'].sort()), 'applyWorkbenchFileChange must expose only file mutation properties')
+  assert(!applySchema?.properties?.packet, 'applyWorkbenchFileChange must not expose packet state')
 
   const packetText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packets.ts'), 'utf8')
   for (const required of [
@@ -512,9 +518,6 @@ function ensureWorkbenchRunModel() {
   }
   assert(serverText.includes("'/api/workbench-packets/preflight'"), 'Local server must expose packet preflight')
   assert(serverText.includes('writesPerformed: false'), 'Packet preflight must report that no writes were performed')
-  assert(changeTypes.includes('packet_preflight'), 'OpenAPI schema must expose packet_preflight')
-  assert(applySchema?.properties?.packet, 'OpenAPI schema must include packet payload')
-  assert(applySchema?.properties?.packet?.properties?.steps?.maxItems === 5, 'Packet steps must be bounded to 5')
 
   const packetStoreText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-store.ts'), 'utf8')
   for (const required of [
@@ -571,11 +574,6 @@ function ensureWorkbenchRunModel() {
   ]) {
     assert(serverText.includes(endpoint), `Local server must expose ${endpoint}`)
   }
-  assert(changeTypes.includes('packet_claim'), 'OpenAPI schema must expose packet_claim')
-  assert(applySchema?.properties?.workerId, 'OpenAPI schema must include workerId for packet_claim')
-  assert(applySchema?.properties?.leaseMs, 'OpenAPI schema must include leaseMs for packet_claim')
-  assert(applySchema?.properties?.leaseMs?.minimum === 5000, 'packet_claim leaseMs minimum must match the packet store')
-  assert(applySchema?.properties?.leaseMs?.maximum === 300000, 'packet_claim leaseMs maximum must match the packet store')
   const gptActionText = fs.readFileSync(path.join(ROOT, 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
   assert(gptActionText.includes("changeType === 'packet_claim'"), 'GPT action dispatcher must handle packet_claim')
   assert(gptActionText.includes("'/api/workbench-packets/claim'"), 'GPT action dispatcher must reach the packet claim endpoint')
@@ -600,9 +598,6 @@ function ensureWorkbenchRunModel() {
   }
   assert(serverText.includes("'/api/workbench-packets/plan'"), 'Local server must expose packet planning')
   assert(serverText.includes('planWorkbenchPacketExecution'), 'Local server must use the deterministic execution planner')
-  assert(changeTypes.includes('packet_plan'), 'OpenAPI schema must expose packet_plan')
-  assert(applySchema?.properties?.packetId, 'OpenAPI schema must include packetId for packet_plan')
-  assert(applySchema?.properties?.leaseToken, 'OpenAPI schema must include leaseToken for packet_plan')
 
   const executorText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-packet-executor.ts'), 'utf8')
   for (const required of [
@@ -621,7 +616,6 @@ function ensureWorkbenchRunModel() {
   assert(packetStoreText.includes('finalizeWorkbenchPacketExecution'), 'Packet store must finalize execution under the active lease')
   assert(serverText.includes("'/api/workbench-packets/execute'"), 'Local server must expose packet execution')
   assert(serverText.includes('executeWorkbenchPacket'), 'Local server must use the rollback-capable executor')
-  assert(changeTypes.includes('packet_execute'), 'OpenAPI schema must expose packet_execute')
 
   const journalText = fs.readFileSync(path.join(ROOT, 'packages/cli/src/agent/workbench-execution-journal.ts'), 'utf8')
   for (const required of [
@@ -660,9 +654,6 @@ function ensureWorkbenchRunModel() {
   ]) {
     assert(executorText.includes(required), `Workbench packet validation/commit execution must include ${required}`)
   }
-  const packetSchema = applySchema?.properties?.packet
-  assert(packetSchema?.properties?.validation?.maxItems === 3, 'OpenAPI packet validation must be bounded to three commands')
-  assert(packetSchema?.properties?.commit, 'OpenAPI packet schema must expose commit policy')
   for (const required of [
     'assertCleanPacketPaths',
     "['status', '--porcelain=v1', '--untracked-files=all'",

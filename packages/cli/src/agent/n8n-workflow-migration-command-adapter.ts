@@ -76,13 +76,16 @@ export async function runControlledWorkflowMigrationCommand(
   const getSource = (sourceId: string) => sourceId === source.sourceId ? source : undefined
   const createExecutor = dependencies.createExecutor || createNodeN8nWorkflowMigrationExecutor
   const loadRuntimeConfiguration = createOwnerLocalN8nRuntimeConfigurationSnapshot()
-  const executor: ControlledMigrationExecutor = async input => createExecutor({
-    sourceRoot: source.rootPath,
-    sourceId: source.sourceId,
-    sourceRootFingerprint: source.rootFingerprint,
-    loadRuntimeConfiguration,
-    ...(input.consumeMutationDispatch ? { consumeMutationDispatch: input.consumeMutationDispatch } : {})
-  })(input)
+  const executor: ControlledMigrationExecutor = async input => {
+    const { consumeMutationDispatch, ...invocation } = input
+    return createExecutor({
+      sourceRoot: source.rootPath,
+      sourceId: source.sourceId,
+      sourceRootFingerprint: source.rootFingerprint,
+      loadRuntimeConfiguration,
+      ...(consumeMutationDispatch ? { consumeMutationDispatch } : {})
+    })(invocation)
+  }
   const capabilityDependencies = { getSource, getGrants: () => grants as ControlledN8nWorkflowGrant[], executor }
 
   try {

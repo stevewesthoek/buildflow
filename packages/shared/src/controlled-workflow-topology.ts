@@ -19,6 +19,19 @@ const exactJsonPointerSchema = z.string().min(1).max(1000).refine(
 
 const protectedInvariantSchema = z.literal('unchanged')
 
+export const CONTROLLED_WORKFLOW_CANONICALIZATION_VERSIONS = [1, 2] as const
+export const controlledWorkflowCanonicalizationVersionSchema = z.union([
+  z.literal(CONTROLLED_WORKFLOW_CANONICALIZATION_VERSIONS[0]),
+  z.literal(CONTROLLED_WORKFLOW_CANONICALIZATION_VERSIONS[1])
+])
+export type ControlledWorkflowCanonicalizationVersion = z.infer<typeof controlledWorkflowCanonicalizationVersionSchema>
+
+export function isControlledWorkflowCanonicalizationVersion(
+  value: unknown
+): value is ControlledWorkflowCanonicalizationVersion {
+  return value === 1 || value === 2
+}
+
 const protectedWorkflowInvariantsSchema = z.object({
   activation: protectedInvariantSchema,
   settings: protectedInvariantSchema,
@@ -90,7 +103,7 @@ export const controlledWorkflowTopologyManifestSchema = z.object({
   kind: z.literal('n8n-controlled-topology-migration'),
   workflow: z.object({
     id: boundedIdSchema,
-    canonicalizationVersion: z.literal(1),
+    canonicalizationVersion: controlledWorkflowCanonicalizationVersionSchema,
     expectedLiveCanonicalSha256: sha256Schema,
     candidateCanonicalSha256: sha256Schema,
     rollbackCanonicalSha256: sha256Schema
