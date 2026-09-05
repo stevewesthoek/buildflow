@@ -283,7 +283,39 @@ function operationInputSchema(name: WorkbenchToolName, operation: OpenApiOperati
   }
   const schema = operation.requestBody?.content?.['application/json']?.schema
   if (!schema || schema.type !== 'object') throw new Error('Workbench action is missing an object request schema.')
+  if (name === 'readWorkbenchContext') {
+    return addContextWorkflowProperties(schema)
+  }
   return schema
+}
+
+function addContextWorkflowProperties(schema: JsonSchema): JsonSchema {
+  const properties = isObjectRecord(schema.properties) ? { ...schema.properties } : {}
+  const mode: JsonSchema = isObjectRecord(properties.mode) ? { ...properties.mode } : { type: 'string' }
+  if (Array.isArray(mode.enum) && !mode.enum.includes('active_run')) {
+    mode.enum = [...mode.enum, 'active_run']
+  }
+  properties.mode = mode
+  properties.runId = { type: 'string', minLength: 1, maxLength: 256, description: 'Optional exact run ID for activity delta reads.' }
+  properties.includeActivity = { type: 'boolean', description: 'Include the bounded Activity Ledger projection for an active-run read.' }
+  properties.activityDelta = { type: 'boolean', description: 'Return only Activity Ledger events after activitySinceEventId.' }
+  properties.activitySinceEventId = { type: 'string', minLength: 1, maxLength: 256 }
+  properties.includePacket = { type: 'boolean', description: 'MCP-only: include the already-reserved bounded continuation packet for Codex consumption.' }
+  properties.contextWorkflow = { type: 'boolean' }
+  properties.contextIntelligenceSessionId = { type: 'string', minLength: 1, maxLength: 256 }
+  properties.requestId = { type: 'string', minLength: 1, maxLength: 256 }
+  properties.clientCapabilities = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['clientId'],
+    properties: {
+      clientId: { type: 'string', minLength: 1, maxLength: 128 },
+      contextWorkflow: { type: 'boolean' },
+      requestedScope: { enum: ['active-source', 'explicit-source', 'session-sources'] },
+      features: { type: 'array', maxItems: 16, items: { type: 'string', maxLength: 64 } }
+    }
+  }
+  return { ...schema, properties, additionalProperties: false }
 }
 
 export function loadWorkbenchToolContracts(repoRoot: string): Map<WorkbenchToolName, WorkbenchToolContract> {

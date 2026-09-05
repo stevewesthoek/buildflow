@@ -1,6 +1,8 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import { loadControlledN8nWorkflowGrants, type ControlledN8nWorkflowGrant } from './capability-grants'
+import type { CapabilityOperationStoreOptions } from './capability-operation-store'
+import type { CapabilityMutationDispatchStoreOptions } from './capability-mutation-dispatch-store'
 import type { KnowledgeSource } from '@workbench/shared'
 import type { MigrationRunCommandPlan } from './run-command-request'
 import {
@@ -38,6 +40,11 @@ export type MigrationCommandAdapterDependencies = {
   execute?: typeof executeControlledWorkflowMigration
   status?: typeof getControlledWorkflowMigrationStatus
   createExecutor?: typeof createNodeN8nWorkflowMigrationExecutor
+  operationStore?: CapabilityOperationStoreOptions
+  dispatchStore?: CapabilityMutationDispatchStoreOptions
+  now?: () => Date
+  randomBytes?: (size: number) => Buffer
+  wrapperContract?: unknown
 }
 
 const publicFailure = (request: MigrationRunCommandPlan, code: PublicMigrationFailureCode, message: string): MigrationCommandAdapterResult => ({
@@ -86,7 +93,16 @@ export async function runControlledWorkflowMigrationCommand(
       ...(consumeMutationDispatch ? { consumeMutationDispatch } : {})
     })(invocation)
   }
-  const capabilityDependencies = { getSource, getGrants: () => grants as ControlledN8nWorkflowGrant[], executor }
+  const capabilityDependencies = {
+    getSource,
+    getGrants: () => grants as ControlledN8nWorkflowGrant[],
+    executor,
+    ...(dependencies.operationStore ? { operationStore: dependencies.operationStore } : {}),
+    ...(dependencies.dispatchStore ? { dispatchStore: dependencies.dispatchStore } : {}),
+    ...(dependencies.now ? { now: dependencies.now } : {}),
+    ...(dependencies.randomBytes ? { randomBytes: dependencies.randomBytes } : {}),
+    ...(dependencies.wrapperContract ? { wrapperContract: dependencies.wrapperContract } : {})
+  }
 
   try {
     const result = request.migration.phase === 'prepare'

@@ -1,3 +1,5 @@
+import ReferenceReadinessCard from './components/ReferenceReadinessCard'
+
 export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
@@ -16,6 +18,8 @@ export default function Home() {
               Open Workbench
             </a>
           </div>
+
+          <ReferenceReadinessCard />
 
           <div className="mt-16 grid grid-cols-1 gap-8 md:grid-cols-3">
             <div className="rounded-lg bg-white p-6 shadow">

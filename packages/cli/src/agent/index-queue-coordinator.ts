@@ -44,7 +44,10 @@ export class IndexQueueCoordinator {
     const existing = listIndexJobs(input.sourceId, this.options.indexStore).find(job => !['completed', 'failed', 'cancelled'].includes(job.status) && job.operation === input.operation && job.reason === input.reason)
     if (existing) return { ok: true, job: existing }
     const created = createQueuedIndexJob({ ...input, attempt: 0, maxAttempts: this.maxAttempts }, this.options.indexStore)
-    if (!created.ok) return failure('enqueue_failed', 'message' in created ? created.message : 'Unable to enqueue index job.')
+    if (!created.ok) {
+      appendQueueHistory({ eventType: 'rejected', jobId: `queue-rejected-${crypto.randomUUID()}`, sourceId: input.sourceId, occurredAt: now(this.options), reason: input.reason, failureCode: 'enqueue_failed', details: 'message' in created ? created.message : 'Unable to enqueue index job.' }, this.options.historyStore)
+      return failure('enqueue_failed', 'message' in created ? created.message : 'Unable to enqueue index job.')
+    }
     appendQueueHistory({ eventType: 'enqueued', jobId: created.job.jobId, sourceId: created.job.sourceId, occurredAt: now(this.options), reason: created.job.reason }, this.options.historyStore)
     return { ok: true, job: created.job }
   }
@@ -92,6 +95,10 @@ export class IndexQueueCoordinator {
     active.forEach(job => sourceCounts.set(job.sourceId, (sourceCounts.get(job.sourceId) || 0) + 1))
     const available = Math.max(0, this.maxConcurrency - active.length)
     const selected = jobs.filter(job => (sourceCounts.get(job.sourceId) || 0) < this.maxPerSource).slice(0, available)
+    if (jobs.length > 0 && (available === 0 || selected.length < Math.min(jobs.length, available))) {
+      const saturatedJob = jobs[0]
+      appendQueueHistory({ eventType: 'saturated', jobId: saturatedJob.jobId, sourceId: saturatedJob.sourceId, occurredAt: now(this.options), reason: available === 0 ? 'concurrency_limit' : 'source_limit', failureCode: available === 0 ? 'max_concurrency' : 'max_per_source' }, this.options.historyStore)
+    }
     return Promise.all(selected.map(async job => {
       const claimed = this.worker.claim(job.jobId, this.ownerId)
       if (!claimed.ok) return claimed

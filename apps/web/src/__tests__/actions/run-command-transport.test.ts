@@ -349,7 +349,7 @@ async function testRunCommandRoutePreservesProtectedDomainMismatchNames() {
         authorization: 'Bearer test-action-token',
         'content-type': 'application/json'
       },
-      body: JSON.stringify(migrationRequest)
+      body: JSON.stringify(sessionCommand(migrationRequest))
     }))
     const payload = await response.json()
     assert.equal(response.status, 200)
@@ -368,6 +368,49 @@ async function testRunCommandRoutePreservesProtectedDomainMismatchNames() {
   }
 }
 
+async function testRunCommandRouteBoundsCommandOutput() {
+  const originalFetch = globalThis.fetch
+  const originalToken = process.env.WORKBENCH_ACTION_TOKEN
+  const originalMode = process.env.WORKBENCH_BACKEND_MODE
+
+  try {
+    process.env.WORKBENCH_ACTION_TOKEN = 'test-action-token'
+    process.env.WORKBENCH_BACKEND_MODE = 'direct-agent'
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      status: 'completed',
+      sourceId: 'brain',
+      commandKind: 'git_status_short',
+      exitCode: 0,
+      stdout: `sensitive-prefix-${'x'.repeat(30_000)}`,
+      stderr: `stderr-prefix-${'y'.repeat(30_000)}`,
+      outputTruncated: false,
+      durationMs: 42
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch
+
+    const response = await runCommand(new NextRequest('http://127.0.0.1:3054/api/actions/run-command', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer test-action-token',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(sessionCommand({ sourceId: 'brain', commandKind: 'git_status_short' }))
+    }))
+    const text = await response.text()
+    const payload = JSON.parse(text) as Record<string, unknown>
+    assert.equal(response.status, 200)
+    assert(Buffer.byteLength(text, 'utf8') <= 8 * 1024)
+    assert.equal(payload.outputTruncated, true)
+    assert.equal(String(payload.stdout).includes('sensitive-prefix-'), false)
+    assert.equal(String(payload.stderr).includes('stderr-prefix-'), false)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalToken === undefined) delete process.env.WORKBENCH_ACTION_TOKEN
+    else process.env.WORKBENCH_ACTION_TOKEN = originalToken
+    if (originalMode === undefined) delete process.env.WORKBENCH_BACKEND_MODE
+    else process.env.WORKBENCH_BACKEND_MODE = originalMode
+  }
+}
+
 async function main() {
   await testN8nExportPassesTransportValidation()
   await testMigrationPassesStrictTransportAndPreservesConfirmationGate()
@@ -375,11 +418,13 @@ async function main() {
   await testRunCommandRoutePreservesConfirmationGate()
   await testRunCommandRoutePreservesMigrationOperation()
   await testRunCommandRoutePreservesProtectedDomainMismatchNames()
+  await testRunCommandRouteBoundsCommandOutput()
   console.log('✓ n8n_workflow_export passes transport validation and preserves confirmation gating')
   console.log('✓ n8n_workflow_migration preserves strict nested transport and confirmation gating')
   console.log('✓ run-command route preserves the controlled migration operation separately from activity metadata')
   console.log('✓ run-command route preserves secret-safe protected-domain mismatch names')
   console.log('✓ run-command preserves the backend confirmation token and source ID')
+  console.log('✓ run-command bounds public command output to the GPT response budget')
   console.log('✓ Unsupported command kinds remain rejected before transport')
 }
 

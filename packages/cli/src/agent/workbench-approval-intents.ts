@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { isAutonomyDecisionRequest, type AutonomyDecisionEvidenceReference, type AutonomyDecisionRequest } from '@workbench/shared'
 import { getConfigDir } from '../utils/paths'
 
 export const WORKBENCH_APPROVAL_INTENT_STORE_VERSION = 1 as const
@@ -28,6 +29,9 @@ export type WorkbenchApprovalIntentRecord = {
   expiresAt: string
   decidedAt?: string
   consumedAt?: string
+  /** Pending-only request material used to create the canonical R16.3 decision. */
+  decisionRequest?: AutonomyDecisionRequest
+  evidenceRef?: AutonomyDecisionEvidenceReference
 }
 
 type ApprovalIntentStore = {
@@ -94,6 +98,14 @@ function validRecord(value: unknown): value is WorkbenchApprovalIntentRecord {
     && validIso(record.expiresAt)
     && (record.decidedAt === undefined || validIso(record.decidedAt))
     && (record.consumedAt === undefined || validIso(record.consumedAt))
+    && (record.decisionRequest === undefined || isAutonomyDecisionRequest(record.decisionRequest))
+    && (record.evidenceRef === undefined || (
+      typeof record.evidenceRef === 'object'
+      && typeof record.evidenceRef.evidenceId === 'string'
+      && typeof record.evidenceRef.kind === 'string'
+      && typeof record.evidenceRef.reference === 'string'
+      && validIso(record.evidenceRef.recordedAt)
+    ))
 }
 
 function readStore(options?: WorkbenchApprovalIntentStoreOptions): ApprovalIntentStore | ApprovalIntentFailure {
@@ -184,6 +196,8 @@ export function ensurePendingApprovalIntent(params: {
   paths: string[]
   reason: string
   requestDigest: string
+  decisionRequest?: AutonomyDecisionRequest
+  evidenceRef?: AutonomyDecisionEvidenceReference
   ttlMs?: number
   options?: WorkbenchApprovalIntentStoreOptions
 }): { ok: true; created: boolean; record: WorkbenchApprovalIntentRecord } | ApprovalIntentFailure {
@@ -192,6 +206,11 @@ export function ensurePendingApprovalIntent(params: {
     expireRecords(store, now)
     const existing = store.approvals.find(item => item.sourceId === params.sourceId && item.runId === params.runId && item.sessionId === params.sessionId && item.operationKind === params.operationKind && item.requestDigest === params.requestDigest && (item.status === 'pending' || item.status === 'approved'))
     if (existing) {
+      if (params.decisionRequest && existing.decisionRequest && existing.decisionRequest.requestFingerprint !== params.decisionRequest.requestFingerprint) {
+        return { ok: false as const, code: 'APPROVAL_INTENT_BINDING_MISMATCH' as const, message: 'The persisted approval intent does not match the exact request.' }
+      }
+      if (params.decisionRequest && !existing.decisionRequest) existing.decisionRequest = params.decisionRequest
+      if (params.evidenceRef && !existing.evidenceRef) existing.evidenceRef = params.evidenceRef
       persistStore(store, params.options)
       return { ok: true as const, created: false, record: { ...existing, paths: [...existing.paths] } }
     }
@@ -207,6 +226,8 @@ export function ensurePendingApprovalIntent(params: {
       paths: [...new Set(params.paths)].slice(0, 32),
       reason: params.reason.slice(0, 160),
       requestDigest: params.requestDigest,
+      ...(params.decisionRequest ? { decisionRequest: params.decisionRequest } : {}),
+      ...(params.evidenceRef ? { evidenceRef: params.evidenceRef } : {}),
       status: 'pending',
       createdAt: now,
       updatedAt: now,

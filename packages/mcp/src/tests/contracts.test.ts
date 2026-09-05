@@ -45,7 +45,7 @@ test('projects exactly the five existing Workbench actions', () => {
       const commandKindSchema = commandProperties.commandKind as { enum?: string[] } | undefined
       assert.deepEqual(
         [...(commandKindSchema?.enum ?? [])].sort(),
-        [...new Set([...RUN_WORKBENCH_DIRECT_COMMAND_KINDS, ...PERSISTED_VALIDATION_COMMAND_KINDS, 'n8n_workflow_migration'])].sort()
+        [...new Set([...RUN_WORKBENCH_DIRECT_COMMAND_KINDS, ...PERSISTED_VALIDATION_COMMAND_KINDS, 'n8n_workflow_migration', 'read_evidence'])].sort()
       )
       const migration = commandProperties.migration as { type?: string; properties?: Record<string, { enum?: string[] }> } | undefined
       assert(migration)

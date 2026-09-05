@@ -1,1 +1,1 @@
-export const actionRoundTripFocusedCodeMarker = 18
+export const actionRoundTripFocusedCodeMarker = 19

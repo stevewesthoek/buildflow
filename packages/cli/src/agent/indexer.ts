@@ -2,43 +2,91 @@ import fs from 'fs'
 import { promises as fsp } from 'fs'
 import path from 'path'
 import matter from 'gray-matter'
-import fg from 'fast-glob'
 import { getEnabledSources } from './config'
 import { getConfigDir, getIndexPath, getIndexDir, getSourceIndexPath } from '../utils/paths'
 import { IndexedDoc } from '@workbench/shared'
 import { recordIndexTelemetry } from './index-graph-telemetry'
+import {
+  DEFAULT_IGNORE_PATTERNS,
+  INDEX_SCAN_EXCLUSION_VERSION,
+  INDEX_SCAN_POLICY_ID,
+  INDEX_SCAN_POLICY_VERSION,
+  MAX_INDEX_SCAN_BYTES,
+  MAX_INDEX_SCAN_DIRECTORIES,
+  MAX_INDEX_SCAN_ENTRIES_PER_DIRECTORY,
+  MAX_INDEX_SCAN_FILES,
+  MAX_INDEX_SCAN_RESULTS as POLICY_MAX_INDEX_SCAN_RESULTS,
+  MAX_INDEX_SCAN_WALL_TIME_MS,
+  MAX_INDEXABLE_FILE_BYTES,
+  MAX_INDEX_SCAN_DEPTH,
+  MAX_INDEX_SCAN_HARD_DEPTH,
+  boundedScanOptions,
+  indexFailureCodeForTermination,
+  type IndexScanBudgetOptions,
+  type IndexScanFailureCode
+} from './index-scan-policy'
 
-const DEFAULT_IGNORE_PATTERNS = [
-  '**/.git/**',
-  '**/.obsidian/**',
-  '**/.next/**',
-  '**/node_modules/**',
-  '**/dist/**',
-  '**/build/**',
-  '**/out/**',
-  '**/coverage/**',
-  '**/.cache/**',
-  '**/.turbo/**',
-  '**/.vercel/**',
-  '**/.npm/**',
-  '**/.yarn/**',
-  '**/.pnpm-store/**',
-  '**/.DS_Store',
-  '**/.idea/**',
-  '**/.vscode/**',
-  '**/pnpm-lock.yaml',
-  '**/package-lock.json',
-  '**/yarn.lock',
-  '**/bun.lockb',
-  '**/*.tsbuildinfo',
-  '**/docs/openapi.chatgpt.json'
-]
-
-const MAX_INDEXABLE_BYTES = 1024 * 1024
+const MAX_INDEXABLE_BYTES = MAX_INDEXABLE_FILE_BYTES
 const YIELD_EVERY_FILES = 25
 const BUFFER_SAMPLE_BYTES = 4096
 const ALLOWED_HIDDEN_INDEX_PREFIXES = ['.kiro/']
 const ALLOWED_HIDDEN_INDEX_FILES = new Set(['.ai/current.md'])
+export { DEFAULT_IGNORE_PATTERNS, INDEX_SCAN_EXCLUSION_VERSION, INDEX_SCAN_POLICY_ID, INDEX_SCAN_POLICY_VERSION, MAX_INDEX_SCAN_BYTES, MAX_INDEX_SCAN_DIRECTORIES, MAX_INDEX_SCAN_ENTRIES_PER_DIRECTORY, MAX_INDEX_SCAN_FILES, MAX_INDEX_SCAN_WALL_TIME_MS, MAX_INDEXABLE_FILE_BYTES, MAX_INDEX_SCAN_DEPTH, MAX_INDEX_SCAN_HARD_DEPTH }
+export const MAX_INDEX_SCAN_RESULTS = POLICY_MAX_INDEX_SCAN_RESULTS
+
+export type IndexerOptions = {
+  yieldIfNeeded?: () => Promise<void>
+  onProgress?: (progress: { completed: number; total: number; indexed: number }) => void | Promise<void>
+}
+
+export type ScanTerminationReason = 'completed' | 'depth_limit' | 'entries_limit' | 'result_limit' | 'directory_budget' | 'file_budget' | 'byte_budget' | 'time_budget' | 'source_missing' | 'symlink_rejected' | 'io_error'
+
+export type IndexScanDepthBand = {
+  directories: number
+  files: number
+  ignored: number
+  bytes: number
+}
+
+export type ScanResult = {
+  files: string[]
+  entriesExamined: number
+  directoriesVisited: number
+  filesConsidered: number
+  bytesConsidered: number
+  maxDepth: number
+  terminationReason: ScanTerminationReason
+  depthLimitPaths: string[]
+  budgetLimitPaths: string[]
+  ignoredPathCount: number
+  deepestLegitimatePath?: string
+  deepestIgnoredPath?: string
+  depthBands: Record<string, IndexScanDepthBand>
+  policyVersion: string
+  exclusionVersion: string
+  policyIdentity: string
+  effectiveLimits: Required<IndexScanBudgetOptions>
+}
+
+export class IndexScanError extends Error {
+  readonly failureCode: IndexScanFailureCode
+  readonly scan: ScanResult
+
+  constructor(scan: ScanResult) {
+    const pathDetail = scan.depthLimitPaths[0] || scan.budgetLimitPaths[0]
+    const reason = scan.terminationReason === 'source_missing'
+      ? 'source_missing_or_renamed'
+      : scan.terminationReason === 'symlink_rejected'
+        ? 'source_symlink_rejected'
+        : scan.terminationReason === 'io_error'
+          ? 'source_io_error'
+          : `source_${scan.terminationReason}`
+    super(`${reason}${pathDetail ? ` at ${pathDetail}` : ''}`)
+    this.name = 'IndexScanError'
+    this.failureCode = indexFailureCodeForTermination(scan.terminationReason)
+    this.scan = scan
+  }
+}
 
 const shouldIndexRelativePath = (filePath: string): boolean => {
   const normalized = filePath.replace(/\\/g, '/')
@@ -50,6 +98,184 @@ const shouldIndexRelativePath = (filePath: string): boolean => {
 
 const yieldToEventLoop = async (): Promise<void> => {
   await new Promise<void>(resolve => setImmediate(resolve))
+}
+
+function globMatches(filePath: string, patterns: string[]): boolean {
+  const normalized = filePath.replace(/\\/g, '/')
+  return patterns.some(pattern => {
+    const candidate = pattern.replace(/\\/g, '/')
+    if (candidate === '**/*' || candidate === '*') return true
+    const escaped = candidate
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*/g, '.*')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '[^/]')
+    return new RegExp(`^${escaped}$`).test(normalized)
+  })
+}
+
+function ignoredPath(filePath: string, ignorePatterns: string[]): boolean {
+  const parts = filePath.replace(/\\/g, '/').split('/')
+  return ignorePatterns.some(pattern => {
+    const normalized = pattern.replace(/\\/g, '/')
+    const name = normalized.replace(/^\*\*\//, '').replace(/\/\*\*\/?$/, '').replace(/\*$/, '')
+    return parts.some(part => part === name || (name.endsWith('/') && part === name.slice(0, -1)))
+  })
+}
+
+function hiddenPathShouldBePruned(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, '/')
+  if (normalized === '.ai' || normalized === '.ai/current.md') return false
+  if (normalized === '.kiro' || normalized.startsWith('.kiro/')) return false
+  return normalized.split('/').some(part => part.startsWith('.'))
+}
+
+function exclusionKind(filePath: string, ignorePatterns: string[]): 'ignored_generated' | 'hidden_excluded' | undefined {
+  if (ignoredPath(filePath, ignorePatterns)) return 'ignored_generated'
+  if (hiddenPathShouldBePruned(filePath)) return 'hidden_excluded'
+  return undefined
+}
+
+function depthBand(depth: number): string {
+  if (depth <= 3) return '0-3'
+  if (depth <= 5) return '4-5'
+  if (depth <= 8) return '6-8'
+  if (depth <= 10) return '9-10'
+  return '11+'
+}
+
+function newDepthBand(): IndexScanDepthBand {
+  return { directories: 0, files: 0, ignored: 0, bytes: 0 }
+}
+
+export async function boundedSourceScan(rootPath: string, patterns: string[], ignorePatterns: string[], options: IndexScanBudgetOptions = {}): Promise<ScanResult> {
+  const effectiveLimits = boundedScanOptions(options)
+  const base = {
+    files: [] as string[],
+    entriesExamined: 0,
+    directoriesVisited: 0,
+    filesConsidered: 0,
+    bytesConsidered: 0,
+    maxDepth: 0,
+    terminationReason: 'completed' as ScanTerminationReason,
+    depthLimitPaths: [] as string[],
+    budgetLimitPaths: [] as string[],
+    ignoredPathCount: 0,
+    deepestLegitimatePath: undefined as string | undefined,
+    deepestIgnoredPath: undefined as string | undefined,
+    depthBands: {} as Record<string, IndexScanDepthBand>,
+    policyVersion: INDEX_SCAN_POLICY_VERSION,
+    exclusionVersion: INDEX_SCAN_EXCLUSION_VERSION,
+    policyIdentity: INDEX_SCAN_POLICY_ID,
+    effectiveLimits
+  }
+  const result = (): ScanResult => base
+  const startedAt = Date.now()
+  let symlinkRejected = false
+  const recordPath = (list: string[], relative: string): void => {
+    if (relative && list.length < 32) list.push(relative)
+  }
+  const timedOut = (): boolean => Date.now() - startedAt >= effectiveLimits.maxWallTimeMs
+  const fail = (reason: ScanTerminationReason, relative?: string): void => {
+    if (base.terminationReason !== 'completed') return
+    base.terminationReason = reason
+    if (reason === 'depth_limit') recordPath(base.depthLimitPaths, relative || '')
+    if (reason.endsWith('budget') || reason === 'entries_limit' || reason === 'result_limit' || reason === 'time_budget') recordPath(base.budgetLimitPaths, relative || '')
+  }
+  const trackBand = (depth: number): IndexScanDepthBand => {
+    const key = depthBand(depth)
+    if (!base.depthBands[key]) base.depthBands[key] = newDepthBand()
+    return base.depthBands[key]
+  }
+
+  let rootStat
+  try { rootStat = await fsp.lstat(rootPath) } catch {
+    base.terminationReason = 'source_missing'
+    return result()
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    base.terminationReason = 'symlink_rejected'
+    return result()
+  }
+
+  const stack: Array<{ absolute: string; relative: string; depth: number }> = [{ absolute: rootPath, relative: '', depth: 0 }]
+  while (stack.length > 0 && base.terminationReason === 'completed') {
+    if (timedOut()) { fail('time_budget'); break }
+    const current = stack.pop()!
+    if (base.directoriesVisited >= effectiveLimits.maxDirectories) { fail('directory_budget', current.relative); break }
+    base.directoriesVisited++
+    base.maxDepth = Math.max(base.maxDepth, current.depth)
+    trackBand(current.depth).directories++
+
+    const entries: fs.Dirent[] = []
+    try {
+      const directory = await fsp.opendir(current.absolute)
+      for await (const entry of directory) {
+        base.entriesExamined++
+        if (timedOut()) { fail('time_budget', current.relative); break }
+        entries.push(entry)
+        if (entries.length > MAX_INDEX_SCAN_ENTRIES_PER_DIRECTORY) {
+          fail('entries_limit', current.relative)
+          break
+        }
+      }
+      entries.sort((a, b) => a.name.localeCompare(b.name))
+    } catch {
+      fail('io_error', current.relative)
+    }
+    // Preserve the historical bounded behavior: inspect the already-capped
+    // directory entries even after discovering the per-directory entry limit,
+    // so the bounded result set remains useful alongside the failure reason.
+    if (base.terminationReason !== 'completed' && base.terminationReason !== 'entries_limit') break
+
+    for (const entry of entries) {
+      if (timedOut()) { fail('time_budget', current.relative); break }
+      const relative = current.relative ? path.posix.join(current.relative, entry.name) : entry.name
+      const depth = current.depth + 1
+      const band = trackBand(depth)
+      const excluded = exclusionKind(relative, ignorePatterns)
+      if (excluded) {
+        base.ignoredPathCount++
+        band.ignored++
+        if (!base.deepestIgnoredPath || relative.split('/').length > base.deepestIgnoredPath.split('/').length) base.deepestIgnoredPath = relative
+        continue
+      }
+      const absolute = path.join(current.absolute, entry.name)
+      if (entry.isSymbolicLink()) {
+        // Reject the link itself but continue scanning independent safe files;
+        // callers receive the truthful rejection reason without losing safe
+        // source results discovered in the same directory.
+        symlinkRejected = true
+        continue
+      }
+      if (entry.isDirectory()) {
+        if (current.depth >= effectiveLimits.maxDepth) {
+          base.maxDepth = Math.max(base.maxDepth, depth)
+          fail('depth_limit', relative)
+        } else {
+          stack.push({ absolute, relative, depth })
+        }
+        if (base.terminationReason !== 'completed') break
+        continue
+      }
+      if (!entry.isFile() || !globMatches(relative, patterns)) continue
+      if (base.filesConsidered >= effectiveLimits.maxFiles) { fail('file_budget', relative); break }
+      let stat: fs.Stats
+      try { stat = await fsp.stat(absolute) } catch { fail('io_error', relative); break }
+      const consideredBytes = Math.min(stat.size, MAX_INDEXABLE_BYTES)
+      if (base.bytesConsidered + consideredBytes > effectiveLimits.maxBytes) { fail('byte_budget', relative); break }
+      base.filesConsidered++
+      base.bytesConsidered += consideredBytes
+      band.files++
+      band.bytes += consideredBytes
+      if (!base.deepestLegitimatePath || depth > base.deepestLegitimatePath.split('/').length) base.deepestLegitimatePath = relative
+      if (base.files.length >= MAX_INDEX_SCAN_RESULTS) { fail('result_limit', relative); break }
+      base.files.push(relative)
+    }
+    if (base.terminationReason === 'completed') await yieldToEventLoop()
+  }
+  if (base.terminationReason === 'completed' && symlinkRejected) base.terminationReason = 'symlink_rejected'
+  return result()
 }
 
 const isProbablyBinaryContent = (buffer: Buffer): boolean => {
@@ -78,14 +304,14 @@ function readJsonArray<T>(filePath: string): T[] {
 export class Indexer {
   private docs: IndexedDoc[] = []
 
-  constructor(sourceIds?: string[]) {
+  constructor(sourceIds?: string[], private readonly options: IndexerOptions = {}) {
     this.loadFromDisk(sourceIds)
   }
 
   async buildIndex(): Promise<void> {
     this.docs = []
 
-    const sources = getEnabledSources()
+    const sources = getEnabledSources({ includeIndexState: false, refreshGitMetadata: false })
     const patterns = ['**/*']
     const ignorePatterns = DEFAULT_IGNORE_PATTERNS
 
@@ -94,9 +320,16 @@ export class Indexer {
     }
   }
 
-  async buildIndexForSource(sourceId: string, sourcePath?: string, patterns: string[] = ['**/*'], ignorePatterns: string[] = DEFAULT_IGNORE_PATTERNS): Promise<number> {
+  async buildIndexForSource(sourceId: string, sourcePath?: string, patterns: string[] = ['**/*'], ignorePatterns: string[] = DEFAULT_IGNORE_PATTERNS, progressOptions: IndexerOptions = {}): Promise<number> {
+    const onProgress = progressOptions.onProgress ?? this.options.onProgress
     const startedAt = Date.now()
-    const source = getEnabledSources().find(item => item.id === sourceId)
+    // Source-management reindexes provide an explicit sourcePath. Avoid
+    // hydrating every configured source (including Git/index bindings) during
+    // the synchronous prefix of this async method; native startup must remain
+    // responsive while a source begins rebuilding.
+    const source = sourcePath
+      ? undefined
+      : getEnabledSources({ includeIndexState: false, refreshGitMetadata: false }).find(item => item.id === sourceId)
     if (!source && !sourcePath) {
       recordIndexTelemetry({
         sourceId,
@@ -124,17 +357,16 @@ export class Indexer {
     let indexedFiles = 0
     let skippedFiles = 0
     let processedFiles = 0
+    let scan: ScanResult | undefined
     try {
-      const sourceFiles = await fg(patterns, {
-        cwd: rootPath,
-        ignore: ignorePatterns,
-        absolute: false,
-        onlyFiles: true,
-        dot: true,
-        followSymbolicLinks: false
-      })
+      scan = await boundedSourceScan(rootPath, patterns, ignorePatterns)
+      if (scan.terminationReason !== 'completed') {
+        throw new IndexScanError(scan)
+      }
 
-      for (const filePath of sourceFiles) {
+      await onProgress?.({ completed: 0, total: scan.files.length, indexed: 0 })
+
+      for (const filePath of scan.files) {
         try {
           if (!shouldIndexRelativePath(filePath)) {
             skippedFiles++
@@ -183,20 +415,33 @@ export class Indexer {
           nextDocs.push(doc)
           sourceDocs.push(doc)
           indexedFiles++
-          processedFiles++
         } catch (err) {
           skippedFiles++
           console.warn(`Failed to index ${filePath} from ${sourceId}:`, err)
+        } finally {
+          processedFiles++
+          if (processedFiles === scan.files.length || processedFiles % YIELD_EVERY_FILES === 0) {
+            await onProgress?.({ completed: processedFiles, total: scan.files.length, indexed: indexedFiles })
+          }
         }
 
         if (processedFiles % YIELD_EVERY_FILES === 0) {
           await yieldToEventLoop()
+          await this.options.yieldIfNeeded?.()
         }
       }
     } catch (err) {
       recordIndexTelemetry({
         sourceId,
         durationMs: Date.now() - startedAt,
+        indexedFileCount: scan?.filesConsidered,
+        directoriesVisited: scan?.directoriesVisited,
+        filesConsidered: scan?.filesConsidered,
+        bytesConsidered: scan?.bytesConsidered,
+        entriesExamined: scan?.entriesExamined,
+        maxDepth: scan?.maxDepth,
+        resultsEmitted: scan?.files.length,
+        terminationReason: scan?.terminationReason,
         outcome: 'failure',
         reasonCode: 'index_failed'
       })
@@ -211,6 +456,13 @@ export class Indexer {
       sourceId,
       durationMs: Date.now() - startedAt,
       indexedFileCount: indexedFiles,
+      directoriesVisited: scan.directoriesVisited,
+      filesConsidered: scan.filesConsidered,
+      bytesConsidered: scan.bytesConsidered,
+      entriesExamined: scan.entriesExamined,
+      maxDepth: scan.maxDepth,
+      resultsEmitted: scan.files.length,
+      terminationReason: scan.terminationReason,
       outcome: 'success',
       reasonCode: 'index_completed'
     })
@@ -255,8 +507,11 @@ export class Indexer {
         return acc
       }, {})
       const manifest = {
-        version: 2,
+        version: 3,
         storage: 'per-source-json',
+        policyVersion: INDEX_SCAN_POLICY_VERSION,
+        exclusionVersion: INDEX_SCAN_EXCLUSION_VERSION,
+        policyIdentity: INDEX_SCAN_POLICY_ID,
         sources: Object.entries(counts).map(([sourceId, count]) => ({
           sourceId,
           file: path.relative(getConfigDir(), getSourceIndexPath(sourceId)),

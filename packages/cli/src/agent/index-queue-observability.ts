@@ -7,7 +7,7 @@ import { listIndexJobs, type IndexLifecycleStoreOptions } from './index-lifecycl
 import { observeRepositoryHealth, type RepositoryHealthObserverOptions } from './repository-health-observer'
 import type { KnowledgeSource } from '@workbench/shared'
 
-export type QueueHistoryEventType = 'enqueued' | 'claimed' | 'started' | 'completed' | 'failed' | 'retry_scheduled' | 'cancelled' | 'recovered' | 'terminal_failure'
+export type QueueHistoryEventType = 'enqueued' | 'claimed' | 'started' | 'completed' | 'failed' | 'retry_scheduled' | 'cancelled' | 'recovered' | 'terminal_failure' | 'rejected' | 'saturated'
 export type QueueHistoryEvent = { eventId: string; eventType: QueueHistoryEventType; jobId: string; sourceId: string; occurredAt: string; owner?: string; leaseId?: string; attempt?: number; reason?: string; failureCode?: string; details?: string }
 export type QueueHistoryStoreOptions = IndexLifecycleStoreOptions & { maxEvents?: number }
 const HISTORY_FILE = 'index-queue-history.json'
@@ -39,8 +39,19 @@ export type QueueDiagnosticJob = {
   recoveryEvents: QueueHistoryEvent[]
   freshnessImpact: 'none' | 'warning' | 'blocked' | 'unavailable'
 }
-export type QueueDiagnostics = { generatedAt: string; current: QueueDiagnosticJob[]; blocked: QueueDiagnosticJob[]; stale: QueueDiagnosticJob[]; failed: QueueDiagnosticJob[]; recovered: QueueDiagnosticJob[]; lastSuccessfulIndexing: Record<string, string | undefined>; sources: QueueDiagnosticJob[] }
-export type QueueDiagnosticsOptions = { sources?: KnowledgeSource[]; sourceLoader?: () => KnowledgeSource[]; observer?: Omit<RepositoryHealthObserverOptions, 'sources' | 'sourceLoader'>; indexStore?: IndexLifecycleStoreOptions; historyStore?: QueueHistoryStoreOptions; now?: () => Date }
+export type QueuePressureSummary = {
+  activeCount: number
+  queuedCount: number
+  maxConcurrency: number
+  maxPerSource: number
+  utilization: number
+  backpressure: boolean
+  rejectionCount: number
+  recentSaturation: number
+  lastSaturatedAt?: string
+}
+export type QueueDiagnostics = { generatedAt: string; current: QueueDiagnosticJob[]; blocked: QueueDiagnosticJob[]; stale: QueueDiagnosticJob[]; failed: QueueDiagnosticJob[]; recovered: QueueDiagnosticJob[]; lastSuccessfulIndexing: Record<string, string | undefined>; pressure: QueuePressureSummary; sources: QueueDiagnosticJob[] }
+export type QueueDiagnosticsOptions = { sources?: KnowledgeSource[]; sourceLoader?: () => KnowledgeSource[]; observer?: Omit<RepositoryHealthObserverOptions, 'sources' | 'sourceLoader'>; indexStore?: IndexLifecycleStoreOptions; historyStore?: QueueHistoryStoreOptions; now?: () => Date; maxConcurrency?: number; maxPerSource?: number }
 
 export class IndexQueueDiagnostics {
   constructor(private readonly options: QueueDiagnosticsOptions = {}) {}
@@ -50,6 +61,28 @@ export class IndexQueueDiagnostics {
     try { sources = this.options.sources ? [...this.options.sources] : this.options.sourceLoader?.() || [] } catch { sources = [] }
     const jobs = listIndexJobs(undefined, this.options.indexStore)
     const queued = jobs.filter(job => job.status === 'queued').sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    const active = jobs.filter(job => ['claimed', 'observing', 'running'].includes(job.status))
+    const history = listQueueHistory(undefined, this.options.historyStore)
+    const maxConcurrency = Math.max(1, Math.min(this.options.maxConcurrency || 2, 16))
+    const maxPerSource = Math.max(1, Math.min(this.options.maxPerSource || 1, maxConcurrency))
+    const saturationEvents = history.filter(event => event.eventType === 'saturated')
+    const recentSaturationCutoff = Date.parse(generatedAt) - 15 * 60_000
+    const recentSaturationEvents = saturationEvents.filter(event => Date.parse(event.occurredAt) >= recentSaturationCutoff)
+    const activeBySource = new Map<string, number>()
+    for (const job of active) activeBySource.set(job.sourceId, (activeBySource.get(job.sourceId) || 0) + 1)
+    const sourceLimited = queued.some(job => (activeBySource.get(job.sourceId) || 0) >= maxPerSource)
+    const backpressure = queued.length > 0 && (active.length >= maxConcurrency || sourceLimited)
+    const pressure: QueuePressureSummary = {
+      activeCount: active.length,
+      queuedCount: queued.length,
+      maxConcurrency,
+      maxPerSource,
+      utilization: maxConcurrency > 0 ? Number(Math.min(1, active.length / maxConcurrency).toFixed(3)) : 0,
+      backpressure,
+      rejectionCount: history.filter(event => event.eventType === 'rejected').length,
+      recentSaturation: recentSaturationEvents.length,
+      ...(saturationEvents.length > 0 ? { lastSaturatedAt: saturationEvents[saturationEvents.length - 1].occurredAt } : {})
+    }
     const diagnostics = jobs.map(job => {
       const history = listQueueHistory(job.jobId, this.options.historyStore)
       const source = sources.find(item => item.id === job.sourceId)
@@ -61,7 +94,7 @@ export class IndexQueueDiagnostics {
     })
     const lastSuccessfulIndexing: Record<string, string | undefined> = {}
     for (const diagnostic of diagnostics) if (diagnostic.job.status === 'completed') lastSuccessfulIndexing[diagnostic.job.sourceId] = diagnostic.job.completedAt
-    return { generatedAt, current: diagnostics.filter(item => ['queued', 'claimed', 'observing', 'planned', 'running'].includes(item.job.status)), blocked: diagnostics.filter(item => item.freshnessImpact === 'blocked' || item.job.status === 'failed'), stale: diagnostics.filter(item => item.ownership.leaseState === 'expired' || item.job.status === 'queued' && Boolean(item.job.nextAttemptAt)), failed: diagnostics.filter(item => item.job.status === 'failed'), recovered: diagnostics.filter(item => item.recoveryEvents.length > 0), lastSuccessfulIndexing, sources: diagnostics }
+    return { generatedAt, current: diagnostics.filter(item => ['queued', 'claimed', 'observing', 'planned', 'running'].includes(item.job.status)), blocked: diagnostics.filter(item => item.freshnessImpact === 'blocked' || item.job.status === 'failed'), stale: diagnostics.filter(item => item.ownership.leaseState === 'expired' || item.job.status === 'queued' && Boolean(item.job.nextAttemptAt)), failed: diagnostics.filter(item => item.job.status === 'failed'), recovered: diagnostics.filter(item => item.recoveryEvents.length > 0), lastSuccessfulIndexing, pressure, sources: diagnostics }
   }
 }
 

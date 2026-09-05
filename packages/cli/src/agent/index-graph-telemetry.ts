@@ -19,6 +19,13 @@ type IndexTelemetryInput = {
   sourceId?: string
   durationMs: number
   indexedFileCount?: number
+  entriesExamined?: number
+  directoriesVisited?: number
+  filesConsidered?: number
+  bytesConsidered?: number
+  maxDepth?: number
+  resultsEmitted?: number
+  terminationReason?: 'completed' | 'depth_limit' | 'entries_limit' | 'result_limit' | 'directory_budget' | 'file_budget' | 'byte_budget' | 'time_budget' | 'source_missing' | 'symlink_rejected' | 'io_error' | 'scan_failed'
   outcome: 'success' | 'failure'
   reasonCode: 'index_completed' | 'index_failed' | 'source_not_found' | 'source_path_missing'
 }
@@ -58,11 +65,19 @@ export function recordIndexTelemetry(
       durationMs: boundedNumber(input.durationMs),
       count: boundedCount(input.indexedFileCount)
     }
+    const scan = {
+      entriesExamined: boundedCount(input.entriesExamined),
+      directoriesVisited: boundedCount(input.directoriesVisited),
+      filesConsidered: boundedCount(input.filesConsidered),
+      bytesConsidered: boundedCount(input.bytesConsidered),
+      maxDepth: boundedCount(input.maxDepth),
+      resultsEmitted: boundedCount(input.resultsEmitted)
+    }
     dependencies.appendSample({
       name: 'index_duration',
       scope: safeScope(input.sourceId),
       dimensions,
-      measurements
+      measurements: { ...measurements, ...scan }
     })
     dependencies.appendEvent({
       name: input.outcome === 'success' ? 'index_completed' : 'index_failed',

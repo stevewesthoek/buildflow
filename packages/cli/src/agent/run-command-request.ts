@@ -1,7 +1,8 @@
 import {
   runWorkbenchCommandRequestSchema,
   sessionAwareRunWorkbenchCommandRequestSchema,
-  type N8nWorkflowMigrationRequest
+  type N8nWorkflowMigrationRequest,
+  type WorkbenchEvidenceReadOwner
 } from '@workbench/shared'
 import type { WorkbenchAdmissionOperation } from './workbench-admission-orchestrator'
 import type {
@@ -44,6 +45,28 @@ export type ParsedRunCommandRequest =
       sourceId: string
       commandKind: PersistedValidationCommandKind
       validationJobId: string
+      timeoutMs?: number
+      resultStream?: 'stdout' | 'stderr'
+      resultCursor?: string
+      resultPageBytes?: number
+    }
+  | {
+      ok: true
+      kind: 'validation_cancel'
+      sourceId: string
+      commandKind: PersistedValidationCommandKind
+      validationJobId: string
+      cancelReason?: string
+      timeoutMs?: number
+    }
+  | {
+      ok: true
+      kind: 'evidence'
+      sourceId: string
+      evidenceId: string
+      evidenceOwner?: WorkbenchEvidenceReadOwner
+      evidenceCursor?: string
+      evidencePageBytes?: number
       timeoutMs?: number
     }
   | { ok: true; kind: 'migration'; sourceId: string; request: MigrationRunCommandPlan }
@@ -284,6 +307,34 @@ export function parseRunCommandRequest(input: unknown): ParsedRunCommandRequest 
       sourceId,
       commandKind: requiredString(record, 'commandKind') as PersistedValidationCommandKind,
       validationJobId: requiredString(record, 'validationJobId'),
+      timeoutMs: optionalNumber(record, 'timeoutMs'),
+      resultStream: optionalString(record, 'resultStream') as 'stdout' | 'stderr' | undefined,
+      resultCursor: optionalString(record, 'resultCursor'),
+      resultPageBytes: optionalNumber(record, 'resultPageBytes')
+    }
+  }
+
+  if (validationJobOperation === 'cancel') {
+    return {
+      ok: true,
+      kind: 'validation_cancel',
+      sourceId,
+      commandKind: requiredString(record, 'commandKind') as PersistedValidationCommandKind,
+      validationJobId: requiredString(record, 'validationJobId'),
+      cancelReason: optionalString(record, 'cancelReason'),
+      timeoutMs: optionalNumber(record, 'timeoutMs')
+    }
+  }
+
+  if (validationJobOperation === 'evidence') {
+    return {
+      ok: true,
+      kind: 'evidence',
+      sourceId,
+      evidenceId: requiredString(record, 'evidenceId'),
+      evidenceOwner: record.evidenceOwner as WorkbenchEvidenceReadOwner | undefined,
+      evidenceCursor: optionalString(record, 'evidenceCursor'),
+      evidencePageBytes: optionalNumber(record, 'evidencePageBytes'),
       timeoutMs: optionalNumber(record, 'timeoutMs')
     }
   }
@@ -383,8 +434,10 @@ export function classifyParsedRunCommandRequest(
   parsed: ParsedRunCommandSuccess
 ): WorkbenchAdmissionOperation {
   if (parsed.kind === 'validation_status') return 'status'
+  if (parsed.kind === 'validation_cancel') return 'write'
   if (parsed.kind === 'migration') return 'migration_execute'
   if (parsed.kind === 'validation_submit') return 'write'
+  if (parsed.kind === 'evidence') return 'status'
 
   const commandKind = parsed.request.commandKind
   if (STATUS_COMMAND_KINDS.has(commandKind)) return 'status'

@@ -14,7 +14,13 @@ export type PortableExecutionContext = {
   requestId?: string
   sourceId?: string
   sessionId?: string
+  /** Existing actor/capability bindings; never inferred from display text. */
+  actorId?: string
+  capabilityId?: string
+  caller?: WorkbenchOperationRequest['caller']
   cancellationId?: string
+  /** Internal composition flag: the higher-level mutation handler owns approval activity projection. */
+  suppressFileApprovalActivity?: boolean
   telemetry?: (event: { operationId: WorkbenchOperationId; sourceId?: string; mutationClass: string; outcome: 'success' | 'error' }) => void
   sourceResolver?: (sourceId: string) => unknown
   sessionResolver?: (sessionId: string, sourceId?: string) => unknown
@@ -54,7 +60,10 @@ export async function dispatchPortableOperation<TPayload = unknown, TResult = un
       requestId: request.requestId,
       sourceId: request.sourceId,
       sessionId: request.sessionId,
-      cancellationId: request.cancellationId
+      cancellationId: request.cancellationId,
+      caller: request.caller,
+      actorId: context.actorId,
+      capabilityId: context.capabilityId
     })
     context.telemetry?.({ operationId, sourceId: request.sourceId, mutationClass, outcome: 'success' })
     return { protocolVersion: 1, requestId: request.requestId, operationId, ok: true, sourceId: request.sourceId, sessionId: request.sessionId, payload: payload as TResult }

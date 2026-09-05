@@ -40,6 +40,7 @@ const DEFAULT_RESPONSE_SIZE_LIMIT_BYTES = GPT_ACTION_RESPONSE_BYTE_LIMIT
 export type ActionTransportOptions = {
   timeoutMs?: number
   signal?: AbortSignal
+  requestId?: string
   diagnostics?: ActionDiagnostics
   maxResponseBytes?: number
 }
@@ -308,6 +309,7 @@ export async function executeAction(
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (options.requestId) headers['X-Workbench-Request-Id'] = options.requestId
 
     if (mode === 'relay-agent' && userToken) {
       headers['Authorization'] = `Bearer ${userToken}`
@@ -389,6 +391,7 @@ export async function executeActionGET(
 
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (options.requestId) headers['X-Workbench-Request-Id'] = options.requestId
 
       if (userToken) {
         headers['Authorization'] = `Bearer ${userToken}`
@@ -427,6 +430,7 @@ export async function executeActionGET(
 
   try {
     const headers: Record<string, string> = { 'Cache-Control': 'no-store' }
+    if (options.requestId) headers['X-Workbench-Request-Id'] = options.requestId
 
     const fetchStartedAt = Date.now()
     const response = await fetchWithTimeout(url, {

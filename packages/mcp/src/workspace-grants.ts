@@ -1,4 +1,5 @@
 import { Ajv, type ValidateFunction } from 'ajv'
+import { evaluateAutonomyPolicy, type AutonomyPolicyLayer } from '@workbench/shared'
 
 export const WORKBENCH_GRANT_CONTRACT_VERSION = '1' as const
 export const WORKBENCH_GRANT_KIND = 'workbench.workspace.grant' as const
@@ -52,6 +53,16 @@ export type WorkbenchGrant = {
 export type WorkbenchGrantEvaluation =
   | { permitted: true; effectiveScopes: WorkbenchGrantScope[] }
   | { permitted: false; reason: string }
+
+const GRANT_SCOPE_OPERATION: Record<WorkbenchGrantScope, string> = {
+  read: 'get_workbench_status',
+  write: 'patch_file',
+  command: 'run_exact_command',
+  git: 'git_commit',
+  network: 'github_read',
+  capability: 'approved_capability',
+  release: 'install_promote'
+}
 
 function hasPathTraversal(value: string): boolean {
   return value.split(/[/\\]/).includes('..')
@@ -163,6 +174,32 @@ export function evaluateGrant(grant: WorkbenchGrant, requestedScope: WorkbenchGr
     )
     if (!allowed) return { permitted: false, reason: 'path not within allowed boundaries' }
   }
+
+  // R16.2 is an additional restrictive gate. Existing state, expiry, scope,
+  // and protected-path checks above remain authoritative and user grants do
+  // not create a new execution mechanism.
+  const operation = GRANT_SCOPE_OPERATION[requestedScope]
+  const layer = (name: AutonomyPolicyLayer['name']): AutonomyPolicyLayer => ({
+    name,
+    grants: {
+      [requestedScope]: {
+        allowed: [operation],
+        allowedPaths: grant.boundary.allowedPaths
+      }
+    }
+  })
+  const policy = evaluateAutonomyPolicy({
+    level: grant.level,
+    category: requestedScope,
+    operation,
+    source: layer('source'),
+    run: layer('run'),
+    session: layer('session'),
+    capability: layer('capability'),
+    confirmation: { state: 'confirmed' },
+    scope: { path }
+  })
+  if (policy.decision !== 'allowed') return { permitted: false, reason: `${policy.reasonCode.toLowerCase()}: ${policy.restrictingScope || requestedScope}` }
 
   return { permitted: true, effectiveScopes: grant.scopes }
 }

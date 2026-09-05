@@ -1,6 +1,6 @@
 {
   "name": "workbench",
-  "version": "1.3.12-beta",
+  "version": "1.3.13-beta",
   "private": true,
   "license": "AGPL-3.0-only",
   "description": "Local CLI agent for ProChat Workbench",
@@ -9,12 +9,13 @@
     "buildflow": "dist/bin/buildflow.js"
   },
   "scripts": {
-    "build": "tsc && node ../../scripts/materialize-cli-bin.mjs",
+    "build": "tsc && node ../../scripts/materialize-cli-dist.mjs && node ../../scripts/materialize-cli-bin.mjs",
     "type-check": "tsc --noEmit",
     "dev": "tsx src/index.ts serve",
     "test:cli-compatibility": "node tests/cli-compatibility.test.js"
   },
   "dependencies": {
+    "@workbench/mcp": "workspace:*",
     "@workbench/shared": "workspace:*",
     "chokidar": "^3.5.3",
     "commander": "^11.0.0",

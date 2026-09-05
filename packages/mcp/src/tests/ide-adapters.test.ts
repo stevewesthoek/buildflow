@@ -115,6 +115,7 @@ test('VS Code advertises exact optional project support and preserves unrelated 
   assert.equal(document.servers.workbench.cwd, item.workbenchRoot)
   assert.equal(document.servers.workbench.env.WORKBENCH_MCP_CREDENTIAL_FILE, item.credentialFile)
   assert.equal(document.servers.workbench.env.WORKBENCH_MCP_ALLOWED_TOOLS, 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand')
+  assert.equal(document.servers.workbench.env.WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS, '')
   assert(!fs.readFileSync(item.configPath, 'utf8').includes('fixture'))
   assert.equal(fs.statSync(item.configPath).mode & 0o777, 0o600)
 

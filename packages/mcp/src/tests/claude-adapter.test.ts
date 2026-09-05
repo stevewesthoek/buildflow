@@ -203,6 +203,7 @@ test('preserves the restricted optional Brain profile', async () => {
     .projects[item.targetProjectRoot].mcpServers.workbench
   assert.equal(entry.env.WORKBENCH_MCP_ALLOWED_TOOLS, 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand')
   assert.equal(entry.env.WORKBENCH_MCP_ALLOWED_COMMAND_KINDS, 'n8n_workflow_migration')
+  assert.equal(entry.env.WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS, '')
 
   const audit = await executeWorkbenchMcpAdapterRequest(item.adapter, {
     apiVersion: WORKBENCH_MCP_REGISTRATION_API_VERSION,

@@ -16,14 +16,14 @@ try {
   process.stdout.write(`${JSON.stringify(status, null, 2)}\n`)
 
   const failures: string[] = []
-  if (!status.configured) failures.push(`No valid Workbench MCP registration found in the project config (profile: ${status.profile}).`)
-  if (status.configMode !== '0600') failures.push(`Project config mode must be 0600 (found: ${status.configMode ?? 'missing'}).`)
+  if (!status.configured) failures.push(`No valid Workbench MCP registration found in the global or project config (profile: ${status.profile}).`)
+  if (status.configMode !== '0600') failures.push(`${status.scope === 'global' ? 'Global' : 'Project'} config mode must be 0600 (found: ${status.configMode ?? 'missing'}).`)
   if (status.credentialMode !== '0600') failures.push(`Credential file mode must be 0600 (found: ${status.credentialMode ?? 'missing'}).`)
   if (status.duplicateCount !== 1) {
     failures.push(
       `Expected exactly 1 Workbench MCP registration but found ${status.duplicateCount} ` +
       `(${status.globalMatchCount} global, ${status.projectMatchCount} project). ` +
-      'Remove the global entry from ~/.codex/config.toml and keep only the project-local registration.'
+      'Keep exactly one Workbench registration in either the global or project Codex config.'
     )
   }
 

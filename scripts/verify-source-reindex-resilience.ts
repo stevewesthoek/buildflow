@@ -35,11 +35,13 @@ async function main() {
       createdFiles.push(filePath)
     }
 
-    const skipDirs = ['node_modules', '.git', '.next', 'dist', 'build', 'coverage', '.cache', '.turbo', '.vercel', '.npm', '.yarn', '.pnpm-store']
+    const skipDirs = ['node_modules', '.git', '.next', '.build', 'dist', 'build', 'coverage', '.cache', '.turbo', '.vercel', '.npm', '.yarn', '.pnpm-store']
     for (const dir of skipDirs) {
       await writeText(path.join(sourceDir, dir, 'ignored.md'), '# ignored\n')
       createdFiles.push(path.join(sourceDir, dir, 'ignored.md'))
     }
+    await writeText(path.join(sourceDir, '.build', 'deep', 'release', 'artifacts', 'ignored.md'), '# ignored\n')
+    createdFiles.push(path.join(sourceDir, '.build', 'deep', 'release', 'artifacts', 'ignored.md'))
 
     await writeBinary(path.join(sourceDir, 'binary.bin'))
     createdFiles.push(path.join(sourceDir, 'binary.bin'))
@@ -70,6 +72,7 @@ async function main() {
     assert.ok(!indexedPaths.some(item => item.includes('node_modules')), 'node_modules should be skipped')
     assert.ok(!indexedPaths.some(item => item.includes('.git')), '.git should be skipped')
     assert.ok(!indexedPaths.some(item => item.includes('.next')), '.next should be skipped')
+    assert.ok(!indexedPaths.some(item => item.includes('.build')), '.build should be skipped')
     assert.ok(!indexedPaths.some(item => item.includes('dist')), 'dist should be skipped')
     assert.ok(!indexedPaths.some(item => item.includes('build')), 'build should be skipped')
     assert.ok(!indexedPaths.some(item => item.includes('coverage')), 'coverage should be skipped')

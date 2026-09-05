@@ -13,6 +13,7 @@ import {
   WORKBENCH_ENTRYPOINT_SUFFIX,
   BRAIN_PROFILE_ALLOWED_TOOLS,
   BRAIN_PROFILE_ALLOWED_COMMAND_KINDS,
+  BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS,
   PROFILE_AVAILABILITY,
   buildWorkbenchMcpServerSpec,
   canonicalProjectRoot,
@@ -26,6 +27,7 @@ export {
   WORKBENCH_MCP_PROFILES,
   BRAIN_PROFILE_ALLOWED_TOOLS,
   BRAIN_PROFILE_ALLOWED_COMMAND_KINDS,
+  BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS,
   PROFILE_AVAILABILITY,
   parseConfigureCliArgs,
   type WorkbenchMcpProfile
@@ -66,6 +68,7 @@ export type CodexRegistrationStatus = {
   duplicateCount: number
   globalMatchCount: number
   projectMatchCount: number
+  scope?: 'global' | 'project'
   profile: WorkbenchMcpProfile
   availability: 'required' | 'optional'
 }
@@ -282,7 +285,9 @@ export function inspectCodexRegistration(options: ConfigureOptions): CodexRegist
   const projectDocument = fs.existsSync(paths.projectConfigPath) ? readToml(paths.projectConfigPath) : {}
   const globalDefinitions = serverEntries(globalDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
   const projectDefinitions = serverEntries(projectDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
-  const definition = projectDefinitions.find(([name]) => name === SERVER_NAME)?.[1]
+  const projectDefinition = projectDefinitions.find(([name]) => name === SERVER_NAME)?.[1]
+  const globalDefinition = globalDefinitions.find(([name]) => name === SERVER_NAME)?.[1]
+  const definition = projectDefinition || globalDefinition
   const expected = expectedServer(paths.workbenchRepoRoot, paths.credentialFile, paths.nodeExecutable, profile)
   const configured = !!definition && definitionsMatchRegisteredNode(definition, expected)
   return {
@@ -291,7 +296,7 @@ export function inspectCodexRegistration(options: ConfigureOptions): CodexRegist
     globalConfigPath: paths.globalConfigPath,
     projectConfigPath: paths.projectConfigPath,
     credentialFile: paths.credentialFile,
-    configMode: mode(paths.projectConfigPath),
+    configMode: projectDefinition ? mode(paths.projectConfigPath) : mode(paths.globalConfigPath),
     credentialMode: mode(paths.credentialFile),
     command: typeof definition?.command === 'string' ? definition.command : undefined,
     args: Array.isArray(definition?.args) ? definition.args : undefined,
@@ -300,6 +305,7 @@ export function inspectCodexRegistration(options: ConfigureOptions): CodexRegist
     duplicateCount: globalDefinitions.length + projectDefinitions.length,
     globalMatchCount: globalDefinitions.length,
     projectMatchCount: projectDefinitions.length,
+    scope: projectDefinition ? 'project' : 'global',
     profile,
     availability: PROFILE_AVAILABILITY[profile]
   }
@@ -317,7 +323,13 @@ export function configureCodex(options: ConfigureOptions, hooks?: ConfigureHooks
   const globalBeforeText = fs.readFileSync(paths.globalConfigPath, 'utf8')
   const globalDocument = readToml(paths.globalConfigPath)
   const globalDefinitions = serverEntries(globalDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
-  if (globalDefinitions.length > 0) throw new Error('A Workbench MCP definition already exists in the global Codex config.')
+  if (globalDefinitions.length > 0) {
+    const status = inspectCodexRegistration(options)
+    if (globalDefinitions.length !== 1 || status.projectMatchCount !== 0 || !status.configured || status.scope !== 'global') {
+      throw new Error('A conflicting or mismatched Workbench MCP definition already exists in the global Codex config.')
+    }
+    return { ...status, backupPath: codexBackupPath(options, paths.backupDir) }
+  }
 
   const projectConfigExisted = fs.existsSync(paths.projectConfigPath)
   const projectBeforeText = projectConfigExisted ? fs.readFileSync(paths.projectConfigPath, 'utf8') : ''
@@ -404,7 +416,17 @@ export function previewCodexConfiguration(options: ConfigureOptions): CodexConfi
 
   const globalDocument = readToml(paths.globalConfigPath)
   const globalDefinitions = serverEntries(globalDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
-  if (globalDefinitions.length > 0) throw new Error('A Workbench MCP definition already exists in the global Codex config.')
+  if (globalDefinitions.length > 0) {
+    const status = inspectCodexRegistration(options)
+    if (globalDefinitions.length !== 1 || status.projectMatchCount !== 0 || !status.configured || status.scope !== 'global') {
+      throw new Error('A conflicting or mismatched Workbench MCP definition already exists in the global Codex config.')
+    }
+    return {
+      ...status,
+      backupPath: codexBackupPath(options, paths.backupDir),
+      changed: false
+    }
+  }
 
   const projectConfigExisted = fs.existsSync(paths.projectConfigPath)
   const projectDocument = projectConfigExisted ? readToml(paths.projectConfigPath) : {}
@@ -440,7 +462,13 @@ export function previewCodexRemoval(options: ConfigureOptions): CodexRemovePrevi
 
   const globalDocument = readToml(paths.globalConfigPath)
   const globalDefinitions = serverEntries(globalDocument).filter(([name, value]) => isWorkbenchDefinition(name, value))
-  if (globalDefinitions.length > 0) throw new Error('A Workbench MCP definition already exists in the global Codex config.')
+  if (globalDefinitions.length > 0) {
+    const status = inspectCodexRegistration(options)
+    if (globalDefinitions.length !== 1 || status.projectMatchCount !== 0 || !status.configured || status.scope !== 'global') {
+      throw new Error('A conflicting or mismatched Workbench MCP definition already exists in the global Codex config.')
+    }
+    return { ...status, changed: false }
+  }
   if (!fs.existsSync(paths.projectConfigPath)) return { ...inspectCodexRegistration(options), changed: false }
 
   const projectDocument = readToml(paths.projectConfigPath)

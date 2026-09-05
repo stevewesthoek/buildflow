@@ -1,10 +1,10 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import crypto from 'node:crypto'
-import { constants as fsConstants } from 'node:fs'
+import { constants as fsConstants, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { access, chmod, lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
+import { readCbmConfig, type CbmCacheLayout, type CbmProviderConfiguration } from './cbm-config'
 
 export type CbmGraphContextRequest = {
   sourceId: string
@@ -13,7 +13,7 @@ export type CbmGraphContextRequest = {
   limit: number
 }
 
-export type CbmFreshnessState = 'fresh' | 'stale' | 'unknown'
+export type CbmFreshnessState = 'fresh' | 'stale' | 'unavailable' | 'building' | 'incompatible' | 'unknown'
 
 export type CbmGraphContextData = {
   sourceId: string
@@ -27,11 +27,31 @@ export type CbmGraphContextData = {
   diagnostics?: Record<string, unknown>
 }
 
+export type CbmProviderRuntimeDiagnostics = {
+  configured: boolean
+  providerId: string
+  providerReachable: 'yes' | 'no' | 'unknown'
+  executableConfigured: boolean
+  cacheConfigured: boolean
+  cacheFound: boolean
+  graphAvailable: boolean
+  freshness: CbmFreshnessState
+  indexedRevision?: string
+  lastSuccessfulQueryAt?: string
+  lastSuccessfulQueryDigest?: string
+  lastFailure?: { at: string; reason: string }
+  providerReuseState?: 'reused' | 'cold' | 'ephemeral'
+  cacheHit?: boolean
+  freshnessCacheHit?: boolean
+  fallbackActive: boolean
+}
+
 export interface CbmGraphContextTransport {
   resolveGraphContext(request: CbmGraphContextRequest): Promise<CbmGraphContextData>
 }
 
 export type CbmPreflightStage =
+  | 'provider_not_configured'
   | 'executable_unavailable'
   | 'executable_safety_failure'
   | 'cache_unavailable'
@@ -86,20 +106,25 @@ type CbmRpcSession = {
   terminate(): void
 }
 
-type CodebaseMemoryTransportOptions = {
+export type CodebaseMemoryTransportOptions = {
+  providerId?: string
   executablePath?: string
   cacheDir?: string
   cacheRoot?: string
+  cacheLayout?: CbmCacheLayout
   timeoutMs?: number
   sessionFactory?: (input: { executablePath: string; cacheDir: string; cwd: string }) => CbmRpcSession
   currentHead?: (sourceRoot: string) => Promise<string | undefined>
   canonicalPath?: (inputPath: string) => Promise<string>
+  reuseProviderSession?: boolean
 }
 
-type CodebaseMemoryIndexOptions = {
+export type CodebaseMemoryIndexOptions = {
+  providerId?: string
   executablePath?: string
   cacheDir?: string
   cacheRoot?: string
+  cacheLayout?: CbmCacheLayout
   timeoutMs?: number
 }
 
@@ -109,7 +134,9 @@ const MAX_STDERR_BYTES = 64 * 1024
 const MCP_PROTOCOL_VERSION = '2025-03-26'
 const SAFE_PROJECT_NAME = /[^a-zA-Z0-9._-]/g
 const FRESHNESS_METADATA_FILE = '_workbench-index.json'
+const PROVIDER_RUNTIME_FILE = '_workbench-provider-runtime.json'
 const MAX_FRESHNESS_METADATA_BYTES = 64 * 1024
+const MAX_PROVIDER_RUNTIME_BYTES = 16 * 1024
 const NON_SOURCE_PATH_SEGMENTS = new Set([
   '.git', '.build', '.buildflow', '.cache', '.next', '.turbo', '.graphify-out',
   'build', 'coverage', 'dist', 'graphify-out', 'node_modules', 'out', 'vendor'
@@ -122,6 +149,8 @@ const CREDENTIAL_LIKE_EXACT_BASENAMES = new Set([
   'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa',
   '.netrc', 'credentials', '.credentials'
 ])
+
+const providerRuntimeSnapshots = new Map<string, Partial<CbmProviderRuntimeDiagnostics>>()
 const CREDENTIAL_LIKE_BASENAME_SAFE_INFIX = ['example', 'sample', 'template', '.example.', '.sample.', '.template.']
 
 export function isCredentialLikePath(relativePath: string): boolean {
@@ -160,16 +189,40 @@ export function createCodebaseMemoryExecutableVerifier(
     currentUid: () => typeof process.getuid === 'function' ? process.getuid() : undefined,
     ...overrides
   }
-  let verifiedDefaultPath: string | undefined
+  const verifiedPaths = new Map<string, string>()
 
   return async (inputPath?: string): Promise<string> => {
-    if (!inputPath && verifiedDefaultPath) return verifiedDefaultPath
-    const candidate = inputPath || path.join(os.homedir(), '.local', 'bin', 'codebase-memory-mcp')
-    if (!path.isAbsolute(candidate)) {
+    const configured = inputPath?.trim() || ''
+    if (!configured) {
+      throw new CbmTransportUnavailableError(
+        'Structural provider executable is not configured',
+        'provider_not_configured'
+      )
+    }
+    const cached = verifiedPaths.get(configured)
+    if (cached) return cached
+    if (!path.isAbsolute(configured) && !/^[a-zA-Z0-9._-]+$/.test(configured)) {
       throw new CbmTransportUnavailableError(
         'Codebase Memory executable path must be absolute',
         'executable_safety_failure'
       )
+    }
+    let candidate = configured
+    if (!path.isAbsolute(configured)) {
+      try {
+        candidate = (await execFileText('/usr/bin/which', [configured], { timeout: 1_000 })).split(/\r?\n/)[0]?.trim() || ''
+      } catch {
+        throw new CbmTransportUnavailableError(
+          'Codebase Memory executable is unavailable',
+          'executable_unavailable'
+        )
+      }
+      if (!candidate || !path.isAbsolute(candidate)) {
+        throw new CbmTransportUnavailableError(
+          'Codebase Memory executable resolution was unsafe',
+          'executable_safety_failure'
+        )
+      }
     }
     let resolved: string
     try {
@@ -208,7 +261,7 @@ export function createCodebaseMemoryExecutableVerifier(
         'executable_safety_failure'
       )
     }
-    if (!inputPath) verifiedDefaultPath = resolved
+    verifiedPaths.set(configured, resolved)
     return resolved
   }
 }
@@ -249,24 +302,178 @@ function safeName(value: string, fallback: string): string {
   return normalized || fallback
 }
 
-export function codebaseMemoryCacheDir(sourceId: string, sourceRoot: string, cacheRoot?: string): string {
-  const root = cacheRoot || path.join(os.homedir(), 'Library', 'Caches', 'brain', 'codebase-memory-mcp')
+export function codebaseMemoryCacheDir(sourceId: string, sourceRoot: string, cacheRoot: string): string {
+  const root = path.resolve(cacheRoot)
   const canonicalIdentity = path.resolve(sourceRoot)
   const identityHash = crypto.createHash('sha256').update(canonicalIdentity).digest('hex').slice(0, 12)
   const sourceName = safeName(sourceId, safeName(path.basename(canonicalIdentity), 'repository'))
   return path.join(root, `${sourceName}-${identityHash}`)
 }
 
-export function canonicalBrainCodebaseMemoryCacheDir(sourceRoot: string, cacheRoot?: string): string {
-  const root = cacheRoot || path.join(os.homedir(), 'Library', 'Caches', 'brain', 'codebase-memory-mcp')
+export function repositoryCacheDir(sourceRoot: string, cacheRoot: string): string {
+  const root = path.resolve(cacheRoot)
   const canonicalIdentity = path.resolve(sourceRoot)
   return path.join(root, safeName(path.basename(canonicalIdentity), 'repository'))
+}
+
+function queryDigest(query: string | undefined): string | undefined {
+  if (!query?.trim()) return undefined
+  return crypto.createHash('sha256').update(query.trim()).digest('hex').slice(0, 16)
+}
+
+function providerSnapshotKey(sourceId: string | undefined, sourceRoot: string | undefined): string {
+  return `${sourceId || 'unknown'}:${sourceRoot ? path.resolve(sourceRoot) : 'unknown'}`
+}
+
+function rememberProviderSnapshot(key: string, update: Partial<CbmProviderRuntimeDiagnostics>): void {
+  providerRuntimeSnapshots.set(key, { ...(providerRuntimeSnapshots.get(key) || {}), ...update })
+}
+
+function ownerPrivateDirectory(cacheDir: string): boolean {
+  try {
+    const details = lstatSync(cacheDir)
+    const uid = typeof process.getuid === 'function' ? process.getuid() : details.uid
+    return details.isDirectory() && !details.isSymbolicLink() && details.uid === uid && (details.mode & 0o077) === 0
+  } catch {
+    return false
+  }
+}
+
+function readProviderRuntimeSnapshot(cacheDir: string): Partial<CbmProviderRuntimeDiagnostics> {
+  if (!ownerPrivateDirectory(cacheDir)) return {}
+  try {
+    const file = path.join(cacheDir, PROVIDER_RUNTIME_FILE)
+    const details = lstatSync(file)
+    const uid = typeof process.getuid === 'function' ? process.getuid() : details.uid
+    if (!details.isFile() || details.isSymbolicLink() || details.uid !== uid || (details.mode & 0o077) !== 0 || details.size > MAX_PROVIDER_RUNTIME_BYTES) return {}
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as JsonObject
+    const freshness = asString(parsed.freshness)
+    const providerReachable = asString(parsed.providerReachable)
+    const snapshot: Partial<CbmProviderRuntimeDiagnostics> = {
+      ...(providerReachable && ['yes', 'no', 'unknown'].includes(providerReachable) ? { providerReachable: providerReachable as CbmProviderRuntimeDiagnostics['providerReachable'] } : {}),
+      ...(freshness && ['fresh', 'stale', 'unavailable', 'building', 'incompatible', 'unknown'].includes(freshness) ? { freshness: freshness as CbmFreshnessState } : {}),
+      ...(typeof parsed.graphAvailable === 'boolean' ? { graphAvailable: parsed.graphAvailable } : {}),
+      ...(typeof parsed.cacheFound === 'boolean' ? { cacheFound: parsed.cacheFound } : {}),
+      ...(typeof parsed.fallbackActive === 'boolean' ? { fallbackActive: parsed.fallbackActive } : {}),
+      ...(asString(parsed.indexedRevision) ? { indexedRevision: asString(parsed.indexedRevision) } : {}),
+      ...(asString(parsed.lastSuccessfulQueryAt) ? { lastSuccessfulQueryAt: asString(parsed.lastSuccessfulQueryAt) } : {}),
+      ...(asString(parsed.lastSuccessfulQueryDigest) ? { lastSuccessfulQueryDigest: asString(parsed.lastSuccessfulQueryDigest) } : {}),
+      ...(asString(parsed.providerReuseState) && ['reused', 'cold', 'ephemeral'].includes(asString(parsed.providerReuseState)!) ? { providerReuseState: asString(parsed.providerReuseState) as CbmProviderRuntimeDiagnostics['providerReuseState'] } : {}),
+      ...(typeof parsed.cacheHit === 'boolean' ? { cacheHit: parsed.cacheHit } : {}),
+      ...(typeof parsed.freshnessCacheHit === 'boolean' ? { freshnessCacheHit: parsed.freshnessCacheHit } : {})
+    }
+    const failure = asObject(parsed.lastFailure)
+    if (failure && asString(failure.at) && asString(failure.reason)) snapshot.lastFailure = { at: asString(failure.at)!, reason: asString(failure.reason)! }
+    return snapshot
+  } catch {
+    return {}
+  }
+}
+
+function persistProviderSnapshot(cacheDir: string, key: string, update: Partial<CbmProviderRuntimeDiagnostics>): void {
+  if (!ownerPrivateDirectory(cacheDir)) return
+  const merged = { ...readProviderRuntimeSnapshot(cacheDir), ...(providerRuntimeSnapshots.get(key) || {}), ...update }
+  const encoded = `${JSON.stringify(merged)}\n`
+  if (Buffer.byteLength(encoded, 'utf8') > MAX_PROVIDER_RUNTIME_BYTES) return
+  const temporaryPath = path.join(cacheDir, `.${PROVIDER_RUNTIME_FILE}.${process.pid}.${Date.now()}`)
+  try {
+    writeFileSync(temporaryPath, encoded, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    renameSync(temporaryPath, path.join(cacheDir, PROVIDER_RUNTIME_FILE))
+  } catch {
+    try { if (existsSync(temporaryPath)) unlinkSync(temporaryPath) } catch { /* ignore */ }
+  }
+}
+
+function configuredProviderCacheDirectory(sourceId?: string, sourceRoot?: string): string | undefined {
+  const configured = readCbmConfig()
+  const provider = configured.backend === 'cbm' && 'provider' in configured ? configured.provider : undefined
+  if (process.env.CBM_CACHE_DIR && path.isAbsolute(process.env.CBM_CACHE_DIR)) return path.normalize(process.env.CBM_CACHE_DIR)
+  if (!sourceRoot || !provider?.cacheRoot) return undefined
+  return provider.cacheLayout === 'repository'
+    ? repositoryCacheDir(sourceRoot, provider.cacheRoot)
+    : codebaseMemoryCacheDir(sourceId || 'source', sourceRoot, provider.cacheRoot)
+}
+
+export function getCodebaseMemoryProviderDiagnostics(options: { sourceId?: string; sourceRoot?: string } = {}): CbmProviderRuntimeDiagnostics {
+  const configured = readCbmConfig()
+  const provider = configured.backend === 'cbm' && 'provider' in configured ? configured.provider : undefined
+  const cacheRoot = provider?.cacheRoot
+  const cacheDirectory = configuredProviderCacheDirectory(options.sourceId, options.sourceRoot)
+  const cacheFound = Boolean(cacheDirectory && existsSync(cacheDirectory))
+  const key = providerSnapshotKey(options.sourceId, options.sourceRoot)
+  const snapshot = { ...(cacheDirectory ? readProviderRuntimeSnapshot(cacheDirectory) : {}), ...(providerRuntimeSnapshots.get(key) || {}) }
+  let indexedRevision = snapshot.indexedRevision
+  if (!indexedRevision && cacheDirectory && ownerPrivateDirectory(cacheDirectory)) {
+    try {
+      const metadata = JSON.parse(readFileSync(path.join(cacheDirectory, FRESHNESS_METADATA_FILE), 'utf8')) as JsonObject
+      indexedRevision = asString(metadata.indexedAtSha)
+    } catch { /* unavailable metadata is represented as unknown */ }
+  }
+  return {
+    configured: configured.backend === 'cbm' && Boolean(provider),
+    providerId: provider?.providerId || 'unconfigured',
+    providerReachable: snapshot.providerReachable || 'unknown',
+    executableConfigured: Boolean(provider?.executable),
+    cacheConfigured: Boolean(cacheDirectory || cacheRoot || process.env.CBM_CACHE_DIR),
+    cacheFound,
+    graphAvailable: cacheFound ? snapshot.graphAvailable ?? false : false,
+    freshness: snapshot.freshness || 'unknown',
+    ...(indexedRevision ? { indexedRevision } : {}),
+    ...(snapshot.lastSuccessfulQueryAt ? { lastSuccessfulQueryAt: snapshot.lastSuccessfulQueryAt } : {}),
+    ...(snapshot.lastSuccessfulQueryDigest ? { lastSuccessfulQueryDigest: snapshot.lastSuccessfulQueryDigest } : {}),
+    ...(snapshot.providerReuseState ? { providerReuseState: snapshot.providerReuseState } : {}),
+    ...(snapshot.cacheHit !== undefined ? { cacheHit: snapshot.cacheHit } : {}),
+    ...(snapshot.freshnessCacheHit !== undefined ? { freshnessCacheHit: snapshot.freshnessCacheHit } : {}),
+    ...(snapshot.lastFailure ? { lastFailure: snapshot.lastFailure } : {}),
+    fallbackActive: snapshot.fallbackActive ?? (configured.backend === 'cbm' && (!provider || !cacheFound))
+  }
+}
+
+export function recordCodebaseMemoryProviderFailure(
+  options: { sourceId?: string; sourceRoot?: string },
+  reason: string,
+  freshnessOverride?: CbmFreshnessState
+): void {
+  const freshness: CbmFreshnessState = freshnessOverride || (reason === 'cbm_stale'
+    ? 'stale'
+    : reason === 'cbm_incompatible'
+      ? 'incompatible'
+      : reason === 'cbm_building'
+        ? 'building'
+        : 'unavailable')
+  rememberProviderSnapshot(providerSnapshotKey(options.sourceId, options.sourceRoot), {
+    providerReachable: reason === 'cbm_timeout' ? 'unknown' : 'no',
+    graphAvailable: false,
+    freshness,
+    fallbackActive: true,
+    lastFailure: { at: new Date().toISOString(), reason: reason.slice(0, 160) }
+  })
+  const cacheDirectory = configuredProviderCacheDirectory(options.sourceId, options.sourceRoot)
+  if (cacheDirectory) persistProviderSnapshot(cacheDirectory, providerSnapshotKey(options.sourceId, options.sourceRoot), providerRuntimeSnapshots.get(providerSnapshotKey(options.sourceId, options.sourceRoot)) || {})
+}
+
+type ResolvedCodebaseMemoryOptions = CodebaseMemoryTransportOptions & { providerId: string; executablePath?: string; cacheDir?: string; cacheRoot?: string; cacheLayout: CbmCacheLayout }
+
+function resolvedProviderOptions(options: CodebaseMemoryTransportOptions): ResolvedCodebaseMemoryOptions {
+  const configured = readCbmConfig()
+  const provider: CbmProviderConfiguration | undefined = configured.backend === 'cbm' && 'provider' in configured ? configured.provider : undefined
+  const executablePath = options.executablePath || provider?.executable
+  const cacheDir = options.cacheDir || process.env.CBM_CACHE_DIR
+  const cacheRoot = options.cacheRoot || provider?.cacheRoot
+  return {
+    ...options,
+    providerId: options.providerId || provider?.providerId || 'unconfigured',
+    ...(executablePath ? { executablePath } : {}),
+    ...(cacheDir ? { cacheDir } : {}),
+    ...(cacheRoot ? { cacheRoot } : {}),
+    cacheLayout: options.cacheLayout || (options.cacheRoot ? 'identity' : provider?.cacheLayout || 'identity')
+  }
 }
 
 function selectedCacheDirectory(
   sourceId: string,
   sourceRoot: string,
-  options: { cacheDir?: string; cacheRoot?: string }
+  options: { cacheDir?: string; cacheRoot?: string; cacheLayout?: CbmCacheLayout }
 ): string {
   if (options.cacheDir) {
     if (!path.isAbsolute(options.cacheDir)) {
@@ -277,8 +484,15 @@ function selectedCacheDirectory(
     }
     return path.normalize(options.cacheDir)
   }
-  if (options.cacheRoot) return codebaseMemoryCacheDir(sourceId, sourceRoot, options.cacheRoot)
-  return canonicalBrainCodebaseMemoryCacheDir(sourceRoot)
+  if (options.cacheRoot) {
+    return options.cacheLayout === 'repository'
+      ? repositoryCacheDir(sourceRoot, options.cacheRoot)
+      : codebaseMemoryCacheDir(sourceId, sourceRoot, options.cacheRoot)
+  }
+  throw new CbmTransportUnavailableError(
+    'Codebase Memory cache is not configured for this source',
+    'provider_not_configured'
+  )
 }
 
 async function verifyCacheDirectory(cacheDir: string): Promise<string> {
@@ -783,56 +997,207 @@ async function searchSuggestions(result: JsonObject, query: string | undefined, 
   return { matches, suggestedFiles: normalizedFiles, suggestedSymbols, nextActions }
 }
 
+type CbmPhaseMs = {
+  providerDiscovery: number
+  repositoryIdentity: number
+  cacheLookup: number
+  freshnessMetadata: number
+  providerSession: number
+  projectDiscovery: number
+  freshnessVerification: number
+  revisionProbe: number
+  fingerprint: number
+  revisionComparison: number
+  structuralQuery?: number
+  resultNormalization?: number
+  total: number
+}
+
+type ReusableCbmSession = {
+  key: string
+  session: CbmRpcSession
+  projectName?: string
+  inUse: boolean
+}
+
+type CbmSessionLease = {
+  session: CbmRpcSession
+  entry?: ReusableCbmSession
+  reusable: boolean
+  reused: boolean
+}
+
+function elapsedMs(startedAt: number): number {
+  return Number((performance.now() - startedAt).toFixed(2))
+}
+
+function sessionKey(input: { providerId: string; executablePath: string; cacheDir: string; canonicalRoot: string }): string {
+  return [input.providerId, input.executablePath, input.cacheDir, input.canonicalRoot].join('\0')
+}
+
 export function createCodebaseMemoryTransport(options: CodebaseMemoryTransportOptions = {}): CbmGraphContextTransport {
-  const sessionFactory = options.sessionFactory || (input => new StdioCbmRpcSession(input))
-  const timeoutMs = options.timeoutMs || DEFAULT_PROVIDER_TIMEOUT_MS
+  const resolvedOptions = resolvedProviderOptions(options)
+  const sessionFactory = resolvedOptions.sessionFactory || (input => new StdioCbmRpcSession(input))
+  const timeoutMs = resolvedOptions.timeoutMs || DEFAULT_PROVIDER_TIMEOUT_MS
   const canonicalPath = options.canonicalPath || (inputPath => realpath(inputPath))
   const currentHead = options.currentHead || gitHead
+  // Direct transport callers retain the historical close-after-request lifecycle.
+  // The native router opts into reuse on its singleton transport below.
+  const reuseProviderSession = options.reuseProviderSession ?? false
+  let reusableSession: ReusableCbmSession | undefined
+
+  const closeSession = async (session: CbmRpcSession, terminate: boolean): Promise<void> => {
+    if (terminate) session.terminate()
+    await session.close().catch(() => undefined)
+  }
+
+  const acquireSession = async (input: { executablePath: string; cacheDir: string; cwd: string }): Promise<CbmSessionLease> => {
+    if (!reuseProviderSession) return { session: sessionFactory(input), reusable: false, reused: false }
+    const key = sessionKey({
+      providerId: resolvedOptions.providerId,
+      executablePath: input.executablePath,
+      cacheDir: input.cacheDir,
+      canonicalRoot: input.cwd
+    })
+    if (reusableSession?.key === key && !reusableSession.inUse) {
+      reusableSession.inUse = true
+      return { session: reusableSession.session, entry: reusableSession, reusable: true, reused: true }
+    }
+    // A provider session is a single JSON-RPC stream. Do not interleave
+    // concurrent requests or replace the in-flight reusable entry; use a
+    // short-lived session for the concurrent request instead.
+    if (reusableSession?.inUse) {
+      return { session: sessionFactory(input), reusable: false, reused: false }
+    }
+    if (reusableSession && !reusableSession.inUse) {
+      const previous = reusableSession
+      reusableSession = undefined
+      await closeSession(previous.session, false)
+    }
+    const session = sessionFactory(input)
+    const entry: ReusableCbmSession = { key, session, inUse: true }
+    reusableSession = entry
+    return { session, entry, reusable: true, reused: false }
+  }
+
+  const releaseSession = async (lease: CbmSessionLease, healthy: boolean, projectName?: string): Promise<void> => {
+    if (!lease.reusable || !lease.entry) {
+      await closeSession(lease.session, !healthy)
+      return
+    }
+    if (healthy) {
+      lease.entry.inUse = false
+      if (projectName) lease.entry.projectName = projectName
+      return
+    }
+    if (reusableSession === lease.entry) reusableSession = undefined
+    await closeSession(lease.session, true)
+  }
 
   return {
     async resolveGraphContext(request): Promise<CbmGraphContextData> {
-      const executablePath = await verifyExecutable(options.executablePath)
+      if (!resolvedOptions.executablePath) {
+        throw new CbmTransportUnavailableError(
+          'Structural provider executable is not configured',
+          'provider_not_configured'
+        )
+      }
+      const phase: CbmPhaseMs = {
+        providerDiscovery: 0,
+        repositoryIdentity: 0,
+        cacheLookup: 0,
+        freshnessMetadata: 0,
+        providerSession: 0,
+        projectDiscovery: 0,
+        freshnessVerification: 0,
+        revisionProbe: 0,
+        fingerprint: 0,
+        revisionComparison: 0,
+        total: 0
+      }
+      const startedAt = performance.now()
+      const providerDiscoveryStartedAt = performance.now()
+      const executablePath = await verifyExecutable(resolvedOptions.executablePath)
+      phase.providerDiscovery = elapsedMs(providerDiscoveryStartedAt)
+      const repositoryIdentityStartedAt = performance.now()
       const canonicalRoot = await canonicalPath(request.sourceRoot)
-      const configuredCacheDir = selectedCacheDirectory(request.sourceId, canonicalRoot, options)
+      phase.repositoryIdentity = elapsedMs(repositoryIdentityStartedAt)
+      const cacheLookupStartedAt = performance.now()
+      const configuredCacheDir = selectedCacheDirectory(request.sourceId, canonicalRoot, resolvedOptions)
       const cacheDir = await verifyCacheDirectory(configuredCacheDir)
-      const session = sessionFactory({ executablePath, cacheDir, cwd: canonicalRoot })
-      const startedAt = Date.now()
+      phase.cacheLookup = elapsedMs(cacheLookupStartedAt)
+      const snapshotKey = providerSnapshotKey(request.sourceId, canonicalRoot)
+      rememberProviderSnapshot(snapshotKey, { providerReachable: 'unknown', cacheFound: true, fallbackActive: false })
+      const providerSessionStartedAt = performance.now()
+      const lease = await acquireSession({ executablePath, cacheDir, cwd: canonicalRoot })
+      const providerReuseState = lease.reusable ? (lease.reused ? 'reused' : 'cold') : 'ephemeral'
+      rememberProviderSnapshot(snapshotKey, {
+        providerReuseState,
+        cacheHit: true,
+        freshnessCacheHit: false
+      })
       let timeout: NodeJS.Timeout | undefined
+      let healthy = false
+      let projectNameForRelease: string | undefined
       try {
         const work = (async () => {
           try {
-            await session.initialize()
+            if (!lease.reused) await lease.session.initialize()
           } catch {
             throw new CbmTransportUnavailableError(
               'Codebase Memory MCP initialization failed',
               'mcp_initialization_failure'
             )
           }
-          const projects = await callCbmTool(session, 'list_projects', {})
+          phase.providerSession = elapsedMs(providerSessionStartedAt)
+          const freshnessMetadataStartedAt = performance.now()
           const { metadata, mismatchReason: metadataReadReason } = await readFreshnessMetadata(cacheDir, canonicalRoot)
-          const listedProject = projectForRoot(projects, canonicalRoot)
-          const projectName = metadata?.project || asString(listedProject?.name)
+          phase.freshnessMetadata = elapsedMs(freshnessMetadataStartedAt)
+          const operations: string[] = []
+          const projectHint = metadata?.project || (lease.reused ? lease.entry?.projectName : undefined)
+          let projectName = projectHint
+          if (!projectName) {
+            const projectDiscoveryStartedAt = performance.now()
+            const projects = await callCbmTool(lease.session, 'list_projects', {})
+            phase.projectDiscovery = elapsedMs(projectDiscoveryStartedAt)
+            operations.push('list_projects')
+            const listedProject = projectForRoot(projects, canonicalRoot)
+            projectName = metadata?.project || asString(listedProject?.name)
+          }
           if (!projectName) {
             throw new CbmTransportUnavailableError(
               'Codebase Memory has no index for this source',
               'no_index'
             )
           }
+          projectNameForRelease = projectName
+          const freshnessVerificationStartedAt = performance.now()
+          let revisionProbeStartedAt = performance.now()
           const [indexStatus, changes, head] = await Promise.all([
-            callCbmTool(session, 'index_status', { project: projectName }),
-            callCbmTool(session, 'detect_changes', { project: projectName }),
-            currentHead(canonicalRoot)
+            callCbmTool(lease.session, 'index_status', { project: projectName }),
+            callCbmTool(lease.session, 'detect_changes', { project: projectName }),
+            (async () => {
+              revisionProbeStartedAt = performance.now()
+              try { return await currentHead(canonicalRoot) } finally { phase.revisionProbe = elapsedMs(revisionProbeStartedAt) }
+            })()
           ])
+          phase.freshnessVerification = elapsedMs(freshnessVerificationStartedAt)
+          operations.push('index_status', 'detect_changes')
           const indexedGit = asObject(indexStatus.git)
           const indexedHead = asString(indexedGit?.head_sha)
           const providerChangedCount = changedCount(changes)
-          const ready = indexStatus.status === 'ready'
+          const providerStatus = asString(indexStatus.status)?.toLowerCase()
+          const ready = providerStatus === 'ready'
+          const building = providerStatus !== undefined && ['building', 'indexing', 'pending', 'queued'].includes(providerStatus)
 
           // Compute v2 deterministic fingerprint. Throws CbmUnsafeChangedPathError
           // if any changed path escapes the source root.
+          const fingerprintStartedAt = performance.now()
           const fpResult = await worktreeFingerprintV2(canonicalRoot, asArray(changes.changed_files))
+          phase.fingerprint = elapsedMs(fingerprintStartedAt)
 
           // Determine mismatch reason for structured diagnostics.
+          const revisionComparisonStartedAt = performance.now()
           let mismatchReason: CbmFingerprintMismatchReason | undefined = metadataReadReason
           if (!ready) mismatchReason = 'provider_not_ready'
           else if (!mismatchReason) {
@@ -846,26 +1211,44 @@ export function createCodebaseMemoryTransport(options: CodebaseMemoryTransportOp
             metadata.indexedAtSha === head &&
             metadata.worktreeFingerprint === fpResult.fingerprint
           )
-          const freshness: CbmFreshnessState = ready && Boolean(head) && indexedHead === head && metadataMatches ? 'fresh' : ready ? 'stale' : 'unknown'
-          const freshnessMs = Date.now() - startedAt
+          const incompatibleMetadata = metadataReadReason === 'metadata_version_mismatch' || metadataReadReason === 'fingerprint_algorithm_mismatch' || metadataReadReason === 'source_root_mismatch'
+          const freshness: CbmFreshnessState = building
+            ? 'building'
+            : providerStatus === 'failed' || providerStatus === 'error'
+              ? 'unavailable'
+              : providerStatus !== undefined && !ready
+                ? 'unknown'
+                : incompatibleMetadata
+                  ? 'incompatible'
+                : ready && Boolean(head) && indexedHead === head && metadataMatches ? 'fresh' : ready ? 'stale' : 'unknown'
+          phase.revisionComparison = elapsedMs(revisionComparisonStartedAt)
+          const freshnessMs = elapsedMs(startedAt)
+          rememberProviderSnapshot(snapshotKey, { providerReachable: 'yes', indexedRevision: indexedHead, freshness, graphAvailable: false, fallbackActive: freshness !== 'fresh' })
 
           const baseDiagnostics: Record<string, unknown> = {
-            provider: 'codebase-memory-mcp',
+            provider: resolvedOptions.providerId,
+            providerId: resolvedOptions.providerId,
+            repositoryIdentity: crypto.createHash('sha256').update(canonicalRoot).digest('hex').slice(0, 16),
+            cacheIdentity: crypto.createHash('sha256').update(cacheDir).digest('hex').slice(0, 16),
             project: projectName,
             indexedAtSha: indexedHead,
             currentSha: head,
             changedFileCount: providerChangedCount,
             indexedFileCount: metadata?.indexedFileCount,
             providerVersion: metadata?.providerVersion,
-            operations: ['list_projects', 'index_status', 'detect_changes'],
-            phaseMs: { freshnessCheck: freshnessMs }
+            operations,
+            providerReuseState,
+            cacheHit: true,
+            freshnessCacheHit: false,
+            phaseMs: { ...phase, total: freshnessMs }
           }
 
           if (freshness !== 'fresh') {
             // Safe stale diagnostics — no raw path lists, no env values, no absolute paths.
             const staleDiagnostics: Record<string, unknown> = {
               ...baseDiagnostics,
-              stage: 'stale_index',
+              stage: freshness === 'incompatible' ? 'incompatible_cache' : freshness === 'building' ? 'provider_building' : freshness === 'unavailable' ? 'provider_unavailable' : 'stale_index',
+              freshnessState: freshness,
               elapsedMs: freshnessMs,
               metadataVersion: metadata?.version ?? null,
               expectedMetadataVersion: FRESHNESS_METADATA_VERSION,
@@ -878,6 +1261,7 @@ export function createCodebaseMemoryTransport(options: CodebaseMemoryTransportOp
               changedPathSetDigest: fpResult.pathSetDigest,
               providerChangedCount: providerChangedCount ?? null
             }
+            healthy = true
             return {
               sourceId: request.sourceId,
               freshness,
@@ -885,14 +1269,28 @@ export function createCodebaseMemoryTransport(options: CodebaseMemoryTransportOp
             }
           }
           const limit = boundedLimit(request.limit)
-          const structuralStartMs = Date.now()
+          const structuralStartAt = performance.now()
           const [architecture, search] = await Promise.all([
-            callCbmTool(session, 'get_architecture', { project: projectName, aspects: ['clusters', 'hotspots'] }),
-            callCbmTool(session, 'search_graph', { project: projectName, query: request.query || 'entry point architecture', limit })
+            callCbmTool(lease.session, 'get_architecture', { project: projectName, aspects: ['clusters', 'hotspots'] }),
+            callCbmTool(lease.session, 'search_graph', { project: projectName, query: request.query || 'entry point architecture', limit })
           ])
-          const structuralMs = Date.now() - structuralStartMs
+          phase.structuralQuery = elapsedMs(structuralStartAt)
+          operations.push('get_architecture', 'search_graph')
+          const resultNormalizationStartedAt = performance.now()
           const suggestions = await searchSuggestions(search, request.query, limit, canonicalRoot)
-          const totalMs = Date.now() - startedAt
+          phase.resultNormalization = elapsedMs(resultNormalizationStartedAt)
+          const totalMs = elapsedMs(startedAt)
+          phase.total = totalMs
+          rememberProviderSnapshot(snapshotKey, {
+            providerReachable: 'yes',
+            graphAvailable: true,
+            freshness: 'fresh',
+            fallbackActive: false,
+            lastSuccessfulQueryAt: new Date().toISOString(),
+            ...(queryDigest(request.query) ? { lastSuccessfulQueryDigest: queryDigest(request.query) } : {})
+          })
+          persistProviderSnapshot(cacheDir, snapshotKey, providerRuntimeSnapshots.get(snapshotKey) || {})
+          healthy = true
           return {
             sourceId: request.sourceId,
             freshness,
@@ -901,21 +1299,21 @@ export function createCodebaseMemoryTransport(options: CodebaseMemoryTransportOp
             diagnostics: {
               ...baseDiagnostics,
               elapsedMs: totalMs,
-              operations: [...(baseDiagnostics.operations as string[]), 'get_architecture', 'search_graph'],
-              phaseMs: { freshnessCheck: freshnessMs, structuralQuery: structuralMs, total: totalMs }
+              operations,
+              phaseMs: { ...phase, total: totalMs }
             }
           }
         })()
         const deadline = new Promise<CbmGraphContextData>((_, reject) => {
           timeout = setTimeout(() => {
-            session.terminate()
+            lease.session.terminate()
             reject(new Error('CBM_TIMEOUT'))
           }, timeoutMs)
         })
         return await Promise.race([work, deadline])
       } finally {
         if (timeout) clearTimeout(timeout)
-        await session.close().catch(() => undefined)
+        await releaseSession(lease, healthy, projectNameForRelease)
       }
     }
   }
@@ -926,9 +1324,16 @@ export async function indexCodebaseMemoryRepository(
   options: CodebaseMemoryIndexOptions = {}
 ): Promise<{ project: string; cacheDir: string; durationMs: number }> {
   const startedAt = Date.now()
-  const executablePath = await verifyExecutable(options.executablePath)
+  const resolvedOptions = resolvedProviderOptions(options)
+  if (!resolvedOptions.executablePath) {
+    throw new CbmTransportUnavailableError(
+      'Structural provider executable is not configured',
+      'provider_not_configured'
+    )
+  }
+  const executablePath = await verifyExecutable(resolvedOptions.executablePath)
   const canonicalRoot = await realpath(input.sourceRoot)
-  const cacheDir = selectedCacheDirectory(input.sourceId, canonicalRoot, options)
+  const cacheDir = selectedCacheDirectory(input.sourceId, canonicalRoot, resolvedOptions)
   const existingCache = await lstat(cacheDir).catch(() => undefined)
   if (existingCache) {
     const uid = typeof process.getuid === 'function' ? process.getuid() : existingCache.uid
@@ -938,7 +1343,7 @@ export async function indexCodebaseMemoryRepository(
         'cache_safety_failure'
       )
     }
-  } else if (options.cacheRoot) {
+  } else if (resolvedOptions.cacheRoot) {
     await mkdir(cacheDir, { recursive: true, mode: 0o700 })
   } else {
     throw new CbmTransportUnavailableError(
@@ -1004,6 +1409,16 @@ export async function indexCodebaseMemoryRepository(
     ...(indexedFileCount !== undefined ? { indexedFileCount } : {}),
     ...(providerVersion !== undefined ? { providerVersion } : {})
   })
+  const snapshotKey = providerSnapshotKey(input.sourceId, canonicalRoot)
+  const indexedSnapshot: Partial<CbmProviderRuntimeDiagnostics> = {
+    providerReachable: 'yes',
+    graphAvailable: false,
+    freshness: 'unknown',
+    indexedRevision: indexedAtSha,
+    fallbackActive: true
+  }
+  rememberProviderSnapshot(snapshotKey, indexedSnapshot)
+  persistProviderSnapshot(cacheDir, snapshotKey, indexedSnapshot)
   return { project, cacheDir, durationMs: Date.now() - startedAt }
 }
 
@@ -1013,7 +1428,7 @@ export function validateCbmResult(
 ): CbmGraphContextData {
   if (!result || typeof result !== 'object') throw new Error('Invalid Codebase Memory response')
   if (result.sourceId !== expectedSourceId) throw new Error('Codebase Memory response source mismatch')
-  if (!['fresh', 'stale', 'unknown'].includes(result.freshness)) {
+  if (!['fresh', 'stale', 'unavailable', 'building', 'incompatible', 'unknown'].includes(result.freshness)) {
     throw new Error('Invalid Codebase Memory freshness state')
   }
   return result

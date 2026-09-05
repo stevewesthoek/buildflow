@@ -541,8 +541,14 @@ async function main() {
     path.join(process.cwd(), 'apps/web/src/app/api/openapi/route.ts'),
     'utf8'
   )
-  assert.match(openApiSource, /validationJobTimeoutMs/)
-  assert.match(openApiSource, /maximum: 900000/)
+  assert.match(openApiSource, /canonicalOpenApiSchema/)
+  const canonicalOpenApi = fs.readFileSync(
+    path.join(process.cwd(), 'apps/web/src/lib/openapi-chatgpt.json'),
+    'utf8'
+  )
+  assert.match(canonicalOpenApi, /validationJobTimeoutMs/)
+  assert.match(canonicalOpenApi, /validationJobOperation/)
+  assert.match(canonicalOpenApi, /resultPageBytes/)
 
   fs.rmSync(isolatedHome, { recursive: true, force: true })
   console.log('validation job persistence checks passed')

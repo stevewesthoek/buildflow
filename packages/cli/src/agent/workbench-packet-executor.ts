@@ -4,11 +4,20 @@ import fs from 'fs'
 import path from 'path'
 import { finalizeWorkbenchPacketExecution, getWorkbenchPacketRecord } from './workbench-packet-store'
 import { advanceWorkbenchRunAfterPacket, getAgentJob, updateAgentJob } from './agent-jobs'
+import { workbenchSessionIdForRun } from './workbench-run-session'
 import { loadConfig } from './config'
 import { runSafeCommand, type SafeCommandResult } from './command-runner'
 import { appendAgentEvent, hasPacketValidationActivityEvent } from './agent-events'
+import { startLocalServer, type LocalServerHandle, type LocalServerLifecycleEvent } from './local-server-lifecycle'
 import { completeWorkbenchExecutionJournal, markWorkbenchExecutionJournalStep, prepareWorkbenchExecutionJournal, restoreWorkbenchExecutionJournal, type WorkbenchExecutionJournal } from './workbench-execution-journal'
 import { planWorkbenchPacketExecution } from './workbench-packet-plan'
+import { attachWorkbenchEvidence, type WorkbenchEvidenceUnavailable } from './workbench-evidence-producers'
+import type { WorkbenchEvidenceMetadata, ValidationSelectionNode } from '@workbench/shared'
+import {
+  getCompactWorkbenchValidationJob,
+  scheduleWorkbenchValidationJob,
+  submitWorkbenchValidationJob
+} from './workbench-validation-jobs'
 
 export type WorkbenchPacketExecutionResult = {
   status: 'completed' | 'failed' | 'rejected' | 'paused' | 'cancelled'
@@ -17,8 +26,9 @@ export type WorkbenchPacketExecutionResult = {
   rolledBack: boolean
   planHash?: string
   completedSteps: number
+  changedPaths: string[]
   failedStep?: number
-  validationResults?: Array<Pick<SafeCommandResult, 'commandKind' | 'status' | 'exitCode' | 'durationMs' | 'stdout' | 'stderr'>>
+  validationResults?: Array<Pick<SafeCommandResult, 'commandKind' | 'status' | 'exitCode' | 'durationMs' | 'stdout' | 'stderr'> & { evidenceRefs?: WorkbenchEvidenceMetadata[]; evidenceUnavailable?: WorkbenchEvidenceUnavailable }>
   commitResult?: Pick<SafeCommandResult, 'status' | 'exitCode' | 'stdout' | 'stderr'>
   commitHash?: string
   errors: Array<{ code: string; message: string; path?: string }>
@@ -102,6 +112,53 @@ function assertCleanPacketPaths(sourceRoot: string, exactPaths: string[], requir
   }
 }
 
+function normalizeStatusPath(value: string): string {
+  const unquoted = value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value
+  return unquoted.replace(/\\/g, '/').trim()
+}
+
+function gitStatusSnapshot(sourceRoot: string): Map<string, string> {
+  const output = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd: sourceRoot,
+    encoding: 'utf8',
+    timeout: 5000,
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  const snapshot = new Map<string, string>()
+  for (const line of output.split(/\r?\n/).filter(Boolean)) {
+    const status = line.slice(0, 2)
+    const value = line.slice(3)
+    const rename = /^(.*) -> (.*)$/.exec(value)
+    if (rename) {
+      snapshot.set(normalizeStatusPath(rename[1]!), status)
+      snapshot.set(normalizeStatusPath(rename[2]!), status)
+    } else {
+      snapshot.set(normalizeStatusPath(value), status)
+    }
+  }
+  snapshot.delete('')
+  return snapshot
+}
+
+function changedPathsSince(before: Map<string, string>, after: Map<string, string>): string[] {
+  return sortedUnique([...new Set([...before.keys(), ...after.keys()])]
+    .filter(relativePath => before.get(relativePath) !== after.get(relativePath)))
+}
+
+function assertChangedPathsWithinAuthorization(
+  before: Map<string, string>,
+  sourceRoot: string,
+  authorizedPaths: readonly string[]
+): string[] {
+  const changedPaths = changedPathsSince(before, gitStatusSnapshot(sourceRoot))
+  const allowed = new Set(authorizedPaths.map(normalizeStatusPath))
+  const unexpected = changedPaths.filter(relativePath => !allowed.has(relativePath))
+  if (unexpected.length > 0) {
+    throw new Error(`UNEXPECTED_CHANGED_PATH: actual changed paths are outside the authorized packet scope: ${unexpected.join(', ')}`)
+  }
+  return changedPaths
+}
+
 function verifyExactPathSet(actual: string[], expected: string[], label: string): void {
   const actualSorted = sortedUnique(actual)
   const expectedSorted = sortedUnique(expected)
@@ -128,6 +185,119 @@ function syncRunOutcome(runId: string, packetId: string, status: 'completed' | '
   })
 }
 
+function packetValidationEvidence(params: {
+  sourceId: string
+  runId: string
+  packetId: string
+  taskId: string
+  index: number
+  result: SafeCommandResult
+}): { evidenceRefs?: WorkbenchEvidenceMetadata[]; evidenceUnavailable?: WorkbenchEvidenceUnavailable } {
+  const evidence = attachWorkbenchEvidence({
+    entries: [{
+      kind: 'validation_result',
+      owner: {
+        sourceId: params.sourceId,
+        runId: params.runId,
+        taskId: params.taskId,
+        packetId: params.packetId,
+        operationId: `packet-validation:${params.packetId}:${params.index}`
+      },
+      retentionClass: 'active_run',
+      content: JSON.stringify({
+        packetId: params.packetId,
+        validationIndex: params.index,
+        commandKind: params.result.commandKind,
+        status: params.result.status,
+        exitCode: params.result.exitCode,
+        durationMs: params.result.durationMs,
+        stdout: params.result.stdout.slice(0, 8_000),
+        stderr: params.result.stderr.slice(0, 8_000),
+        outputTruncated: params.result.outputTruncated
+      })
+    }]
+  })
+  return evidence
+}
+
+function resultFromPersistedValidationJob(job: NonNullable<ReturnType<typeof getCompactWorkbenchValidationJob>>, sourceRoot: string): SafeCommandResult {
+  const status: SafeCommandResult['status'] = job.status === 'completed'
+    ? 'completed'
+    : job.status === 'timed_out'
+      ? 'timed_out'
+      : job.status === 'cancelled'
+        ? 'blocked'
+        : 'failed'
+  return {
+    status,
+    commandKind: job.commandKind,
+    command: ['buildflow', job.commandKind],
+    cwd: path.resolve(sourceRoot),
+    packageDir: job.packageDir,
+    requiredBranch: job.requiredBranch,
+    exitCode: job.exitCode ?? (status === 'completed' ? 0 : 1),
+    signal: job.signal ?? null,
+    stdout: job.stdout || job.stdoutTail || '',
+    stderr: job.stderr || job.stderrTail || '',
+    outputTruncated: job.outputTruncated === true,
+    durationMs: job.durationMs || 0,
+    changedPaths: job.changedPaths || [],
+    protectedPathsChanged: job.protectedPathsChanged || [],
+    reason: job.reason,
+    details: job.details,
+    runtime: job.runtime
+  }
+}
+
+async function runPersistedPacketValidation(params: {
+  sourceId: string
+  sourceRoot: string
+  runId: string
+  packetId: string
+  taskId: string
+  selection: { selectionId: string; node: ValidationSelectionNode }
+}): Promise<SafeCommandResult> {
+  const node = params.selection.node
+  const command = node.command
+  const submitted = submitWorkbenchValidationJob({
+    sourceId: params.sourceId,
+    runId: params.runId,
+    packetId: params.packetId,
+    taskId: params.taskId,
+    idempotencyKey: `r19.4:${params.selection.selectionId}:${node.nodeId}`,
+    commandKind: command.commandKind,
+    timeoutMs: node.timeoutMs,
+    ...(command.commandKind === 'git_diff_check' || command.commandKind === 'validate_json_files' || command.commandKind === 'security_scan_paths' ? { paths: command.paths } : {}),
+    ...(command.commandKind === 'security_scan_paths' ? { patternSet: command.patternSet } : {}),
+    ...(command.commandKind === 'run_package_script' ? { packageDir: command.packageDir, scriptName: command.scriptName } : {}),
+    ...(command.commandKind === 'run_package_test' ? { packageDir: command.packageDir } : {}),
+    ...(command.commandKind === 'run_package_test_marker' ? { packageDir: command.packageDir, marker: command.marker } : {}),
+    networkAccess: false
+  })
+  if (submitted.ok === false) throw new Error(`Validation job submission failed: ${submitted.message}`)
+  let job = submitted.job
+  if (!['completed', 'failed', 'timed_out', 'cancelled'].includes(job.status)) {
+    const scheduled = scheduleWorkbenchValidationJob({
+      jobId: job.jobId,
+      sourceId: params.sourceId,
+      sourceRoot: params.sourceRoot,
+      leaseMs: Math.max(30_000, Math.min(node.timeoutMs + 30_000, 960_000))
+    })
+    if (scheduled.status === 'rejected') throw new Error(`Validation job scheduling failed: ${scheduled.reason || 'unknown scheduler failure'}`)
+    const deadline = Date.now() + node.timeoutMs + 30_000
+    while (Date.now() < deadline) {
+      assertPacketControlAllowsExecution(params.packetId)
+      const latest = getCompactWorkbenchValidationJob(job.jobId, params.sourceId)
+      if (!latest) throw new Error(`Validation job ${job.jobId} disappeared before completion.`)
+      job = latest
+      if (['completed', 'failed', 'timed_out', 'cancelled'].includes(job.status)) break
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    if (!['completed', 'failed', 'timed_out', 'cancelled'].includes(job.status)) throw new Error(`Validation job ${job.jobId} exceeded its bounded wait.`)
+  }
+  return resultFromPersistedValidationJob(job, params.sourceRoot)
+}
+
 export async function executeWorkbenchPacket(params: {
   packetId: string
   leaseToken: string
@@ -142,6 +312,7 @@ export async function executeWorkbenchPacket(params: {
       writesPerformed: false,
       rolledBack: false,
       completedSteps: 0,
+      changedPaths: [],
       errors: planResult.errors
     }
   }
@@ -154,6 +325,7 @@ export async function executeWorkbenchPacket(params: {
       writesPerformed: false,
       rolledBack: false,
       completedSteps: 0,
+      changedPaths: [],
       errors: [{ code: 'PACKET_NOT_FOUND', message: 'packet disappeared after planning' }]
     }
   }
@@ -202,6 +374,7 @@ export async function executeWorkbenchPacket(params: {
       rolledBack: false,
       planHash: planResult.plan.planHash,
       completedSteps: 0,
+      changedPaths: [],
       errors: [{ code: 'PACKET_GIT_STATE_NOT_ISOLATED', message: error instanceof Error ? error.message : String(error) }]
     }
   }
@@ -211,9 +384,36 @@ export async function executeWorkbenchPacket(params: {
   let journal: WorkbenchExecutionJournal | undefined
   let completedSteps = 0
   let writesPerformed = false
+  let changedPaths: string[] = []
   const validationResults: NonNullable<WorkbenchPacketExecutionResult['validationResults']> = []
   let commitResult: WorkbenchPacketExecutionResult['commitResult']
   let commitHash: string | undefined
+  let localServer: LocalServerHandle | undefined
+  const baselineStatus = gitStatusSnapshot(params.sourceRoot)
+
+  const projectLocalServerEvent = (event: LocalServerLifecycleEvent): void => {
+    const eventType = `server_${event.phase}` as Parameters<typeof appendAgentEvent>[0]['type']
+    appendAgentEvent({
+      jobId: record.packet.runId,
+      sourceId: params.sourceId,
+      type: eventType,
+      activityKind: 'packet_status',
+      packetId: record.packet.packetId,
+      taskId: record.packet.taskId,
+      status: event.record.status,
+      evidenceRefs: event.evidenceRefs.map(ref => ({ kind: 'artifact', ref: ref.evidenceId })),
+      telemetry: {
+        ...(event.record.metrics.requestToReadyMs !== undefined ? { durationMs: event.record.metrics.requestToReadyMs } : {})
+      },
+      message: `Local server ${event.record.serverId} ${event.phase} on port ${event.record.port}.`
+    })
+  }
+
+  const assertLocalServerReady = (): void => {
+    if (!localServer) return
+    const state = localServer.status()
+    if (!state || state.status !== 'READY') throw new Error(`Local server is not ready: ${state?.status || 'state_unavailable'}`)
+  }
 
   try {
     for (const fullPath of snapshotPaths) snapshots.push(snapshotFile(fullPath))
@@ -283,22 +483,58 @@ export async function executeWorkbenchPacket(params: {
 
       writesPerformed = true
       completedSteps = index + 1
+      changedPaths = assertChangedPathsWithinAuthorization(baselineStatus, params.sourceRoot, record.exactPaths)
       markWorkbenchExecutionJournalStep(params.packetId, completedSteps)
+    }
+
+    if (record.packet.localServer) {
+      const started = await startLocalServer({
+        sourceRoot: params.sourceRoot,
+        sourceId: params.sourceId,
+        runId: record.packet.runId,
+        sessionId: workbenchSessionIdForRun(record.packet.runId),
+        taskId: record.packet.taskId,
+        packetId: record.packet.packetId,
+        declaration: record.packet.localServer,
+        allowRecovery: true
+      }, { onEvent: projectLocalServerEvent })
+      if (started.ok === false) throw new Error(`${started.code}: ${started.message}`)
+      localServer = started.handle
+      assertLocalServerReady()
     }
 
     for (const [validationIndex, validation] of (record.packet.validation || []).entries()) {
       assertPacketControlAllowsExecution(params.packetId)
+      assertLocalServerReady()
       projectValidationStarted(validationIndex, validation.commandKind)
-      const result = await runSafeCommand({
+      const selectedNode = record.packet.validationSelection?.selected[validationIndex]
+      const result = selectedNode
+        ? await runPersistedPacketValidation({
+            sourceId: params.sourceId,
+            sourceRoot: params.sourceRoot,
+            runId: record.packet.runId,
+            packetId: record.packet.packetId,
+            taskId: record.packet.taskId,
+            selection: { selectionId: record.packet.validationSelection.selectionId, node: selectedNode }
+          })
+        : await runSafeCommand({
+            sourceId: params.sourceId,
+            sourceRoot: params.sourceRoot,
+            commandKind: validation.commandKind,
+            timeoutMs: validation.timeoutMs,
+            paths: validation.paths,
+            packageDir: validation.packageDir,
+            scriptName: validation.scriptName,
+            marker: validation.marker,
+            patternSet: validation.patternSet
+          })
+      const validationEvidence = packetValidationEvidence({
         sourceId: params.sourceId,
-        sourceRoot: params.sourceRoot,
-        commandKind: validation.commandKind,
-        timeoutMs: validation.timeoutMs,
-        paths: validation.paths,
-        packageDir: validation.packageDir,
-        scriptName: validation.scriptName,
-        marker: validation.marker,
-        patternSet: validation.patternSet
+        runId: record.packet.runId,
+        packetId: record.packet.packetId,
+        taskId: record.packet.taskId,
+        index: validationIndex,
+        result
       })
       validationResults.push({
         commandKind: result.commandKind,
@@ -306,9 +542,12 @@ export async function executeWorkbenchPacket(params: {
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         stdout: result.stdout.slice(0, 2000),
-        stderr: result.stderr.slice(0, 1000)
+        stderr: result.stderr.slice(0, 1000),
+        ...validationEvidence
       })
       if (result.status !== 'completed') throw new Error(`Validation ${result.commandKind} failed`)
+      changedPaths = assertChangedPathsWithinAuthorization(baselineStatus, params.sourceRoot, record.exactPaths)
+      assertLocalServerReady()
       assertPacketControlAllowsExecution(params.packetId)
     }
 
@@ -321,24 +560,40 @@ export async function executeWorkbenchPacket(params: {
         throw new Error('Automatic commit requires all targeted validations to pass.')
       }
 
-      projectValidationStarted(validationResults.length, 'security_scan_paths')
-      const securityScan = await runSafeCommand({
-        sourceId: params.sourceId,
-        sourceRoot: params.sourceRoot,
-        commandKind: 'security_scan_paths',
-        paths: record.exactPaths,
-        patternSet: 'forbidden_secret_material'
-      })
-      validationResults.push({
-        commandKind: securityScan.commandKind,
-        status: securityScan.status,
-        exitCode: securityScan.exitCode,
-        durationMs: securityScan.durationMs,
-        stdout: securityScan.stdout.slice(0, 2000),
-        stderr: securityScan.stderr.slice(0, 1000)
-      })
-      if (securityScan.status !== 'completed') throw new Error(`Exact-path secret scan failed: ${securityScan.stderr || securityScan.stdout}`)
-      assertPacketControlAllowsExecution(params.packetId)
+      const selectedSecurity = record.packet.validationSelection?.selected.some(node => {
+        if (node.command.commandKind !== 'security_scan_paths') return false
+        return JSON.stringify(sortedUnique(node.command.paths)) === JSON.stringify(sortedUnique(record.exactPaths))
+      }) === true
+      if (!selectedSecurity) {
+        projectValidationStarted(validationResults.length, 'security_scan_paths')
+        const securityScan = await runSafeCommand({
+          sourceId: params.sourceId,
+          sourceRoot: params.sourceRoot,
+          commandKind: 'security_scan_paths',
+          paths: record.exactPaths,
+          patternSet: 'forbidden_secret_material'
+        })
+        const securityEvidence = packetValidationEvidence({
+          sourceId: params.sourceId,
+          runId: record.packet.runId,
+          packetId: record.packet.packetId,
+          taskId: record.packet.taskId,
+          index: validationResults.length,
+          result: securityScan
+        })
+        validationResults.push({
+          commandKind: securityScan.commandKind,
+          status: securityScan.status,
+          exitCode: securityScan.exitCode,
+          durationMs: securityScan.durationMs,
+          stdout: securityScan.stdout.slice(0, 2000),
+          stderr: securityScan.stderr.slice(0, 1000),
+          ...securityEvidence
+        })
+        if (securityScan.status !== 'completed') throw new Error(`Exact-path secret scan failed: ${securityScan.stderr || securityScan.stdout}`)
+        changedPaths = assertChangedPathsWithinAuthorization(baselineStatus, params.sourceRoot, record.exactPaths)
+        assertPacketControlAllowsExecution(params.packetId)
+      }
 
       const staged = await runSafeCommand({
         sourceId: params.sourceId,
@@ -382,9 +637,17 @@ export async function executeWorkbenchPacket(params: {
         record.exactPaths,
         'Committed'
       )
+      changedPaths = assertChangedPathsWithinAuthorization(baselineStatus, params.sourceRoot, record.exactPaths)
+    }
+
+    if (localServer) {
+      const stopped = await localServer.stop('packet execution completed')
+      if (stopped.ok === false) throw new Error(`${stopped.code}: ${stopped.message}`)
+      localServer = undefined
     }
 
     assertPacketControlAllowsExecution(params.packetId)
+    changedPaths = assertChangedPathsWithinAuthorization(baselineStatus, params.sourceRoot, record.exactPaths)
     const finalized = finalizeWorkbenchPacketExecution({
       packetId: params.packetId,
       leaseToken: params.leaseToken,
@@ -407,14 +670,20 @@ export async function executeWorkbenchPacket(params: {
       rolledBack: false,
       planHash: planResult.plan.planHash,
       completedSteps,
+      changedPaths,
       validationResults,
       commitResult,
       commitHash,
       errors: []
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    let message = error instanceof Error ? error.message : String(error)
     const controlAction = error instanceof PacketControlSignal ? error.action : undefined
+    if (localServer) {
+      const stopped = await localServer.stop('packet execution rollback')
+      localServer = undefined
+      if (stopped.ok === false) message = `${message}; local server shutdown failed: ${stopped.code}: ${stopped.message}`
+    }
     let rolledBack = false
     try {
       if (journal) restoreWorkbenchExecutionJournal({ journal, sourceRoot: params.sourceRoot })
@@ -444,10 +713,11 @@ export async function executeWorkbenchPacket(params: {
         rolledBack: false,
         planHash: planResult.plan.planHash,
         completedSteps,
+        changedPaths: changedPathsSince(baselineStatus, gitStatusSnapshot(params.sourceRoot)),
         failedStep: completedSteps,
         validationResults,
         errors: [
-          { code: 'PACKET_EXECUTION_FAILED', message },
+          { code: message.startsWith('UNEXPECTED_CHANGED_PATH:') ? 'UNEXPECTED_CHANGED_PATH' : 'PACKET_EXECUTION_FAILED', message },
           { code: 'ROLLBACK_FAILED', message: rollbackMessage }
         ]
       }
@@ -461,6 +731,7 @@ export async function executeWorkbenchPacket(params: {
         status: controlledStatus
       })
       if (journal) completeWorkbenchExecutionJournal(params.packetId)
+      changedPaths = changedPathsSince(baselineStatus, gitStatusSnapshot(params.sourceRoot))
       return {
         status: controlledStatus,
         packetId: params.packetId,
@@ -468,6 +739,7 @@ export async function executeWorkbenchPacket(params: {
         rolledBack,
         planHash: planResult.plan.planHash,
         completedSteps,
+        changedPaths,
         validationResults,
         errors: [{ code: controlAction === 'pause' ? 'PACKET_PAUSED' : 'PACKET_CANCELLED', message }]
       }
@@ -480,6 +752,7 @@ export async function executeWorkbenchPacket(params: {
       failureReason: message
     })
     if (journal) completeWorkbenchExecutionJournal(params.packetId)
+    changedPaths = changedPathsSince(baselineStatus, gitStatusSnapshot(params.sourceRoot))
     syncRunOutcome(record.packet.runId, params.packetId, 'failed', `Packet ${params.packetId} failed and was rolled back.`)
     return {
       status: 'failed',
@@ -488,10 +761,25 @@ export async function executeWorkbenchPacket(params: {
       rolledBack,
       planHash: planResult.plan.planHash,
       completedSteps,
+      changedPaths,
       failedStep: completedSteps,
       validationResults,
-      errors: [{ code: 'PACKET_EXECUTION_FAILED', message }]
+      errors: [{ code: message.startsWith('UNEXPECTED_CHANGED_PATH:') ? 'UNEXPECTED_CHANGED_PATH' : 'PACKET_EXECUTION_FAILED', message }]
     }
+  }
+}
+
+/** Public packet acknowledgements expose validation metadata, never raw log bodies. */
+export function compactWorkbenchPacketExecutionResult(result: WorkbenchPacketExecutionResult): Record<string, unknown> {
+  return {
+    ...result,
+    validationResults: result.validationResults?.map(validation => {
+      const { stdout: _stdout, stderr: _stderr, ...compact } = validation
+      return compact
+    }),
+    commitResult: result.commitResult
+      ? (({ stdout: _stdout, stderr: _stderr, ...compact }) => compact)(result.commitResult)
+      : undefined
   }
 }
 

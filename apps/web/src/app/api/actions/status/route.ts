@@ -2,20 +2,21 @@ import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 import path from 'path'
 import { checkActionAuth } from '@/lib/actionAuth'
-import { executeActionGET } from '@/lib/actions/transport'
-import { GPT_ACTION_RESPONSE_BYTE_LIMIT } from '@/lib/actions/payload-budget'
+import { executeAction, executeActionGET } from '@/lib/actions/transport'
+import { GPT_ACTION_STATUS_BYTE_LIMIT } from '@/lib/actions/payload-budget'
 import { listWorkbenchSources, getWorkbenchActiveContext } from '@/lib/actions/portable-operation-adapters'
 import { setWorkbenchActiveContext, unwrapActionError } from '@/lib/actions/gpt'
 import { GPT_ACTION_DEADLINES_MS, withGptActionDeadline } from '@/lib/actions/deadline'
 import { getBuildSha, getBuildTimestamp } from '@/lib/env-compat'
 import { recordRuntimeResourceTelemetry } from '@/lib/actions/runtime-tunnel-telemetry'
 import { readCompactSloHealth, recordCompactStatusSloTelemetry } from '@/lib/actions/slo-health'
+import { projectActiveRunContinuity, resolveResumeSourceSelection } from '@workbench/shared'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 let activeRequests = 0
-const STATUS_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BYTE_LIMIT
+const STATUS_RESPONSE_BUDGET_BYTES = GPT_ACTION_STATUS_BYTE_LIMIT
 const WEB_PROCESS_STARTED_AT = new Date().toISOString()
 const WEB_PACKAGE_VERSION = process.env.WORKBENCH_PACKAGE_VERSION || process.env.npm_package_version || 'unknown'
 
@@ -85,6 +86,7 @@ export async function GET(request: NextRequest) {
           const sourcesData = await listWorkbenchSources(auth.bearerToken, {
             signal: deadline.signal,
             timeoutMs: deadline.transportTimeoutMs(2500),
+            requestId: deadline.requestId,
             diagnostics: deadline.diagnostics({ phase: 'list_sources' })
           })
           const rawSources = (sourcesData as Record<string, unknown>).sources
@@ -115,16 +117,54 @@ export async function GET(request: NextRequest) {
           const activeData = await getWorkbenchActiveContext(auth.bearerToken, {
             signal: deadline.signal,
             timeoutMs: deadline.transportTimeoutMs(1500),
+            requestId: deadline.requestId,
             diagnostics: deadline.diagnostics({ phase: 'get_active_context' })
           })
           const normalized = activeData as Record<string, unknown>
-          if (Array.isArray(normalized.activeSourceIds)) {
-            payload.activeSourceIds = normalized.activeSourceIds
-              .filter((id: unknown) => typeof id === 'string')
+          const normalizedActiveSourceIds = Array.isArray(normalized.activeSourceIds)
+            ? normalized.activeSourceIds
+              .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0)
               .slice(0, 20)
+            : []
+          const resume = normalized.resume && typeof normalized.resume === 'object' && !Array.isArray(normalized.resume)
+            ? normalized.resume as Record<string, unknown>
+            : undefined
+          if (resume) {
+            payload.resume = resume
+            if (normalized.focusedWorkspace && typeof normalized.focusedWorkspace === 'object') payload.focusedWorkspace = normalized.focusedWorkspace
+            if (Array.isArray(normalized.activeRuns)) payload.activeRuns = normalized.activeRuns
+            if (resume.status === 'IDLE_READY' && typeof (resume.workspace as Record<string, unknown> | undefined)?.sourceId === 'string') {
+              payload.activeSourceIds = [(resume.workspace as Record<string, unknown>).sourceId as string]
+            } else if (resume.status === 'ACTIVE_RUN' || resume.status === 'BLOCKED_RUN') {
+              payload.activeSourceIds = normalizedActiveSourceIds.slice(0, 20)
+            }
           }
           if (normalized.contextMode === 'single' || normalized.contextMode === 'multi') {
             payload.contextMode = normalized.contextMode
+          }
+
+          const resumeSelection = resolveResumeSourceSelection(normalizedActiveSourceIds)
+          if (!resume) {
+            if (resumeSelection.status === 'ready') {
+              payload.activeSourceIds = normalizedActiveSourceIds
+              const activeRuns = await Promise.all([resumeSelection.sourceId].map(async sourceId => {
+                try {
+                  const activeRunData = await executeAction('/api/workbench-runs/active', { sourceId }, auth.bearerToken, {
+                    signal: deadline.signal,
+                    timeoutMs: deadline.transportTimeoutMs(1000),
+                    requestId: deadline.requestId,
+                    diagnostics: deadline.diagnostics({ phase: 'get_active_run', sourceId })
+                  })
+                  return projectActiveRunContinuity(activeRunData)
+                } catch {
+                  return undefined
+                }
+              }))
+              payload.activeRuns = activeRuns.filter((run): run is NonNullable<typeof run> => Boolean(run))
+            } else {
+              payload.activeRuns = []
+              payload.resumeSourceSelection = resumeSelection
+            }
           }
         } catch (e) {
           payload.context_error = e instanceof Error ? e.message : 'Failed to get active context'

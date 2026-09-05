@@ -119,6 +119,36 @@ test('rejects a duplicate Workbench bridge in global config', () => {
   fs.rmSync(item.root, { recursive: true })
 })
 
+test('accepts one matching owner-global Workbench bridge without creating a project duplicate', () => {
+  const item = fixture()
+  const expected = [
+    '',
+    '[mcp_servers.workbench]',
+    `command = "${fs.realpathSync(process.execPath)}"`,
+    `args = ["${path.join(item.workbenchRepoRoot, 'packages', 'mcp', 'dist', 'server.js')}"]`,
+    `cwd = "${item.workbenchRepoRoot}"`,
+    'enabled = true',
+    'required = true',
+    'startup_timeout_sec = 10',
+    'tool_timeout_sec = 30',
+    'default_tools_approval_mode = "writes"',
+    '',
+    '[mcp_servers.workbench.env]',
+    `WORKBENCH_MCP_CREDENTIAL_FILE = "${path.join(item.homeDir, '.buildflow', 'codex-workbench-mcp.token')}"`,
+    ''
+  ].join('\n')
+  fs.appendFileSync(item.globalConfigPath, expected)
+
+  const result = configureCodex({ ...item, now: new Date('2026-07-15T12:00:00.000Z') })
+  assert.equal(result.configured, true)
+  assert.equal(result.scope, 'global')
+  assert.equal(result.projectMatchCount, 0)
+  assert.equal(result.duplicateCount, 1)
+  assert.equal(fs.existsSync(result.projectConfigPath), false)
+  assert.equal(fs.readFileSync(item.globalConfigPath, 'utf8'), `${item.global}${expected}`)
+  fs.rmSync(item.root, { recursive: true })
+})
+
 test('canonicalizes relative, dot-segment, and symlinked Workbench entrypoints', () => {
   for (const entrypoint of [
     'packages/mcp/dist/server.js',
@@ -323,6 +353,7 @@ test('configures the brain profile atomically with guarded scope restrictions', 
   assert.ok(env.WORKBENCH_MCP_CREDENTIAL_FILE, 'credential file env must be set')
   assert.equal(env.WORKBENCH_MCP_ALLOWED_TOOLS, BRAIN_PROFILE_ALLOWED_TOOLS)
   assert.equal(env.WORKBENCH_MCP_ALLOWED_COMMAND_KINDS, BRAIN_PROFILE_ALLOWED_COMMAND_KINDS)
+  assert.equal(env.WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS, '')
   fs.rmSync(item.root, { recursive: true })
 })
 

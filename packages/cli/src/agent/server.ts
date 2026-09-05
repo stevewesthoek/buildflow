@@ -3,28 +3,30 @@ import crypto from 'crypto'
 import fs from 'fs'
 import { promises as fsp } from 'fs'
 import path from 'path'
-import { Indexer } from './indexer'
+import { IndexScanError, Indexer } from './indexer'
 import { VaultSearcher } from './search'
 import { readFile, createFile, appendFile, listFolder } from './vault'
 import { logToFile } from '../utils/logger'
 import { createExportPlan } from './export'
 import { loadConfig, getWorkspaces, getSources, getSourcesSafe, addSource, removeSource, setSourceEnabled, setSourceAutoIndex, markSourceAutoIndexed, getSourceDiscoverySettings, setSourceDiscoverySettings, discoverRepositories, getActiveSourceContext, setActiveSourceContext, getWriteMode, setWriteMode, getSourceIndexState, setSourceIndexStatus } from './config'
 import { reconcileIndexStateFromDocs, flushIndexStateOnShutdown } from './index-state'
+import { collectIndexQueueDiagnostics } from './index-queue-observability'
 import { listWorkspaceTree, grepWorkspace, getWorkspaceInfo, resolveWorkspacePath, validateWorkspacePath } from './workspace'
 import { getResolvedActiveSources, isAllowedArtifactRoot, isAllowedSafeWriteRoot, isBlockedWritePath, redactSecrets, resolveTargetSourceId, resolveWithinSource, shouldIncludeEntry, truncateContent, getDefaultWritePolicy, resolveSourceWritePolicy, validateWriteTarget, normalizeRepoRelativePath } from './safe-access'
-import type { Workspace } from '@workbench/shared'
+import { resolveResumeNavigation, type Workspace } from '@workbench/shared'
 import { buildArtifactFilename, normalizeArtifactSlug, verifyWrittenFile } from './write-verification'
 import { getAllowedCommandKinds, runSafeCommand, type SafeCommandKind } from './command-runner'
-import { compactAgentJob, controlAgentJob, createWorkbenchRun, getActiveWorkbenchRun, getAgentJob, listAgentJobs, resumeWorkbenchRun, startAgentJob, updateAgentJob, type AgentJobControlAction } from './agent-jobs'
+import { compactAgentJob, controlAgentJob, createWorkbenchRun, getActiveWorkbenchRun, getAgentJob, listActiveWorkbenchRuns, listAgentJobs, resumeWorkbenchRun, startAgentJob, updateAgentJob, type AgentJobControlAction } from './agent-jobs'
+import { getFocusedWorkspace, setFocusedWorkspace } from './focused-workspace'
 import { listAgentEvents, listWorkbenchActivity, appendAgentEvent } from './agent-events'
 import { startLocalAgentPreflight } from './agent-runtime'
 import { GPT_ACTION_DEFAULT_FILE_BYTES, GPT_ACTION_RESPONSE_BUDGET_BYTES } from './payload-budget'
 import { prepareTaskContext } from './prepare-task-context'
 import { handleFocusedRead } from './focused-read'
 import { handleGraphContextRouted } from './graph-context-router'
-import { createPortableReadHandlers } from './portable-read-handlers'
+import { createPortableReadHandlers, isSourceSearchReady } from './portable-read-handlers'
 import { executeWorkbenchCommandMutation, executeWorkbenchFileChangeMutation } from './portable-mutation-handlers'
-import { PortableOperationError } from '../../../../apps/web/src/lib/actions/portable-operation-errors'
+import { PortableOperationError } from './portable-operation-errors'
 import { preflightWorkbenchPacket, type WorkbenchPacket } from './workbench-packets'
 import { planWorkbenchPacketExecution } from './workbench-packet-plan'
 import { executeWorkbenchPacket } from './workbench-packet-executor'
@@ -33,6 +35,12 @@ import { getWorkbenchPacketResult } from './workbench-packet-results'
 import { drainQueuedWorkbenchPackets, scheduleWorkbenchPacket } from './workbench-packet-coordinator'
 import { claimNextWorkbenchPacket, compactWorkbenchPacketLeaseRecord, controlWorkbenchPacketsForRun, getWorkbenchPacketRecord, listWorkbenchPacketRecords, recoverInterruptedWorkbenchPacket, recoverStaleWorkbenchPacketLeases, releaseWorkbenchPacketLease, renewWorkbenchPacketLease, reserveWorkbenchPacket } from './workbench-packet-store'
 import { getBuildSha, getBuildTimestamp } from '@workbench/shared'
+import { initializeCapabilityRuntime, scheduleCapabilityRuntimeMaintenance } from '../../../mcp/dist/capability-runtime-bootstrap.js'
+import { initializeKnowledgeContextRuntime } from '../../../mcp/dist/knowledge-context-runtime.js'
+import { getProviderRuntimeProjection } from '../../../mcp/dist/provider-onboarding.js'
+import { resolveActiveProviders } from '../../../mcp/dist/provider-activation.js'
+import { getCodebaseMemoryProviderDiagnostics } from './cbm-graph-context'
+import { WorkbenchMaintenanceScheduler } from './workbench-maintenance-scheduler'
 
 let cliVersion = process.env.WORKBENCH_PACKAGE_VERSION || 'unknown'
 try {
@@ -42,16 +50,74 @@ try {
   // Preserve the lifecycle-provided version or fail closed to unknown.
 }
 const agentProcessStartedAt = new Date().toISOString()
+import { createCodexDelegationAdapter } from './external-delegation-adapter'
+import { getPersistedDelegationOperation } from './external-delegation-store'
+import type { PromptPacketTransportContract } from './prompt-packet-compiler'
 
 export async function startLocalServer(port: number = 3052): Promise<void> {
   const fastify = Fastify({ logger: true })
+  let activeRequests = 0
+  let peakActiveRequests = 0
+  let lastCpuUsage = process.cpuUsage()
+  let lastCpuSampleAt = Date.now()
+  let recentCpuPercent: number | undefined
+  let recentCpuSampleWindowMs = 0
+  const trackedRequests = new WeakSet<object>()
+  const sampleProcessCpu = (): void => {
+    const sampledAt = Date.now()
+    const elapsedMs = Math.max(1, sampledAt - lastCpuSampleAt)
+    const usage = process.cpuUsage(lastCpuUsage)
+    recentCpuPercent = Number((((usage.user + usage.system) / (elapsedMs * 1_000)) * 100).toFixed(2))
+    recentCpuSampleWindowMs = elapsedMs
+    lastCpuUsage = process.cpuUsage()
+    lastCpuSampleAt = sampledAt
+  }
+  const processResourceTimer = setInterval(sampleProcessCpu, 5_000)
+  processResourceTimer.unref?.()
+  fastify.addHook('onRequest', async request => {
+    activeRequests += 1
+    peakActiveRequests = Math.max(peakActiveRequests, activeRequests)
+    trackedRequests.add(request)
+  })
+  fastify.addHook('onResponse', async request => {
+    if (!trackedRequests.has(request)) return
+    trackedRequests.delete(request)
+    activeRequests = Math.max(0, activeRequests - 1)
+    sampleProcessCpu()
+  })
+  fastify.addHook('onClose', async () => clearInterval(processResourceTimer))
   const READ_FILES_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BUDGET_BYTES
   const DEFAULT_READ_FILES_MAX_BYTES_PER_FILE = GPT_ACTION_DEFAULT_FILE_BYTES
   const MAX_READ_FILES_PATHS = 5
   const LARGE_FILE_FOCUSED_READ_THRESHOLD_BYTES = 100 * 1024
 
-  const indexer = new Indexer()
+  const requestIdFrom = (request: { headers: Record<string, string | string[] | undefined> }, body?: unknown): string | undefined => {
+    const header = request.headers['x-workbench-request-id']
+    if (typeof header === 'string' && header.trim()) return header.trim()
+    if (Array.isArray(header) && header[0]?.trim()) return header[0].trim()
+    if (body && typeof body === 'object' && typeof (body as Record<string, unknown>).requestId === 'string') {
+      const bodyRequestId = (body as Record<string, unknown>).requestId as string
+      return bodyRequestId.trim() || undefined
+    }
+    return undefined
+  }
+
+  const portableContext = (request: { headers: Record<string, string | string[] | undefined> }, body?: unknown, sourceId?: string) => ({
+    ...(sourceId ? { sourceId } : {}),
+    requestId: requestIdFrom(request, body)
+  })
+
+  const maintenanceScheduler = new WorkbenchMaintenanceScheduler({ foregroundDemand: () => activeRequests > 0, maxQueue: 64 })
+  let maintenanceYield: () => Promise<void> = async () => {}
+  const indexer = new Indexer(undefined, { yieldIfNeeded: async () => maintenanceYield() })
   const config = loadConfig()
+  const capabilityRuntimeStatus = initializeCapabilityRuntime({ adapters: [], rootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR })
+  if (!capabilityRuntimeStatus.initialized) console.error(`[Capability runtime] Startup recovery failed safely: ${capabilityRuntimeStatus.maintenanceError || 'unknown error'}`)
+  const capabilityRuntimeMaintenance = scheduleCapabilityRuntimeMaintenance({ adapters: [], rootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR }, capabilityRuntimeStatus)
+  const activeProviderResolution = resolveActiveProviders({ rootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR, knowledgeRootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR })
+  const knowledgeContextRuntimePromise = initializeKnowledgeContextRuntime({ registry: { rootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR }, indexRootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR, ...(activeProviderResolution.ok ? { activeProviderIds: activeProviderResolution.value } : {}) })
+  const providerRuntimeProjection = getProviderRuntimeProjection({ rootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR, knowledgeRegistry: { rootDir: process.env.WORKBENCH_PROVIDER_STATE_DIR }, authorizedBy: 'runtime' })
+  if (!providerRuntimeProjection.ok) console.error(`[Provider runtime] Startup discovery failed safely: ${'message' in providerRuntimeProjection ? providerRuntimeProjection.message : 'unknown error'}`)
   const recoveredExecutionJournals = recoverWorkbenchExecutionJournals({
     sourceRootFor: sourceId => getSourcesSafe().find(source => source.id === sourceId && source.enabled)?.path,
     onRecovered: journal => {
@@ -94,12 +160,34 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   }, 250)
   const indexingSources = new Set<string>()
+  const indexRetryAttempts = new Map<string, number>()
+  let reindexSourceInBackground: (sourceId: string, sourcePath: string, reason?: 'manual' | 'auto' | 'add') => boolean
   let searcher = new VaultSearcher(indexer.getDocs())
   const portableReadHandlers = createPortableReadHandlers({
     indexedFiles: () => indexer.getDocs().length,
     indexingActive: () => indexingSources.size > 0,
     indexingSourceIds: () => Array.from(indexingSources),
-    searcher: () => searcher
+    maintenanceSnapshot: () => maintenanceScheduler.compactSnapshot(),
+    requestSourceIndexRecovery: sourceIds => sourceIds.map(sourceId => {
+      const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
+      const state = getSourceIndexState(sourceId)
+      if (!source) return { sourceId, status: 'unavailable' as const }
+      if (isSourceSearchReady(state)) return { sourceId, status: 'already_ready' as const }
+      const queued = maintenanceScheduler.snapshot().active?.sourceId === sourceId
+        || maintenanceScheduler.snapshot().queued.some(item => item.sourceId === sourceId)
+        || indexingSources.has(sourceId)
+      if (queued) return { sourceId, status: 'already_queued' as const }
+      return reindexSourceInBackground(sourceId, source.path, 'auto')
+        ? { sourceId, status: 'queued' as const }
+        : { sourceId, status: 'unavailable' as const }
+    }),
+    searcher: () => searcher,
+    knowledgeContextPreparer: async input => {
+      const runtime = await knowledgeContextRuntimePromise
+      const result = await runtime.prepare(input)
+      if (result.ok === false) return { ok: false as const, code: result.code, message: result.message, ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}) }
+      return { ok: true as const, package: { packageId: result.package.packageId, sourceIds: result.package.authorization.sourceIds, auditReferences: [result.package.packageId], files: result.package.files, bytes: result.package.bytes, tokens: result.package.tokens, queries: result.package.queries, warnings: result.package.warnings, documents: result.package.documents.map(document => ({ providerId: document.document.providerId, documentId: document.document.documentId, reasons: document.reasons, score: document.score, bytes: document.bytes, truncated: document.truncated })), sources: result.package.sources, diagnostics: result.diagnostics } }
+    }
   })
 
   // Do not block local server startup on a full index build. If no index is present,
@@ -108,6 +196,35 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     console.log('[Indexer] No existing index found; starting server and indexing pending sources in background.')
   }
   reconcileIndexStateFromDocs(indexer.getDocs(), getSourcesSafe())
+  const codexDelegationAdapter = createCodexDelegationAdapter({
+    onLifecycle: activity => {
+      const terminal = activity.lifecycle === 'completed' || activity.lifecycle === 'failed' || activity.lifecycle === 'cancelled' || activity.lifecycle === 'ambiguous'
+      const control = activity.lifecycle === 'cancellation_requested'
+      const eventType = control ? 'control_requested' : terminal ? activity.lifecycle === 'completed' ? 'command_completed' : 'command_failed' : 'command_started'
+      const activityKind = control ? 'run_progress' : terminal ? activity.lifecycle === 'completed' ? 'executor_completed' : 'executor_failed' : 'executor_started'
+      const message = control
+        ? 'Codex cancellation requested.'
+        : activity.lifecycle === 'submitted'
+          ? 'Codex submission accepted.'
+          : activity.lifecycle === 'running'
+            ? 'Codex executor is running.'
+            : activity.lifecycle === 'completed'
+              ? 'Codex executor completed.'
+              : `Codex executor ended with ${activity.lifecycle}.`
+      appendAgentEvent({
+        jobId: activity.runId,
+        sourceId: activity.sourceId,
+        type: eventType,
+        activityKind,
+        message,
+        status: activity.lifecycle,
+        taskId: activity.taskId,
+        packetId: activity.packetId,
+        paths: activity.changedPaths,
+        evidenceRefs: [{ kind: 'packet', ref: activity.packetId }, { kind: 'event', ref: activity.operationId }]
+      })
+    }
+  })
 
   // Ensure pending enabled sources are queued for immediate indexing at startup.
   // A previous index is not sufficient when the source HEAD changed: leaving the
@@ -119,7 +236,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       if (!source.enabled || source.indexStatus !== 'pending' || indexingSources.has(source.id)) continue
       console.log(`[Startup] Queuing pending source for indexing: ${source.id}`)
       reindexSourceInBackground(source.id, source.path, 'auto')
-      break // Only start one at a time; others will be picked up by the sweep
     }
   }
   setTimeout(queuePendingSourcesAtStartup, 1000)
@@ -221,51 +337,81 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     searcher.rebuild(docs)
   }
 
-  const reindexSourceInBackground = (sourceId: string, sourcePath: string, reason: 'manual' | 'auto' | 'add' = 'manual'): boolean => {
-    if (indexingSources.has(sourceId)) return false
+  const hasQueuedReindex = (sourceId: string): boolean => {
+    const snapshot = maintenanceScheduler.snapshot()
+    return snapshot.active?.sourceId === sourceId
+      || snapshot.queued.some(item => item.sourceId === sourceId)
+      || indexingSources.has(sourceId)
+  }
 
-    setSourceIndexStatus(sourceId, {
-      indexed: false,
-      indexStatus: 'indexing',
-      indexError: undefined
-    })
-
-    indexingSources.add(sourceId)
-    void (async () => {
+  reindexSourceInBackground = (sourceId: string, sourcePath: string, reason: 'manual' | 'auto' | 'add' = 'manual'): boolean => {
+    if (hasQueuedReindex(sourceId)) return false
+    setSourceIndexStatus(sourceId, { indexed: false, indexStatus: 'pending', queuedAt: new Date().toISOString(), indexError: undefined })
+    const queued = maintenanceScheduler.enqueue({ sourceId, reason, run: async yieldToForeground => {
+      if (!getSourcesSafe().some(source => source.id === sourceId && source.enabled)) return
+      maintenanceYield = yieldToForeground
+      setSourceIndexStatus(sourceId, { indexed: false, indexStatus: 'indexing', indexedFileCount: 0, indexProgressCompleted: 0, indexProgressTotal: 0, indexingAt: new Date().toISOString(), indexError: undefined })
+      indexingSources.add(sourceId)
       try {
-        const indexedFileCount = await indexer.buildIndexForSource(sourceId, sourcePath)
+        const indexedFileCount = await indexer.buildIndexForSource(sourceId, sourcePath, ['**/*'], undefined, {
+          onProgress: progress => setSourceIndexStatus(sourceId, {
+            indexed: false,
+            indexStatus: 'indexing',
+            indexedFileCount: progress.indexed,
+            indexProgressCompleted: progress.completed,
+            indexProgressTotal: progress.total,
+            indexError: undefined
+          })
+        })
         refreshSearcherFromDocs()
         const completedAt = new Date().toISOString()
         setSourceIndexStatus(sourceId, {
           indexed: true,
           indexStatus: 'ready',
           indexedFileCount,
+          indexProgressCompleted: indexedFileCount,
+          indexProgressTotal: indexedFileCount,
           lastIndexedAt: completedAt,
+          readyAt: completedAt,
           indexError: undefined
         })
+        indexRetryAttempts.delete(sourceId)
         if (reason === 'auto') {
           markSourceAutoIndexed(sourceId, completedAt)
         }
         // CBM indexing is intentionally not automatic. `index_repository` mutates
         // Brain-owned cache state and requires explicit per-call owner approval.
       } catch (err) {
+        const attempt = indexRetryAttempts.get(sourceId) ?? 0
+        const retryDelayMs = 2 ** attempt * 1000
+        const retryScheduled = attempt < 3
+        const failureCode = err instanceof IndexScanError ? err.failureCode : 'FAILED_IO' as const
         setSourceIndexStatus(sourceId, {
           indexed: false,
           indexStatus: 'failed',
-          indexError: String(err)
+          indexFailureCode: failureCode,
+          indexError: String(err) + (retryScheduled ? '. Retrying automatically in ' + Math.ceil(retryDelayMs / 1000) + 's.' : '')
         })
+        if (retryScheduled) {
+          indexRetryAttempts.set(sourceId, attempt + 1)
+          setTimeout(() => {
+            if (getSourcesSafe().some(source => source.id === sourceId && source.enabled)) reindexSourceInBackground(sourceId, sourcePath, reason)
+          }, retryDelayMs)
+        } else {
+          indexRetryAttempts.delete(sourceId)
+        }
       } finally {
         indexingSources.delete(sourceId)
+        maintenanceYield = async () => {}
       }
-    })().catch(err => {
-      console.error(`Background reindex failed for ${sourceId}:`, err)
-    })
-    return true
+    } })
+    return queued.ok && queued.created
   }
 
   const shouldAutoIndexSource = (source: ReturnType<typeof getSourcesSafe>[number], now: number): boolean => {
     if (!source.enabled || source.autoIndexEnabled === false) return false
     if (source.indexStatus === 'indexing' || indexingSources.has(source.id)) return false
+    if (source.indexStatus === 'failed') return false
     try {
       if (!fs.existsSync(source.path) || !fs.statSync(source.path).isDirectory()) return false
     } catch {
@@ -282,7 +428,6 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   const runAutoIndexSweep = (): void => {
     const now = Date.now()
     for (const source of getSourcesSafe()) {
-      if (indexingSources.size > 0) break
       if (!shouldAutoIndexSource(source, now)) continue
       reindexSourceInBackground(source.id, source.path, 'auto')
     }
@@ -297,9 +442,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       .map(sourceId => ({ sourceId, state: getSourceIndexState(sourceId) }))
       .filter(({ state }) => {
         if (!state) return true
-        if (state.indexStatus === 'ready') return false
-        // Allow search to proceed with older index if currently reindexing and has indexed documents
-        if (state.indexStatus === 'indexing' && (state.indexedFileCount ?? 0) > 0) return false
+        if (isSourceSearchReady(state)) return false
         return true
       })
 
@@ -309,7 +452,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           return `${item.sourceId} has not been indexed yet. Reindex it from the dashboard first.`
         }
         if (item.state?.indexStatus === 'indexing') {
-          return `${item.sourceId} is being reindexed. Searching using the older index.`
+          return `${item.sourceId} is being reindexed. Search will be available after the new index is ready.`
         }
         if (item.state?.indexStatus === 'failed') {
           return `${item.sourceId} failed to index: ${item.state.indexError || 'unknown error'}. Reindex it from the dashboard.`
@@ -324,6 +467,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           sourceId: item.sourceId,
           indexStatus: item.state?.indexStatus || 'unknown',
           indexError: item.state?.indexError,
+          indexFailureCode: item.state?.indexFailureCode,
           indexedFileCount: item.state?.indexedFileCount,
           recoveryAction: item.state?.indexStatus === 'pending'
             ? 'Reindex from dashboard'
@@ -356,6 +500,58 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
           pid: process.pid
         }
       }
+  })
+
+  // Local-only diagnostics. Keep queue/resource/CBM detail off the compact
+  // public action status response; this endpoint is for the native status
+  // command and operator doctor workflows.
+  fastify.get('/api/diagnostics/local', async () => {
+    sampleProcessCpu()
+    const sources = getSourcesSafe()
+    const ordinaryIndex = {
+      indexedFiles: indexer.getDocs().length,
+      sourceCount: sources.length,
+      readySources: sources.filter(source => source.indexStatus === 'ready').length,
+      pendingSources: sources.filter(source => source.indexStatus === 'pending').length,
+      indexingSources: sources.filter(source => source.indexStatus === 'indexing').length,
+      failedSources: sources.filter(source => source.indexStatus === 'failed').length,
+      disabledSources: sources.filter(source => source.indexStatus === 'disabled').length,
+      sourceIdsByStatus: {
+        ready: sources.filter(source => source.indexStatus === 'ready').map(source => source.id),
+        pending: sources.filter(source => source.indexStatus === 'pending').map(source => source.id),
+        indexing: sources.filter(source => source.indexStatus === 'indexing').map(source => source.id),
+        failed: sources.filter(source => source.indexStatus === 'failed').map(source => source.id)
+      }
+    }
+    const queue = collectIndexQueueDiagnostics({ sources })
+    const structuralRoot = path.resolve(process.env.WORKBENCH_REPOSITORY_ROOT || process.cwd())
+    const structuralSource = sources.find(source => path.resolve(source.path) === structuralRoot)
+    return {
+      generatedAt: new Date().toISOString(),
+      process: {
+        pid: process.pid,
+        rssBytes: process.memoryUsage().rss,
+        heapUsedBytes: process.memoryUsage().heapUsed,
+        activeRequests,
+        peakActiveRequests,
+        recentCpuPercent: recentCpuPercent ?? 0,
+        recentCpuSampleWindowMs
+      },
+      ordinaryIndex: {
+        ...ordinaryIndex,
+        activeReindexes: indexingSources.size
+      },
+      queue: {
+        ...queue.pressure,
+        activeReindexes: indexingSources.size,
+        pendingSourceCount: ordinaryIndex.pendingSources + ordinaryIndex.indexingSources
+      },
+      maintenance: maintenanceScheduler.snapshot(),
+      cbm: getCodebaseMemoryProviderDiagnostics({
+        sourceId: structuralSource?.id || path.basename(structuralRoot),
+        sourceRoot: structuralSource?.path || structuralRoot
+      })
+    }
   })
 
   // Status endpoint
@@ -405,6 +601,43 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         setImmediate(() => startLocalAgentPreflight({ jobId: job.id, sourceId, sourceRoot: source.path }))
       }
       return reply.header('Cache-Control', 'no-store').send({ status: 'ok', job: full === true ? job : compactAgentJob(job) })
+    } catch (err) {
+      return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
+    }
+  })
+
+  fastify.post<{ Body: {
+    action: 'submit' | 'status' | 'cancel' | 'reconcile'
+    operationId: string
+    contract?: PromptPacketTransportContract
+    branch?: string
+    ownerSessionId?: string
+    isolation?: 'read_only' | 'worktree'
+  } }>('/api/agent-jobs/delegation', async (request, reply) => {
+    try {
+      const { action, operationId } = request.body || {}
+      if (!operationId || typeof operationId !== 'string') return reply.code(400).send({ error: 'operationId is required' })
+      if (action === 'submit') {
+        const operation = getPersistedDelegationOperation(operationId)
+        if (!operation) return reply.code(404).send({ error: 'Delegation operation not found.' })
+        const source = getSourcesSafe().find(item => item.id === operation.sourceId && item.enabled)
+        if (!source) return reply.code(404).send({ error: 'Delegation source is unavailable.' })
+        if (source.indexStatus !== 'ready') return reply.code(409).send({ error: 'Delegation source is not ready for sequential work.' })
+        if (!request.body.contract || !request.body.branch || !request.body.ownerSessionId) return reply.code(400).send({ error: 'contract, branch, and ownerSessionId are required for submission.' })
+        const result = await codexDelegationAdapter.submit({
+          operation,
+          contract: request.body.contract,
+          sourceRoot: source.path,
+          branch: request.body.branch,
+          ownerSessionId: request.body.ownerSessionId,
+          isolation: request.body.isolation || 'read_only'
+        })
+        return reply.header('Cache-Control', 'no-store').send(result)
+      }
+      if (action === 'status') return reply.header('Cache-Control', 'no-store').send(codexDelegationAdapter.statusReadback(operationId) || { error: 'Delegation operation not found.' })
+      if (action === 'cancel') return reply.header('Cache-Control', 'no-store').send(codexDelegationAdapter.cancel(operationId))
+      if (action === 'reconcile') return reply.header('Cache-Control', 'no-store').send(codexDelegationAdapter.reconcile(operationId) || { error: 'Delegation operation not found.' })
+      return reply.code(400).send({ error: 'Unsupported delegation action.' })
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
     }
@@ -536,7 +769,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     try {
       // Compatibility adapter: command policy, validation, admission, scheduling, and
       // execution are shared with the portable host rather than reimplemented here.
-      const result = await executeWorkbenchCommandMutation(request.body as Record<string, unknown>, {}, { requireSession: false })
+      const result = await executeWorkbenchCommandMutation(request.body as Record<string, unknown>, portableContext(request, request.body), { requireSession: false })
       return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.body)
     } catch (err) {
       return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
@@ -548,7 +781,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     const handler = portableReadHandlers.readWorkbenchContext
     if (handler) {
       try {
-        return reply.send(await handler({ ...request.body, mode: 'search' }, { sourceId: request.body.sourceId }))
+        return reply.send(await handler({ ...request.body, mode: 'search' }, portableContext(request, request.body, request.body.sourceId)))
       } catch (err) {
         if (err instanceof PortableOperationError && err.code === 'dependency_unavailable' && Array.isArray(err.details?.sources)) {
           return reply.code(409).send({ error: err.message, message: err.details.readinessMessage, details: err.details.sources })
@@ -613,7 +846,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     const handler = portableReadHandlers.readWorkbenchContext
     if (handler) {
       try {
-        return reply.header('Cache-Control', 'no-store').send(await handler({ ...request.body, mode: 'prepare_task_context' }, { sourceId: request.body.sourceId }))
+        return reply.header('Cache-Control', 'no-store').send(await handler({ ...request.body, mode: 'prepare_task_context' }, portableContext(request, request.body, request.body.sourceId)))
       } catch (err) {
         if (err instanceof PortableOperationError && err.code === 'dependency_unavailable' && Array.isArray(err.details?.sources)) {
           return reply.code(409).header('Cache-Control', 'no-store').send({ error: err.message, message: err.details.readinessMessage, details: err.details.sources })
@@ -648,7 +881,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     const handler = portableReadHandlers.readWorkbenchContext
     if (handler) {
       try {
-        return reply.header('Cache-Control', 'no-store').send(await handler(request.body, { sourceId: request.body.sourceId }))
+        return reply.header('Cache-Control', 'no-store').send(await handler(request.body, portableContext(request, request.body, request.body.sourceId)))
       } catch (err) {
         return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
       }
@@ -658,6 +891,14 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   })
 
   fastify.post<{ Body: { sourceId: string; query?: string; limit?: number } }>('/api/graph-context', async (request, reply) => {
+    const handler = portableReadHandlers.readWorkbenchContext
+    if (handler) {
+      try {
+        return reply.header('Cache-Control', 'no-store').send(await handler({ ...request.body, mode: 'graph_context' }, portableContext(request, request.body, request.body.sourceId)))
+      } catch (err) {
+        return reply.code(400).header('Cache-Control', 'no-store').send({ error: String(err) })
+      }
+    }
     const result = await handleGraphContextRouted(request.body)
     return reply.code(result.statusCode).header('Cache-Control', 'no-store').send(result.payload)
   })
@@ -1005,7 +1246,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }).readWorkbenchContext
     if (handler) {
       try {
-        return reply.send(await handler({ ...request.body, mode: 'read_paths' }, { sourceId: request.body.sourceId }))
+        return reply.send(await handler({ ...request.body, mode: 'read_paths' }, portableContext(request, request.body, request.body.sourceId)))
       } catch (err) {
         return reply.code(400).send({ error: String(err) })
       }
@@ -1166,10 +1407,25 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     const lite = request.query?.lite === '1' || request.query?.lite === 'true'
     const active = getActiveSourceContext(lite ? { refreshGitMetadata: false } : {})
     if (lite) {
-      return { mode: active.mode, activeSourceIds: active.activeSourceIds, sources: [] }
+      const sources = getSourcesSafe({ refreshGitMetadata: false, includeIndexState: false })
+      const activeRuns = listActiveWorkbenchRuns()
+      const focusedWorkspace = getFocusedWorkspace()
+      const resume = resolveResumeNavigation({ sources, focusedWorkspace, activeRuns })
+      return { mode: active.mode, activeSourceIds: active.activeSourceIds, sources: [], focusedWorkspace, resume, activeRuns: resume.status === 'ACTIVE_RUN' || resume.status === 'BLOCKED_RUN' ? [resume.activeRun] : [] }
     }
     const sources = getSourcesSafe().map(source => ({ ...source, active: active.activeSourceIds.includes(source.id), type: (source as any).type || 'unknown' }))
     return { mode: active.mode, activeSourceIds: active.activeSourceIds, sources }
+  })
+
+  fastify.post<{ Body: { sourceId?: string } }>('/api/focused-workspace', async (request, reply) => {
+    try {
+      const sourceId = typeof request.body?.sourceId === 'string' ? request.body.sourceId.trim() : ''
+      const source = getSourcesSafe({ refreshGitMetadata: false, includeIndexState: false }).find(item => item.id === sourceId)
+      if (!source || !source.enabled) throw new Error('Focused source must be an exact enabled source.')
+      return { status: 'ok', focusedWorkspace: setFocusedWorkspace(source) }
+    } catch (err) {
+      return reply.code(400).send({ error: String(err) })
+    }
   })
 
   fastify.post<{ Body: { mode: 'single' | 'multi' | 'all'; activeSourceIds?: string[] } }>('/api/set-active-sources', async (request, reply) => {
@@ -1244,7 +1500,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     const handler = portableReadHandlers.readWorkbenchContext
     if (handler) {
       try {
-        return reply.send(await handler({ ...request.body, mode: 'list_files' }, { sourceId: request.body.sourceId }))
+        return reply.send(await handler({ ...request.body, mode: 'list_files' }, portableContext(request, request.body, request.body.sourceId)))
       } catch (err) {
         return reply.code(400).send({ error: String(err) })
       }
@@ -1311,7 +1567,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; path: string; content: string; mode?: 'createOnly' | 'overwrite'; reason?: string; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/write-file', async (request, reply) => {
     try {
-      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: request.body.sourceId || resolveTargetSourceId(undefined), changeType: request.body.mode === 'overwrite' ? 'overwrite' : 'create' })
+      const mutationSourceId = request.body.sourceId || resolveTargetSourceId(undefined)
+      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: mutationSourceId, changeType: request.body.mode === 'overwrite' ? 'overwrite' : 'create' }, portableContext(request, request.body, mutationSourceId))
       if (result.statusCode >= 0) return reply.code(result.statusCode).send(result.body)
 
       const { sourceId, path: relPath, content, mode = 'createOnly' } = request.body
@@ -1343,7 +1600,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; path: string; find: string; replace: string; allowMultiple?: boolean; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/patch-file', async (request, reply) => {
     try {
-      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: request.body.sourceId || resolveTargetSourceId(undefined), changeType: 'patch' })
+      const mutationSourceId = request.body.sourceId || resolveTargetSourceId(undefined)
+      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: mutationSourceId, changeType: 'patch' }, portableContext(request, request.body, mutationSourceId))
       if (result.statusCode >= 0) return reply.code(result.statusCode).send(result.body)
 
       const { sourceId, path: relPath, find, replace, allowMultiple = false } = request.body
@@ -1414,7 +1672,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; path: string; confirmedByUser?: boolean; confirmationToken?: string; recursive?: boolean; onlyIfEmpty?: boolean } }>('/api/delete-file', async (request, reply) => {
     try {
-      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: request.body.sourceId || resolveTargetSourceId(undefined), changeType: 'delete_file' })
+      const mutationSourceId = request.body.sourceId || resolveTargetSourceId(undefined)
+      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: mutationSourceId, changeType: 'delete_file' }, portableContext(request, request.body, mutationSourceId))
       if (result.statusCode >= 0) return reply.code(result.statusCode).send(result.body)
 
       const { sourceId, path: relPath, recursive = false, onlyIfEmpty = true } = request.body
@@ -1469,7 +1728,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; path: string; to: string; overwrite?: boolean; createParents?: boolean; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/move-file', async (request, reply) => {
     try {
-      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: request.body.sourceId || resolveTargetSourceId(undefined), changeType: 'move' })
+      const mutationSourceId = request.body.sourceId || resolveTargetSourceId(undefined)
+      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: mutationSourceId, changeType: 'move' }, portableContext(request, request.body, mutationSourceId))
       if (result.statusCode >= 0) return reply.code(result.statusCode).send(result.body)
 
       const { sourceId, path: fromPath, to, overwrite = false, createParents = false } = request.body
@@ -1499,7 +1759,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; path: string; createParents?: boolean; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/mkdir', async (request, reply) => {
     try {
-      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: request.body.sourceId || resolveTargetSourceId(undefined), changeType: 'mkdir' })
+      const mutationSourceId = request.body.sourceId || resolveTargetSourceId(undefined)
+      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: mutationSourceId, changeType: 'mkdir' }, portableContext(request, request.body, mutationSourceId))
       if (result.statusCode >= 0) return reply.code(result.statusCode).send(result.body)
 
       const { sourceId, path: relPath, createParents = false } = request.body
@@ -1536,7 +1797,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; path: string; recursive?: boolean; onlyIfEmpty?: boolean; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/rmdir', async (request, reply) => {
     try {
-      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: request.body.sourceId || resolveTargetSourceId(undefined), changeType: 'rmdir' })
+      const mutationSourceId = request.body.sourceId || resolveTargetSourceId(undefined)
+      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: mutationSourceId, changeType: 'rmdir' }, portableContext(request, request.body, mutationSourceId))
       if (result.statusCode >= 0) return reply.code(result.statusCode).send(result.body)
 
       const { sourceId, path: relPath, recursive = false, onlyIfEmpty = true } = request.body
@@ -1583,7 +1845,8 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
 
   fastify.post<{ Body: { sourceId?: string; path: string; content: string; separator?: string; reason?: string; confirmedByUser?: boolean; confirmationToken?: string } }>('/api/append-file', async (request, reply) => {
     try {
-      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: request.body.sourceId || resolveTargetSourceId(undefined), changeType: 'append' })
+      const mutationSourceId = request.body.sourceId || resolveTargetSourceId(undefined)
+      const result = executeWorkbenchFileChangeMutation({ ...request.body, sourceId: mutationSourceId, changeType: 'append' }, portableContext(request, request.body, mutationSourceId))
       if (result.statusCode >= 0) return reply.code(result.statusCode).send(result.body)
 
       const { sourceId, path: relPath, content, separator = '\n\n' } = request.body
@@ -1696,12 +1959,15 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
   })
 
-  fastify.post<{ Body: { rootPath?: string; intervalMinutes?: number } }>('/api/sources/discovery', async (request, reply) => {
+  fastify.post<{ Body: { rootPath?: string; allowedRoots?: string[]; ignorePatterns?: string[]; namingPattern?: string; intervalMinutes?: number } }>('/api/sources/discovery', async (request, reply) => {
     try {
-      const { rootPath, intervalMinutes } = request.body || {}
+      const { rootPath, allowedRoots, ignorePatterns, namingPattern, intervalMinutes } = request.body || {}
       if (rootPath !== undefined && typeof rootPath !== 'string') return reply.code(400).send({ error: 'Invalid rootPath' })
+      if (allowedRoots !== undefined && (!Array.isArray(allowedRoots) || allowedRoots.some(item => typeof item !== 'string'))) return reply.code(400).send({ error: 'Invalid allowedRoots' })
+      if (ignorePatterns !== undefined && (!Array.isArray(ignorePatterns) || ignorePatterns.some(item => typeof item !== 'string'))) return reply.code(400).send({ error: 'Invalid ignorePatterns' })
+      if (namingPattern !== undefined && typeof namingPattern !== 'string') return reply.code(400).send({ error: 'Invalid namingPattern' })
       if (intervalMinutes !== undefined && typeof intervalMinutes !== 'number') return reply.code(400).send({ error: 'Invalid intervalMinutes' })
-      setSourceDiscoverySettings({ rootPath, intervalMinutes })
+      setSourceDiscoverySettings({ rootPath, allowedRoots, ignorePatterns, namingPattern, intervalMinutes })
       const result = discoverRepositories()
       return reply.header('Cache-Control', 'no-store').send(result)
     } catch (err) {
@@ -1722,9 +1988,12 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
         indexed: source.indexStatus === 'ready',
         indexStatus: source.indexStatus || 'unknown',
         indexedFileCount: source.indexedFileCount,
+        indexProgressCompleted: source.indexProgressCompleted,
+        indexProgressTotal: source.indexProgressTotal,
         ...(lite ? {} : {
           lastIndexedAt: source.lastIndexedAt,
           indexError: source.indexError,
+          indexFailureCode: source.indexFailureCode,
           autoIndexEnabled: source.autoIndexEnabled,
           autoIndexIntervalMinutes: source.autoIndexIntervalMinutes,
           lastAutoIndexedAt: source.lastAutoIndexedAt
@@ -1774,6 +2043,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       }
 
       const sources = removeSource(sourceId)
+      maintenanceScheduler.cancelSource(sourceId)
       indexer.removeSourceDocs(sourceId)
       refreshSearcherFromDocs()
       return { status: 'removed', sources }
@@ -1793,6 +2063,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
       }
 
       const sources = setSourceEnabled(sourceId, enabled)
+      if (!enabled) maintenanceScheduler.cancelSource(sourceId)
       return { sources }
     } catch (err) {
       return reply.code(400).send({ error: String(err) })
@@ -2115,13 +2386,13 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
     }
 
     // Validation phase
-    let validationResults: Array<{ commandKind: string; status: string; durationMs: number; stdout?: string; stderr?: string }> | undefined
+    let validationResults: Array<{ commandKind: string; status: string; durationMs: number; stdout?: string; stderr?: string; evidenceRefs?: unknown[]; evidenceUnavailable?: unknown }> | undefined
     if (validate && validate.commands.length > 0) {
       validationResults = []
       for (const cmd of validate.commands) {
         const res = await fastify.inject({ method: 'POST', url: '/api/commands/run', payload: { sourceId, commandKind: cmd.commandKind, timeoutMs: cmd.timeoutMs || 120000, paths: cmd.paths } })
         const data = JSON.parse(res.payload)
-        validationResults.push({ commandKind: cmd.commandKind, status: data.status, durationMs: data.durationMs, stdout: typeof data.stdout === 'string' ? data.stdout.slice(0, 2000) : undefined, stderr: typeof data.stderr === 'string' ? data.stderr.slice(0, 1000) : undefined })
+        validationResults.push({ commandKind: cmd.commandKind, status: data.status, durationMs: data.durationMs, stdout: typeof data.stdout === 'string' ? data.stdout.slice(0, 2000) : undefined, stderr: typeof data.stderr === 'string' ? data.stderr.slice(0, 1000) : undefined, ...(Array.isArray(data.evidenceRefs) ? { evidenceRefs: data.evidenceRefs.slice(0, 4) } : {}), ...(data.evidenceUnavailable && typeof data.evidenceUnavailable === 'object' ? { evidenceUnavailable: data.evidenceUnavailable } : {}) })
         if (data.status !== 'completed') {
           appendAgentEvent({ jobId, sourceId, type: 'validation_failed', message: `Validation ${cmd.commandKind} failed`, status: job.status })
           return reply.header('Cache-Control', 'no-store').send({ status: 'failed', completedPhase: 'steps', failedAt: { phase: 'validation', error: `${cmd.commandKind} failed` }, stepResults, validationResults, durationMs: Date.now() - startedAt })
@@ -2198,6 +2469,7 @@ export async function startLocalServer(port: number = 3052): Promise<void> {
   })
 
   fastify.addHook('onClose', async () => {
+    capabilityRuntimeMaintenance.cancel()
     flushIndexStateOnShutdown()
   })
 

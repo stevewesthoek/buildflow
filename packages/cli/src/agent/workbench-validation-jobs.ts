@@ -6,9 +6,16 @@ import { runSafeCommand, type SafeCommandRequest, type SafeCommandResult } from 
 import { recordValidationJobTelemetry, type TerminalValidationJobStatus } from './validation-job-telemetry'
 import { recordGitLockTelemetry } from './git-lock-telemetry'
 import { appendAgentEvent, hasValidationActivityEvent } from './agent-events'
+import { WorkbenchEvidenceMetadataSchema, type WorkbenchEvidenceMetadata } from '@workbench/shared'
+import { attachWorkbenchEvidence, type WorkbenchEvidenceUnavailable } from './workbench-evidence-producers'
+import { redactSecrets } from './safe-access'
+
 export const WORKBENCH_VALIDATION_JOB_STORE_VERSION = 1 as const
 
 export type PersistedValidationCommandKind =
+  | 'git_diff_check'
+  | 'validate_json_files'
+  | 'security_scan_paths'
   | 'run_package_script'
   | 'run_package_test'
   | 'run_package_test_marker'
@@ -26,11 +33,14 @@ export type WorkbenchValidationJobStatus =
 
 export type WorkbenchValidationJobRequest = {
   sourceId: string
+  sessionId?: string
   idempotencyKey: string
   commandKind: PersistedValidationCommandKind
   packageDir?: string
   scriptName?: string
   marker?: string
+  paths?: string[]
+  patternSet?: SafeCommandRequest['patternSet']
   timeoutMs?: number
   runId?: string
   packetId?: string
@@ -66,6 +76,7 @@ export type WorkbenchValidationJobRecord = {
   jobId: string
   idempotencyKey: string
   sourceId: string
+  sessionId?: string
   runId?: string
   packetId?: string
   taskId?: string
@@ -84,6 +95,8 @@ export type WorkbenchValidationJobRecord = {
   cancelRequestedAt?: string
   cancelReason?: string
   result?: WorkbenchValidationJobResult
+  evidenceRefs?: WorkbenchEvidenceMetadata[]
+  evidenceUnavailable?: WorkbenchEvidenceUnavailable
 }
 
 export type CompactWorkbenchValidationJob = {
@@ -97,6 +110,8 @@ export type CompactWorkbenchValidationJob = {
   packageDir?: string
   scriptName?: string
   marker?: string
+  paths?: string[]
+  patternSet?: SafeCommandRequest['patternSet']
   executable?: SafeCommandRequest['executable']
   args?: string[]
   nodeVersion?: '20'
@@ -111,6 +126,10 @@ export type CompactWorkbenchValidationJob = {
   signal?: NodeJS.Signals | null
   durationMs?: number
   outputTruncated?: boolean
+  resultRef: string
+  stdoutBytes?: number
+  stderrBytes?: number
+  resultAvailableUntil?: string
   stdout?: string
   stderr?: string
   stdoutTail?: string
@@ -123,6 +142,8 @@ export type CompactWorkbenchValidationJob = {
   runtime?: SafeCommandResult['runtime']
   terminatedByInfrastructure?: boolean
   terminationReason?: WorkbenchValidationJobResult['terminationReason']
+  evidenceRefs?: WorkbenchEvidenceMetadata[]
+  evidenceUnavailable?: WorkbenchEvidenceUnavailable
 }
 
 type WorkbenchValidationJobStore = {
@@ -155,9 +176,15 @@ const MAX_JOB_RECORDS = 300
 const TERMINAL_JOB_RETENTION_MS = 4 * 60 * 60_000  // terminal jobs older than this are pruned
 const MAX_PERSISTED_OUTPUT_BYTES = 60_000
 const COMPACT_OUTPUT_TAIL_BYTES = 4_000
+const RESULT_PAGE_DEFAULT_BYTES = 4_000
+const RESULT_PAGE_MAX_BYTES = 4_000
+const RESULT_RETENTION_MS = TERMINAL_JOB_RETENTION_MS
 const MIN_TIMEOUT_MS = 1_000
 const MAX_TIMEOUT_MS = 900_000
 const ALLOWED_COMMAND_KINDS = new Set<PersistedValidationCommandKind>([
+  'git_diff_check',
+  'validate_json_files',
+  'security_scan_paths',
   'run_package_script',
   'run_package_test',
   'run_package_test_marker',
@@ -181,10 +208,13 @@ function isRecord(value: unknown): value is WorkbenchValidationJobRecord {
     && typeof record.jobId === 'string'
     && typeof record.idempotencyKey === 'string'
     && typeof record.sourceId === 'string'
+    && (record.sessionId === undefined || typeof record.sessionId === 'string')
     && typeof record.status === 'string'
     && typeof record.command?.commandKind === 'string'
     && typeof record.createdAt === 'string'
     && typeof record.updatedAt === 'string'
+    && (record.evidenceRefs === undefined || (Array.isArray(record.evidenceRefs) && record.evidenceRefs.every(item => WorkbenchEvidenceMetadataSchema.safeParse(item).success)))
+    && (record.evidenceUnavailable === undefined || (typeof record.evidenceUnavailable === 'object' && record.evidenceUnavailable !== null && typeof record.evidenceUnavailable.code === 'string' && typeof record.evidenceUnavailable.message === 'string'))
 }
 
 function readStore(): WorkbenchValidationJobStore {
@@ -242,9 +272,49 @@ function projectValidationTerminal(record: WorkbenchValidationJobRecord): void {
     packetId: record.packetId,
     taskId: record.taskId,
     status: record.status,
-    evidenceRefs: [{ kind: 'validation', ref: record.jobId }],
+    evidenceRefs: record.evidenceRefs?.length
+      ? record.evidenceRefs.map(ref => ({ kind: 'validation' as const, ref: ref.evidenceId }))
+      : [{ kind: 'validation', ref: record.jobId }],
     ...(typeof record.result?.durationMs === 'number' ? { telemetry: { durationMs: record.result.durationMs } } : {})
   })
+}
+
+const EVIDENCE_OWNER_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/
+
+function attachValidationEvidence(record: WorkbenchValidationJobRecord): void {
+  if (!record.result || !['completed', 'failed', 'timed_out', 'cancelled'].includes(record.status) || record.evidenceRefs?.length) return
+  const owner = {
+    sourceId: record.sourceId,
+    ...(record.sessionId && EVIDENCE_OWNER_ID.test(record.sessionId) ? { sessionId: record.sessionId } : {}),
+    ...(record.runId && EVIDENCE_OWNER_ID.test(record.runId) ? { runId: record.runId } : {}),
+    ...(record.taskId && EVIDENCE_OWNER_ID.test(record.taskId) ? { taskId: record.taskId } : {}),
+    ...(record.packetId && EVIDENCE_OWNER_ID.test(record.packetId) ? { packetId: record.packetId } : {}),
+    operationId: `validation-job:${record.jobId}`
+  }
+  const evidence = attachWorkbenchEvidence({
+    entries: [{
+      kind: 'validation_result',
+      owner,
+      retentionClass: record.runId ? 'active_run' : 'standard',
+      // The resultRef/cursor store already owns the bounded output streams.
+      // Keep this canonical record as the durable outcome/reference envelope
+      // without copying those potentially large bodies.
+      content: JSON.stringify({
+        resultRef: record.jobId,
+        commandKind: record.command.commandKind,
+        status: record.status,
+        exitCode: record.result.exitCode,
+        signal: record.result.signal,
+        durationMs: record.result.durationMs,
+        stdoutBytes: Buffer.byteLength(record.result.stdout, 'utf8'),
+        stderrBytes: Buffer.byteLength(record.result.stderr, 'utf8'),
+        outputTruncated: record.result.outputTruncated,
+        streams: ['stdout', 'stderr']
+      })
+    }]
+  })
+  record.evidenceRefs = evidence.evidenceRefs
+  record.evidenceUnavailable = evidence.evidenceUnavailable
 }
 
 function recoverExpiredRunningJobsInStore(store: WorkbenchValidationJobStore, now = new Date().toISOString()): WorkbenchValidationJobRecord[] {
@@ -268,6 +338,7 @@ function recoverExpiredRunningJobsInStore(store: WorkbenchValidationJobStore, no
       terminatedByInfrastructure: true,
       terminationReason: 'worker_failure'
     }
+    attachValidationEvidence(record)
     record.leaseToken = undefined
     record.leaseAcquiredAt = undefined
     record.leaseExpiresAt = undefined
@@ -341,6 +412,15 @@ function textTail(value: string | undefined): string | undefined {
   return buffer.subarray(buffer.byteLength - COMPACT_OUTPUT_TAIL_BYTES).toString('utf8')
 }
 
+function textBytes(value: string | undefined): number | undefined {
+  return value === undefined ? undefined : Buffer.byteLength(value, 'utf8')
+}
+
+function resultAvailableUntil(record: WorkbenchValidationJobRecord): string | undefined {
+  if (!record.result || !['completed', 'failed', 'timed_out', 'cancelled'].includes(record.status)) return undefined
+  return new Date(Date.parse(record.updatedAt) + RESULT_RETENTION_MS).toISOString()
+}
+
 type NormalizeValidationJobRequestResult =
   | { ok: true; request: WorkbenchValidationJobRequest }
   | { ok: false; field: string; reason: string; allowedValues?: string[] }
@@ -348,6 +428,9 @@ type NormalizeValidationJobRequestResult =
 function normalizeRequest(request: WorkbenchValidationJobRequest): NormalizeValidationJobRequestResult {
   const sourceId = String(request.sourceId || '').trim()
   if (!sourceId) return { ok: false, field: 'sourceId', reason: 'sourceId is required.' }
+
+  const sessionId = request.sessionId ? String(request.sessionId).trim() : undefined
+  if (sessionId && !EVIDENCE_OWNER_ID.test(sessionId)) return { ok: false, field: 'sessionId', reason: 'sessionId is invalid.' }
 
   const idempotencyKey = String(request.idempotencyKey || '').trim()
   if (!idempotencyKey) return { ok: false, field: 'idempotencyKey', reason: 'idempotencyKey is required.' }
@@ -367,6 +450,23 @@ function normalizeRequest(request: WorkbenchValidationJobRequest): NormalizeVali
   }
   if (request.commandKind === 'run_package_test_marker' && !String(request.marker || '').trim()) {
     return { ok: false, field: 'marker', reason: 'marker is required for run_package_test_marker.' }
+  }
+  if (request.commandKind === 'git_diff_check' || request.commandKind === 'validate_json_files' || request.commandKind === 'security_scan_paths') {
+    if (!Array.isArray(request.paths) || request.paths.length === 0 || request.paths.some(item => typeof item !== 'string' || !item.trim())) {
+      return { ok: false, field: 'paths', reason: `paths are required for ${request.commandKind}.` }
+    }
+    if (request.paths.some(item => item.startsWith('/') || item.includes('\\') || item.split('/').some(part => !part || part === '.' || part === '..'))) {
+      return { ok: false, field: 'paths', reason: 'Validation paths must be normalized repository-relative paths.' }
+    }
+    if (request.commandKind === 'validate_json_files' && request.paths.some(item => !item.endsWith('.json'))) {
+      return { ok: false, field: 'paths', reason: 'validate_json_files only accepts JSON paths.' }
+    }
+    if (request.commandKind === 'security_scan_paths' && !request.patternSet) {
+      return { ok: false, field: 'patternSet', reason: 'patternSet is required for security_scan_paths.' }
+    }
+    if (request.commandKind === 'security_scan_paths' && !['forbidden_runtime_execution', 'forbidden_secret_material', 'forbidden_upload_network', 'forbidden_all_high_risk'].includes(request.patternSet || '')) {
+      return { ok: false, field: 'patternSet', reason: 'security_scan_paths patternSet is not allowlisted.' }
+    }
   }
   if (request.commandKind === 'run_exact_command') {
     if (request.executable !== 'node' && request.executable !== 'pnpm' && request.executable !== 'rg') {
@@ -395,11 +495,14 @@ function normalizeRequest(request: WorkbenchValidationJobRequest): NormalizeVali
     ok: true,
     request: {
       sourceId,
+      sessionId,
       idempotencyKey,
       commandKind: request.commandKind,
       packageDir: request.packageDir ? String(request.packageDir).trim() : undefined,
       scriptName: request.scriptName ? String(request.scriptName).trim() : undefined,
       marker: request.marker ? String(request.marker).trim() : undefined,
+      paths: Array.isArray(request.paths) ? Array.from(new Set(request.paths.map(item => String(item).trim()).filter(Boolean))).slice(0, 50) : undefined,
+      patternSet: request.patternSet,
       timeoutMs,
       runId: request.runId ? String(request.runId).trim() : undefined,
       packetId: request.packetId ? String(request.packetId).trim() : undefined,
@@ -433,6 +536,8 @@ export function compactWorkbenchValidationJob(record: WorkbenchValidationJobReco
     packageDir: record.command.packageDir,
     scriptName: record.command.scriptName,
     marker: record.command.marker,
+    paths: record.command.paths,
+    patternSet: record.command.patternSet,
     executable: record.command.executable,
     args: record.command.args,
     nodeVersion: record.command.nodeVersion,
@@ -447,6 +552,10 @@ export function compactWorkbenchValidationJob(record: WorkbenchValidationJobReco
     signal: record.result?.signal,
     durationMs: record.result?.durationMs,
     outputTruncated: record.result?.outputTruncated,
+    resultRef: record.jobId,
+    stdoutBytes: textBytes(record.result?.stdout),
+    stderrBytes: textBytes(record.result?.stderr),
+    resultAvailableUntil: resultAvailableUntil(record),
     stdout: record.result?.stdout,
     stderr: record.result?.stderr,
     stdoutTail: textTail(record.result?.stdout),
@@ -458,7 +567,108 @@ export function compactWorkbenchValidationJob(record: WorkbenchValidationJobReco
     details: record.result?.details,
     runtime: record.result?.runtime,
     terminatedByInfrastructure: record.result?.terminatedByInfrastructure,
-    terminationReason: record.result?.terminationReason
+    terminationReason: record.result?.terminationReason,
+    evidenceRefs: record.evidenceRefs,
+    evidenceUnavailable: record.evidenceUnavailable
+  }
+}
+
+export type PublicCompactWorkbenchValidationJob = Omit<CompactWorkbenchValidationJob, 'stdout' | 'stderr' | 'details' | 'stdoutTail' | 'stderrTail'>
+
+/** Public action projection: keep metadata and the durable reference, never output content. */
+export function compactWorkbenchValidationJobForPublic(record: WorkbenchValidationJobRecord): PublicCompactWorkbenchValidationJob {
+  const compact = compactWorkbenchValidationJob(record)
+  const {
+    stdout: _stdout,
+    stderr: _stderr,
+    details: _details,
+    stdoutTail: _stdoutTail,
+    stderrTail: _stderrTail,
+    ...publicJob
+  } = compact
+  return publicJob
+}
+
+export type ValidationJobResultPage = {
+  resultRef: string
+  stream: 'stdout' | 'stderr'
+  text: string
+  offset: number
+  returnedBytes: number
+  totalBytes: number
+  complete: boolean
+  outputTruncated: boolean
+  nextCursor?: string
+}
+
+export type GetValidationJobResultPageResult =
+  | { ok: true; page: ValidationJobResultPage }
+  | { ok: false; code: 'VALIDATION_JOB_NOT_FOUND' | 'VALIDATION_RESULT_CURSOR_INVALID' | 'VALIDATION_RESULT_STREAM_EMPTY' | 'VALIDATION_RESULT_REDACTION_FAILED'; message: string }
+
+type ValidationResultCursor = { version: 1; jobId: string; stream: 'stdout' | 'stderr'; offset: number }
+
+function encodeResultCursor(cursor: ValidationResultCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+function decodeResultCursor(value: string): ValidationResultCursor | undefined {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<ValidationResultCursor>
+    if (parsed.version !== 1 || typeof parsed.jobId !== 'string' || (parsed.stream !== 'stdout' && parsed.stream !== 'stderr') || !Number.isInteger(parsed.offset) || parsed.offset < 0) return undefined
+    return parsed as ValidationResultCursor
+  } catch {
+    return undefined
+  }
+}
+
+function utf8SafeEnd(buffer: Buffer, start: number, proposedEnd: number): number {
+  let end = proposedEnd
+  while (end > start && end < buffer.length && (buffer[end] & 0xc0) === 0x80) end -= 1
+  return end > start ? end : Math.min(buffer.length, start + 1)
+}
+
+export function getWorkbenchValidationJobResultPage(params: {
+  jobId: string
+  sourceId: string
+  stream: 'stdout' | 'stderr'
+  cursor?: string
+  pageBytes?: number
+}): GetValidationJobResultPageResult {
+  const record = getWorkbenchValidationJob(params.jobId, params.sourceId)
+  if (!record) return { ok: false, code: 'VALIDATION_JOB_NOT_FOUND', message: 'Validation job was not found for the selected source.' }
+  const cursor = params.cursor ? decodeResultCursor(params.cursor) : undefined
+  if (params.cursor && (!cursor || cursor.jobId !== record.jobId || cursor.stream !== params.stream)) {
+    return { ok: false, code: 'VALIDATION_RESULT_CURSOR_INVALID', message: 'The result cursor is invalid for this job and stream. Restart from the resultRef.' }
+  }
+  const value = params.stream === 'stdout' ? record.result?.stdout : record.result?.stderr
+  if (value === undefined) return { ok: false, code: 'VALIDATION_RESULT_STREAM_EMPTY', message: `No ${params.stream} result is available yet.` }
+  let redactedValue: string
+  try {
+    redactedValue = redactSecrets(value)
+  } catch {
+    return { ok: false, code: 'VALIDATION_RESULT_REDACTION_FAILED', message: 'Validation result redaction failed closed.' }
+  }
+  const buffer = Buffer.from(redactedValue, 'utf8')
+  const offset = cursor?.offset ?? 0
+  if (offset > buffer.byteLength) return { ok: false, code: 'VALIDATION_RESULT_CURSOR_INVALID', message: 'The result cursor is beyond the stored result.' }
+  const pageBytes = Math.max(256, Math.min(Math.floor(params.pageBytes || RESULT_PAGE_DEFAULT_BYTES), RESULT_PAGE_MAX_BYTES))
+  const proposedEnd = Math.min(buffer.byteLength, offset + pageBytes)
+  const end = utf8SafeEnd(buffer, offset, proposedEnd)
+  const text = buffer.subarray(offset, end).toString('utf8')
+  const complete = end >= buffer.byteLength
+  return {
+    ok: true,
+    page: {
+      resultRef: record.jobId,
+      stream: params.stream,
+      text,
+      offset,
+      returnedBytes: Buffer.byteLength(text, 'utf8'),
+      totalBytes: buffer.byteLength,
+      complete,
+      outputTruncated: record.result?.outputTruncated === true,
+      ...(complete ? {} : { nextCursor: encodeResultCursor({ version: 1, jobId: record.jobId, stream: params.stream, offset: end }) })
+    }
   }
 }
 
@@ -502,6 +712,7 @@ export function submitWorkbenchValidationJob(request: WorkbenchValidationJobRequ
         jobId: `validation-${crypto.randomUUID()}`,
         idempotencyKey: normalized.idempotencyKey,
         sourceId: normalized.sourceId,
+        sessionId: normalized.sessionId,
         runId: normalized.runId,
         packetId: normalized.packetId,
         taskId: normalized.taskId,
@@ -634,6 +845,7 @@ export function recordWorkbenchValidationJobResult(params: {
       stderr: boundedText(params.result.stderr),
       changedPaths: Array.from(new Set(params.result.changedPaths)).sort().slice(0, 200)
     }
+    attachValidationEvidence(record)
     record.leaseToken = undefined
     record.leaseAcquiredAt = undefined
     record.leaseExpiresAt = undefined
@@ -661,6 +873,8 @@ export function toSafeCommandRequest(job: WorkbenchValidationJobRecord, sourceRo
     packageDir: job.command.packageDir,
     scriptName: job.command.scriptName,
     marker: job.command.marker,
+    paths: job.command.paths,
+    patternSet: job.command.patternSet,
     executable: job.command.executable,
     args: job.command.args,
     nodeVersion: job.command.nodeVersion,
@@ -742,6 +956,7 @@ export function cancelWorkbenchValidationJob(params: {
           terminatedByInfrastructure: false,
           terminationReason: 'cancelled'
         }
+        attachValidationEvidence(record)
       }
 
       persistStore(store)

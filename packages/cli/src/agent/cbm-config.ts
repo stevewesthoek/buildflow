@@ -3,15 +3,42 @@ import path from 'node:path'
 import os from 'node:os'
 
 export type CbmBackend = 'disabled' | 'cbm'
+export type CbmCacheLayout = 'repository' | 'identity'
+
+export type CbmProviderConfiguration = {
+  providerId: string
+  executable: string
+  cacheRoot?: string
+  cacheLayout?: CbmCacheLayout
+}
 
 const CONFIG_FILE = 'graph-backend.json'
 const ALLOWED_VALUES: ReadonlySet<string> = new Set(['disabled', 'cbm'])
 const OWNER_DIR_MODE = 0o700
 const OWNER_FILE_MODE = 0o600
+const PROVIDER_ID = /^[a-z][a-z0-9._-]{0,159}$/
 
 export type CbmConfigResult =
-  | { backend: CbmBackend; source: 'config' | 'default' }
+  | { backend: CbmBackend; source: 'config' | 'default'; provider?: CbmProviderConfiguration }
   | { backend: 'disabled'; source: 'default'; reason: string }
+
+function parseProvider(value: unknown): CbmProviderConfiguration | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('config_invalid_provider')
+  const record = value as Record<string, unknown>
+  const providerId = typeof record.providerId === 'string' ? record.providerId.trim() : ''
+  const executable = typeof record.executable === 'string' ? record.executable.trim() : ''
+  const cacheRoot = typeof record.cacheRoot === 'string' ? record.cacheRoot.trim() : undefined
+  const cacheLayout: CbmCacheLayout | undefined = record.cacheLayout === undefined
+    ? undefined
+    : record.cacheLayout === 'repository' || record.cacheLayout === 'identity'
+      ? record.cacheLayout
+      : undefined
+  if (!PROVIDER_ID.test(providerId) || !executable || executable.length > 2048) throw new Error('config_invalid_provider')
+  if (cacheRoot !== undefined && (!cacheRoot || cacheRoot.length > 2048 || !path.isAbsolute(cacheRoot))) throw new Error('config_invalid_provider')
+  if (record.cacheLayout !== undefined && cacheLayout === undefined) throw new Error('config_invalid_provider')
+  return { providerId, executable, ...(cacheRoot ? { cacheRoot } : {}), ...(cacheLayout ? { cacheLayout } : {}) }
+}
 
 function configDir(): string {
   const override = (process.env.WORKBENCH_CONFIG_DIR ?? '').trim()
@@ -72,11 +99,17 @@ export function readCbmConfig(configDirOverride?: string): CbmConfigResult {
   const trimmed = value.trim().toLowerCase()
   if (!ALLOWED_VALUES.has(trimmed)) return failClosed(`config_invalid_value:${trimmed}`)
 
-  return { backend: trimmed as CbmBackend, source: 'config' }
+  try {
+    const provider = parseProvider((parsed as Record<string, unknown>).provider)
+    return { backend: trimmed as CbmBackend, source: 'config', ...(provider ? { provider } : {}) }
+  } catch (error) {
+    return failClosed(error instanceof Error ? error.message : 'config_invalid_provider')
+  }
 }
 
-export function writeCbmConfig(backend: CbmBackend, configDirOverride?: string): void {
+export function writeCbmConfig(backend: CbmBackend, configDirOverride?: string, provider?: CbmProviderConfiguration): void {
   if (!ALLOWED_VALUES.has(backend)) throw new Error(`Invalid CBM backend value: ${backend}`)
+  if (provider) parseProvider(provider)
   const dir = configDirOverride ?? configDir()
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: OWNER_DIR_MODE })
@@ -87,7 +120,7 @@ export function writeCbmConfig(backend: CbmBackend, configDirOverride?: string):
   const file = configPath(dir)
   const tmp = `${file}.tmp.${process.pid}`
   try {
-    fs.writeFileSync(tmp, JSON.stringify({ backend }, null, 2) + '\n', { mode: OWNER_FILE_MODE })
+    fs.writeFileSync(tmp, JSON.stringify({ backend, ...(provider ? { provider } : {}) }, null, 2) + '\n', { mode: OWNER_FILE_MODE })
     fs.chmodSync(tmp, OWNER_FILE_MODE)
     const tmpMode = fs.statSync(tmp).mode & 0o777
     if (tmpMode !== OWNER_FILE_MODE) throw new Error(`chmod verify failed: expected 0o${OWNER_FILE_MODE.toString(8)}, got 0o${tmpMode.toString(8)}`)

@@ -3,13 +3,20 @@ import {
   type RunWorkbenchDirectCommandKind
 } from '@workbench/shared'
 import { WORKBENCH_TOOL_NAMES, type WorkbenchToolName } from './contracts.js'
+import {
+  BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS,
+  MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV,
+  MCP_ALLOWED_COMMAND_KINDS_ENV,
+  MCP_ALLOWED_TOOLS_ENV
+} from './configure-core.js'
+import { CLIENT_WORKFLOW_TOOL_NAMES, type ClientWorkflowToolName } from './client-workflow-tools.js'
 
-export const MCP_ALLOWED_TOOLS_ENV = 'WORKBENCH_MCP_ALLOWED_TOOLS'
-export const MCP_ALLOWED_COMMAND_KINDS_ENV = 'WORKBENCH_MCP_ALLOWED_COMMAND_KINDS'
+export { MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV }
 
 export type WorkbenchMcpScope = {
   tools: ReadonlySet<WorkbenchToolName>
   commandKinds: ReadonlySet<RunWorkbenchDirectCommandKind>
+  clientWorkflowTools: ReadonlySet<ClientWorkflowToolName>
 }
 
 function parseList(value: string | undefined, defaults: readonly string[]): string[] {
@@ -38,5 +45,16 @@ export function loadWorkbenchMcpScope(env: NodeJS.ProcessEnv = process.env): Wor
   if (!tools.includes('runWorkbenchCommand') && env[MCP_ALLOWED_COMMAND_KINDS_ENV] !== undefined && commandKinds.length > 0) {
     throw new Error(`${MCP_ALLOWED_COMMAND_KINDS_ENV} requires runWorkbenchCommand to be admitted.`)
   }
-  return { tools: new Set(tools), commandKinds: new Set(commandKinds) }
+  // A restricted profile must opt in explicitly to client-workflow authority. This
+  // keeps older Brain registrations fail-closed until they are regenerated with
+  // the explicit empty value.
+  const defaultClientWorkflowTools = env[MCP_ALLOWED_TOOLS_ENV] !== undefined || env[MCP_ALLOWED_COMMAND_KINDS_ENV] !== undefined
+    ? BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS
+    : undefined
+  const clientWorkflowTools = requireKnown(
+    parseList(env[MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV], defaultClientWorkflowTools === '' ? [] : CLIENT_WORKFLOW_TOOL_NAMES),
+    CLIENT_WORKFLOW_TOOL_NAMES,
+    MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV
+  )
+  return { tools: new Set(tools), commandKinds: new Set(commandKinds), clientWorkflowTools: new Set(clientWorkflowTools) }
 }

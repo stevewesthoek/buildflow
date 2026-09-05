@@ -259,6 +259,13 @@ async function verifyExtensionlessGitPaths() {
     await expectReject('git_add_paths rejects untracked extensionless files outside ordinary write roots', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: [disallowedUntracked] }))
     fs.rmSync(path.join(repo, disallowedUntracked))
 
+    const webUntracked = 'apps/web/src/app/verify-command-runner-untracked'
+    put(webUntracked, 'apps web extensionless source\\n')
+    result = await runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: [webUntracked] })
+    assert.equal(result.status, 'completed')
+    git(['reset', '--', webUntracked])
+    fs.rmSync(path.join(repo, webUntracked))
+
     fs.mkdirSync(path.join(repo, 'scripts/directory'), { recursive: true })
     await expectReject('git_add_paths rejects explicit directories', () => runSafeCommand({ ...commandBase, commandKind: 'git_add_paths', paths: ['scripts/directory'] }))
     fs.rmSync(path.join(repo, 'scripts/directory'), { recursive: true })
@@ -380,7 +387,8 @@ await expectReject('git_add_paths rejects -A', () => runSafeCommand({ ...base, c
 await expectReject('git_add_paths rejects traversal', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['../outside.ts'] }))
 await expectReject('git_commit requires staged changes', () => runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test commit', confirmedByUser: true }))
 
-let result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['src/a.ts', '.env.example'] })
+await expectReject('git_add_paths rejects environment template paths under the connected-repository security boundary', () => runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['src/a.ts', '.env.example'] }))
+let result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['src/a.ts'] })
 assert.equal(result.status, 'completed')
 result = await runSafeCommand({ ...base, commandKind: 'git_diff_cached_name_only' })
 assert.equal(result.status, 'completed')
@@ -396,23 +404,23 @@ run('git', ['commit', '-m', 'test: add tracked asset'])
 fs.rmSync(path.join(root, 'public/assets/file.pdf'))
 result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/file.pdf'] })
 assert.equal(result.status, 'needs_confirmation')
-assert.equal(result.reason, 'path_not_allowed')
+assert.equal(result.reason, 'binary_delete_confirmation')
 assert.equal(typeof result.confirmationToken, 'string')
 const addTrackedBinaryDeleteToken = result.confirmationToken
 result = await runSafeCommand({ ...base, commandKind: 'git_add_paths', paths: ['public/assets/file.pdf'], confirmationToken: addTrackedBinaryDeleteToken })
 assert.equal(result.status, 'completed')
-assert.equal(result.reason, 'path_not_allowed')
+assert.equal(result.reason, 'binary_delete_confirmation')
 result = await runSafeCommand({ ...base, commandKind: 'git_diff_cached_name_only' })
 assert.equal(result.status, 'completed')
 assert(result.stdout.includes('public/assets/file.pdf'))
 result = await runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test: delete tracked asset' })
 assert.equal(result.status, 'needs_confirmation')
-assert.equal(result.reason, 'path_not_allowed')
+assert.equal(result.reason, 'binary_delete_confirmation')
 assert.equal(typeof result.confirmationToken, 'string')
 const commitTrackedBinaryDeleteToken = result.confirmationToken
 result = await runSafeCommand({ ...base, commandKind: 'git_commit', message: 'test: delete tracked asset', confirmationToken: commitTrackedBinaryDeleteToken })
 assert.equal(result.status, 'completed')
-assert.equal(result.reason, 'path_not_allowed')
+assert.equal(result.reason, 'binary_delete_confirmation')
 assert(result.stdout.includes('test: delete tracked asset'))
 write('public/assets/tracked.png', 'tracked asset v1\n')
 run('git', ['add', '--', 'public/assets/tracked.png'])
@@ -912,10 +920,12 @@ try {
 }
 
 const openapiRoute = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/app/api/openapi/route.ts'), 'utf8')
-for (const token of ['git_add_paths', 'git_commit', 'git_push', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'run_exact_command', 'n8n_workflow_export', 'workflowId', 'outputPath', 'executable', 'args', 'nodeVersion', 'policy', 'protectedPaths', 'requiredBranch', 'networkAccess', 'packageDir', 'scriptName', 'patternSet', 'confirmationToken']) {
-  assert(openapiRoute.includes(token), `OpenAPI route missing ${token}`)
+const canonicalOpenApiSchema = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/lib/openapi-chatgpt.json'), 'utf8')
+assert(openapiRoute.includes("canonicalOpenApiSchema"), 'OpenAPI route must serve the canonical schema')
+for (const token of ['git_add_paths', 'git_commit', 'validate_json_files', 'run_package_script', 'run_package_test', 'run_package_test_marker', 'security_scan_paths', 'run_exact_command', 'n8n_workflow_export', 'workflowId', 'outputPath', 'executable', 'args', 'nodeVersion', 'policy', 'protectedPaths', 'requiredBranch', 'networkAccess', 'packageDir', 'scriptName', 'patternSet', 'confirmationToken']) {
+  assert(canonicalOpenApiSchema.includes(token), `Canonical OpenAPI schema missing ${token}`)
 }
-assert(openapiRoute.includes("enum: ['node', 'pnpm', 'rg']"), 'OpenAPI exact-command executable enum must include direct rg')
+assert(canonicalOpenApiSchema.includes('"enum":["node","pnpm","rg"]'), 'OpenAPI exact-command executable enum must include direct rg')
 const gptActions = fs.readFileSync(path.join(process.cwd(), 'apps/web/src/lib/actions/gpt.ts'), 'utf8')
 assert(gptActions.includes('sessionAwareRunWorkbenchCommandRequestSchema'), 'GPT command dispatcher must import the shared session-aware strict parser')
 assert(gptActions.includes('sessionAwareRunWorkbenchCommandRequestSchema.safeParse(body)'), 'GPT command dispatcher must use the shared session-aware strict parser')

@@ -18,7 +18,20 @@ function deadlineFor(options?: ActionTransportOptions): string {
 async function throughPortable<T>(operationId: WorkbenchOperationId, payload: unknown, handler: () => Promise<T>, options?: ActionTransportOptions): Promise<T> {
   let originalError: unknown
   const response = await dispatchPortableOperation(
-    createPortableOperationRequest({ operationId, deadlineAt: deadlineFor(options), payload }),
+    createPortableOperationRequest({
+      operationId,
+      deadlineAt: deadlineFor(options),
+      requestId: options?.requestId,
+      sourceId: payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).sourceId === 'string'
+        ? (payload as Record<string, unknown>).sourceId as string
+        : payload && typeof payload === 'object' && (payload as Record<string, unknown>).command && typeof ((payload as Record<string, unknown>).command as Record<string, unknown>).sourceId === 'string'
+          ? ((payload as Record<string, unknown>).command as Record<string, unknown>).sourceId as string
+          : undefined,
+      sessionId: payload && typeof payload === 'object' && typeof (payload as Record<string, unknown>).sessionId === 'string'
+        ? (payload as Record<string, unknown>).sessionId as string
+        : undefined,
+      payload
+    }),
     { [operationId]: async () => {
       try {
         return await handler()

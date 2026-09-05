@@ -11,6 +11,7 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 const READ_CONTEXT_RESPONSE_BUDGET_BYTES = GPT_ACTION_RESPONSE_BYTE_LIMIT
+const PREPARED_CONTEXT_RESPONSE_BUDGET_BYTES = 8 * 1024
 
 function trimEntries(data: unknown): unknown {
   if (!data || typeof data !== 'object') return data
@@ -48,11 +49,11 @@ function withReadActivity(data: unknown, params: { mode: string; sourceId?: stri
   }
 }
 
-function validateResponseSize(data: unknown): { ok: boolean; bytes?: number; error?: string } {
+function validateResponseSize(data: unknown, budgetBytes = READ_CONTEXT_RESPONSE_BUDGET_BYTES): { ok: boolean; bytes?: number; error?: string } {
   if (!data || typeof data !== 'object') return { ok: true }
   const responseBytes = Buffer.byteLength(JSON.stringify(data), 'utf8')
-  if (responseBytes > READ_CONTEXT_RESPONSE_BUDGET_BYTES) {
-    return { ok: false, bytes: responseBytes, error: `Response ${responseBytes} bytes exceeds budget ${READ_CONTEXT_RESPONSE_BUDGET_BYTES}` }
+  if (responseBytes > budgetBytes) {
+    return { ok: false, bytes: responseBytes, error: `Response ${responseBytes} bytes exceeds budget ${budgetBytes}` }
   }
   return { ok: true, bytes: responseBytes }
 }
@@ -143,6 +144,7 @@ export async function POST(request: NextRequest) {
     const transport = (phase: string) => ({
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(7500),
+      requestId: deadline.requestId,
       diagnostics: deadline.diagnostics({ phase, sourceId, mode, path: typeof body.path === 'string' ? body.path : undefined, paths })
     })
 
@@ -254,12 +256,12 @@ export async function POST(request: NextRequest) {
     deadline.setPhase(mode || 'read_context')
     const data = await dispatchWorkbenchRead(baseBody, auth.bearerToken, transport(mode || 'read_context'))
     const response = stripBloat(withReadActivity(data, { mode, sourceId: body.sourceId, paths: body.paths }))
-    const sizeCheck = validateResponseSize(response)
+    const sizeCheck = validateResponseSize(response, mode === 'prepare_task_context' ? PREPARED_CONTEXT_RESPONSE_BUDGET_BYTES : READ_CONTEXT_RESPONSE_BUDGET_BYTES)
     if (!sizeCheck.ok) {
       return NextResponse.json(buildActionErrorEnvelope({
         code: 'WORKBENCH_RESPONSE_SIZE_EXCEEDED',
         message: 'BuildFlow read response exceeded action size budget.',
-        details: `Response was ${sizeCheck.bytes} bytes, limit is ${READ_CONTEXT_RESPONSE_BUDGET_BYTES} bytes.`,
+        details: `Response was ${sizeCheck.bytes} bytes, limit is ${mode === 'prepare_task_context' ? PREPARED_CONTEXT_RESPONSE_BUDGET_BYTES : READ_CONTEXT_RESPONSE_BUDGET_BYTES} bytes.`,
         recovery: ['Use a narrower read mode', 'Reduce the number of paths', 'Use grep_context instead'],
         status: 'needs_narrower_scope'
       }))

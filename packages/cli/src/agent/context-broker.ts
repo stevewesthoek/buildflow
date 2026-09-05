@@ -9,8 +9,11 @@ import { planIndexLifecycle, type IndexLifecyclePlan, type PathSnapshot } from '
 import { resolveContext, type ContextResolutionResult, type ContextResolverOptions } from './context-resolver'
 import { observeRepositoryHealth, type RepositoryHealthObservationResult, type RepositoryHealthObserverOptions } from './repository-health-observer'
 import type { ContextBudget, ContextProposal, ContextSession, FreshnessPolicyResult, RepositoryHealth } from './context-intelligence-models'
+import type { McpContextObservabilityOptions } from './mcp-context-observability'
+import type { McpCapabilityStoreOptions } from './mcp-session-capability-authorization'
 
 export type ContextBrokerOptions = {
+  ownerId?: string
   sources?: KnowledgeSource[]
   sourceLoader?: () => KnowledgeSource[]
   storeOptions?: ContextIntelligenceStoreOptions
@@ -19,6 +22,8 @@ export type ContextBrokerOptions = {
   indexRecordLoader?: RepositoryHealthObserverOptions['indexRecordLoader']
   planner?: IndexPlannerOptions
   budget?: ContextBudget
+  mcpObservability?: McpContextObservabilityOptions
+  mcpCapabilityAuthorization?: McpCapabilityStoreOptions
 }
 
 export type ContextBrokerRequest = {
@@ -95,7 +100,7 @@ const DEFAULT_BUDGET: ContextBudget = {
 
 function loadSources(options: ContextBrokerOptions): KnowledgeSource[] | undefined {
   try {
-    const sources = options.sources ? [...options.sources] : (options.sourceLoader || (() => getSourcesSafe({ refreshGitMetadata: false })))()
+    const sources = options.sources ? [...options.sources] : (options.sourceLoader || (() => getSourcesSafe({ refreshGitMetadata: false, includeIndexState: false })))()
     return Array.isArray(sources) ? sources : undefined
   } catch {
     return undefined
@@ -106,11 +111,10 @@ function sourceIds(proposal: ContextProposal): string[] {
   return proposal.candidates.map(candidate => candidate.sourceId)
 }
 
-function observe(sourceId: string, options: ContextBrokerOptions): RepositoryHealthObservationResult {
+function observe(sourceId: string, options: ContextBrokerOptions, sources?: KnowledgeSource[]): RepositoryHealthObservationResult {
   return observeRepositoryHealth(sourceId, {
     ...options.observer,
-    sources: options.sources,
-    sourceLoader: options.sourceLoader,
+    ...(sources ? { sources, sourceLoader: () => sources } : { sources: options.sources, sourceLoader: options.sourceLoader }),
     indexRecordLoader: options.indexRecordLoader
   })
 }
@@ -120,7 +124,7 @@ export function prepareAuthorizedContext(sourceId: string, confirmationState: Co
   if (!sources) return { ok: false, code: 'observation_failed', message: 'The source registry could not be loaded.' }
   const source = sources.find(item => item.id === sourceId)
   if (!source || source.enabled === false) return { ok: false, code: 'source_not_authorized', message: `Source "${sourceId}" is not an enabled registered source.` }
-  const observed = observe(sourceId, options)
+  const observed = observe(sourceId, options, sources)
   if (!observed.ok || !observed.health || observed.health.runtimeAvailability !== 'available') {
     return { ok: false, code: 'observation_failed', message: `Repository health could not be observed for source "${sourceId}".` }
   }

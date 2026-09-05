@@ -32,6 +32,9 @@ type NormalizedContextResult = {
   contextMode: 'single' | 'multi'
   activeSourceIds: string[]
   sources: NormalizedSource[]
+  resume?: Record<string, unknown>
+  focusedWorkspace?: Record<string, unknown>
+  activeRuns?: Record<string, unknown>[]
 }
 
 type ActivityPhase =
@@ -464,12 +467,32 @@ function normalizeActiveContext(activePayload: unknown): NormalizedContextResult
     : []
   const mode = (activePayload as { mode?: unknown }).mode
   const contextMode = mode === 'single' || mode === 'multi' ? mode : activeSourceIds.length === 1 ? 'single' : 'multi'
+  const payload = activePayload as Record<string, unknown>
+  const resume = payload.resume && typeof payload.resume === 'object' && !Array.isArray(payload.resume)
+    ? payload.resume as Record<string, unknown>
+    : undefined
+  const focusedWorkspace = payload.focusedWorkspace && typeof payload.focusedWorkspace === 'object' && !Array.isArray(payload.focusedWorkspace)
+    ? focusedWorkspaceProjection(payload.focusedWorkspace)
+    : undefined
+  const activeRuns = Array.isArray(payload.activeRuns)
+    ? payload.activeRuns.filter((run): run is Record<string, unknown> => Boolean(run) && typeof run === 'object' && !Array.isArray(run)).slice(0, 8)
+    : undefined
   return {
     status: 'ok',
     contextMode,
     activeSourceIds,
-    sources: []
+    sources: [],
+    ...(resume ? { resume } : {}),
+    ...(focusedWorkspace ? { focusedWorkspace } : {}),
+    ...(activeRuns ? { activeRuns } : {})
   }
+}
+
+function focusedWorkspaceProjection(value: object): Record<string, unknown> {
+  const source = value as Record<string, unknown>
+  return Object.fromEntries(['version', 'sourceId', 'repoGroupId', 'branchName', 'isGitWorktree', 'updatedAt']
+    .filter(key => source[key] !== undefined)
+    .map(key => [key, source[key]]))
 }
 
 function normalizeContextResult(sourcesPayload: unknown, activePayload: unknown, fallbackStatus: 'ok' = 'ok'): NormalizedContextResult {
@@ -792,11 +815,19 @@ export async function listWorkbenchSources(userToken?: string, transportOptions?
 export async function getWorkbenchActiveContext(userToken?: string, transportOptions?: ActionTransportOptions) {
   const activePayload = await executeAction('/api/get-active-sources?lite=1', {}, userToken, transportOptions)
   const context = normalizeActiveContext(activePayload)
+  const resume = context.resume
+  const resumeStatus = typeof resume?.status === 'string' ? resume.status : undefined
   return withActivity(context, makeActivity({
     operationId: 'getWorkbenchActiveContext',
     phase: 'completed',
     actionLabel: 'Checked active source context',
-    userMessage: context.activeSourceIds.length > 0
+    userMessage: resumeStatus === 'IDLE_READY'
+      ? `Focused repository is ready to continue; no active run is currently running.`
+      : resumeStatus === 'SOURCE_SELECTION_REQUIRED'
+        ? 'No repository was selected for resume; choose a named repository.'
+        : resumeStatus === 'FOCUS_STALE'
+          ? 'The previously focused repository is stale; re-select it in Workbench.'
+          : context.activeSourceIds.length > 0
       ? `Active context is ${context.contextMode}-source: ${summaryList(context.activeSourceIds)}.`
       : 'No active source context is selected.',
     sourceId: context.activeSourceIds[0],
@@ -804,7 +835,11 @@ export async function getWorkbenchActiveContext(userToken?: string, transportOpt
     riskLevel: 'low',
     requiresConfirmation: false,
     verified: true,
-    nextStep: context.activeSourceIds.length > 0 ? 'Read or inspect the active source.' : 'Select one or more active sources.'
+    nextStep: resumeStatus === 'IDLE_READY'
+      ? 'Continue in the focused repository; do not create a new run.'
+      : resumeStatus === 'SOURCE_SELECTION_REQUIRED' || resumeStatus === 'FOCUS_STALE'
+        ? 'Select the named repository before continuing.'
+        : context.activeSourceIds.length > 0 ? 'Read or inspect the active source.' : 'Select one or more active sources.'
   }))
 }
 
@@ -936,6 +971,7 @@ export async function dispatchWorkbenchRead(body: Record<string, unknown>, userT
     return withActivity({
       mode: 'read_paths',
       files,
+      ...((result as { workbenchRun?: unknown }).workbenchRun ? { workbenchRun: (result as { workbenchRun: unknown }).workbenchRun } : {}),
       ...(Array.isArray(body.paths) && body.paths.length > paths.length ? { refusedPaths: (body.paths as unknown[]).slice(paths.length).filter(path => typeof path === 'string') } : {}),
       ...(skipped.length > 0 ? { skipped } : {}),
       ...(nextBatch ? { nextBatch } : {}),
@@ -1032,6 +1068,7 @@ export async function dispatchWorkbenchRead(body: Record<string, unknown>, userT
 
     return withActivity({
       mode: 'search_and_read',
+      ...((readResult as { workbenchRun?: unknown }).workbenchRun ? { workbenchRun: (readResult as { workbenchRun: unknown }).workbenchRun } : {}),
       ...(search.fallbackUsed ? { searchFallback: 'content', originalQuery: body.query, queryUsed: search.queryUsed } : {}),
       timings: {
         ...(searchTimings ? { search: searchTimings } : {}),
@@ -1086,6 +1123,12 @@ export async function dispatchWorkbenchRead(body: Record<string, unknown>, userT
     payload.maxBytesPerFile = boundedActionInt(body.maxBytesPerFile, GPT_ACTION_DEFAULT_FILE_BYTES, 1000, 4000)
     if (Array.isArray(body.sourceIds)) payload.sourceIds = body.sourceIds
     if (typeof body.sourceId === 'string') payload.sourceId = body.sourceId
+    if (body.contextWorkflow === true) payload.contextWorkflow = true
+    if (typeof body.contextIntelligenceSessionId === 'string') payload.contextIntelligenceSessionId = body.contextIntelligenceSessionId
+    if (typeof body.requestId === 'string') payload.requestId = body.requestId
+    if (body.clientCapabilities && typeof body.clientCapabilities === 'object' && !Array.isArray(body.clientCapabilities)) {
+      payload.clientCapabilities = body.clientCapabilities
+    }
     const result = await executeAction('/api/prepare-task-context', payload, userToken, transportOptions)
     const exactReadPlan = Array.isArray((result as { exactReadPlan?: unknown }).exactReadPlan)
       ? (result as { exactReadPlan: Array<Record<string, unknown>> }).exactReadPlan
@@ -1093,18 +1136,24 @@ export async function dispatchWorkbenchRead(body: Record<string, unknown>, userT
     const topFiles = Array.isArray((result as { topFiles?: unknown }).topFiles)
       ? (result as { topFiles: Array<Record<string, unknown>> }).topFiles
       : []
+    const exactEvidence = Array.isArray((result as { exactEvidence?: unknown }).exactEvidence)
+      ? (result as { exactEvidence: Array<Record<string, unknown>> }).exactEvidence
+      : []
+    const exactVerification = (result as { exactVerification?: unknown }).exactVerification === true
     return withActivity(result as Record<string, unknown>, makeActivity({
       operationId: 'readWorkbenchContext',
       phase: 'completed',
       actionLabel: 'Prepared focused task context',
-      userMessage: `Prepared context with ${countLabel(topFiles.length, 'ranked file')} and ${countLabel(exactReadPlan.length, 'planned read')}.`,
+      userMessage: `Prepared context with ${countLabel(topFiles.length, 'ranked file')}, ${countLabel(exactEvidence.length, 'exact excerpt')}, and ${countLabel(exactReadPlan.length, 'remaining read')}.`,
       sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
-      readPaths: exactReadPlan.map(item => typeof item.path === 'string' ? item.path : '').filter(Boolean).slice(0, 10),
+      readPaths: [...exactEvidence, ...exactReadPlan].map(item => typeof item.path === 'string' ? item.path : '').filter(Boolean).slice(0, 10),
       targetPaths: topFiles.map(item => typeof item.path === 'string' ? item.path : '').filter(Boolean).slice(0, 10),
       riskLevel: 'low',
       requiresConfirmation: false,
       verified: true,
-      nextStep: exactReadPlan.length > 0 ? 'Read the planned paths before editing.' : 'Refine the task query or provide exact paths.'
+      nextStep: exactVerification
+        ? 'Use the returned exact-source evidence to answer; request a focused read only if it is insufficient.'
+        : exactReadPlan.length > 0 ? 'Read only the remaining planned paths before editing.' : 'Refine the task query or provide exact paths.'
     }))
   }
   throw new Error('Invalid mode')

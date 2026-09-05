@@ -18,6 +18,9 @@ export type AgentEventType =
   | 'job_started'
   | 'control_requested'
   | 'preflight_started'
+  | 'result_persisting'
+  | 'response_completed'
+  | 'read_recovered'
   | 'command_started'
   | 'command_completed'
   | 'command_failed'
@@ -27,6 +30,7 @@ export type AgentEventType =
   | 'job_blocked'
   | 'job_failed'
   | 'task_step_failed'
+  | 'file_read'
   | 'file_changed'
   | 'diff_ready'
   | 'approval_required'
@@ -44,6 +48,13 @@ export type AgentEventType =
   | 'packet_resumed'
   | 'packet_cancelled'
   | 'packet_lease_renewed'
+  | 'server_started'
+  | 'server_reused'
+  | 'server_ready'
+  | 'server_crashed'
+  | 'server_recovered'
+  | 'server_stopped'
+  | 'server_failed'
 
 export type AgentEvent = {
   id: string
@@ -90,6 +101,9 @@ const ACTIVITY_KIND_BY_EVENT_TYPE: Record<AgentEventType, WorkbenchActivityKind>
   job_started: 'run_started',
   control_requested: 'control_requested',
   preflight_started: 'run_progress',
+  result_persisting: 'run_progress',
+  response_completed: 'run_progress',
+  read_recovered: 'run_progress',
   command_started: 'executor_started',
   command_completed: 'executor_completed',
   command_failed: 'executor_failed',
@@ -99,6 +113,7 @@ const ACTIVITY_KIND_BY_EVENT_TYPE: Record<AgentEventType, WorkbenchActivityKind>
   job_blocked: 'run_blocked',
   job_failed: 'run_failed',
   task_step_failed: 'task_failed',
+  file_read: 'file_read',
   file_changed: 'file_changed',
   diff_ready: 'diff_ready',
   approval_required: 'approval_required',
@@ -115,7 +130,14 @@ const ACTIVITY_KIND_BY_EVENT_TYPE: Record<AgentEventType, WorkbenchActivityKind>
   packet_paused: 'packet_status',
   packet_resumed: 'packet_status',
   packet_cancelled: 'packet_status',
-  packet_lease_renewed: 'packet_status'
+  packet_lease_renewed: 'packet_status',
+  server_started: 'packet_status',
+  server_reused: 'packet_status',
+  server_ready: 'packet_status',
+  server_crashed: 'packet_status',
+  server_recovered: 'packet_status',
+  server_stopped: 'packet_status',
+  server_failed: 'packet_status'
 }
 
 function eventStorePath(options: AgentEventStoreOptions): string {
@@ -322,9 +344,9 @@ export function listAgentEvents(
 }
 
 export function listWorkbenchActivity(
-  params: { runId?: string; sourceId?: string; limit?: number } = {},
+  params: { runId?: string; sourceId?: string; limit?: number; afterEventId?: string } = {},
   options: AgentEventStoreOptions = {}
-): { projection: WorkbenchActivityProjection; returnedBytes: number; budgetBytes: number } {
+): { projection: WorkbenchActivityProjection; returnedBytes: number; budgetBytes: number; cursorFound: boolean } {
   const maxEvents = Math.min(MAX_ACTIVITY_EVENTS, Math.max(1, Number(params.limit || 50)))
   const store = readStore(options)
   const scoped = store.events.filter(event =>
@@ -333,8 +355,12 @@ export function listWorkbenchActivity(
   const totalAvailable = scoped.length
   const sortedScoped = [...scoped].sort(compareAgentEventsChronological)
   const startedAt = sortedScoped[0]?.createdAt
-  const selected = sortedScoped
-    .slice(-maxEvents)
+  const afterEventId = typeof params.afterEventId === 'string' && params.afterEventId.trim() ? params.afterEventId.trim() : undefined
+  const cursorIndex = afterEventId ? sortedScoped.findIndex(event => event.id === afterEventId) : -1
+  const cursorFound = afterEventId === undefined || cursorIndex >= 0
+  const selected = (cursorFound && afterEventId
+    ? sortedScoped.slice(cursorIndex + 1, cursorIndex + 1 + maxEvents)
+    : sortedScoped.slice(-maxEvents))
     .map(toActivityEntry)
   const projection: WorkbenchActivityProjection = {
     schemaVersion: WORKBENCH_ACTIVITY_LEDGER_SCHEMA_VERSION,
@@ -344,11 +370,14 @@ export function listWorkbenchActivity(
     ...(params.runId ? { runId: params.runId } : {}),
     events: selected,
     totalAvailable,
-    truncated: totalAvailable > selected.length
+    truncated: cursorFound && afterEventId
+      ? cursorIndex + 1 + selected.length < totalAvailable
+      : totalAvailable > selected.length
   }
   return {
     projection,
     returnedBytes: measureJsonPayload(projection),
-    budgetBytes: GPT_ACTION_TARGET_BYTES
+    budgetBytes: GPT_ACTION_TARGET_BYTES,
+    cursorFound
   }
 }

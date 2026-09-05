@@ -51,6 +51,7 @@ export async function POST(request: NextRequest) {
     const diff = await dispatchWorkbenchCommand({ version: 2, sessionId, command: { sourceId, commandKind: 'git_diff_stat', timeoutMs: 2000 } }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(2500),
+      requestId: `${deadline.requestId}:diff`,
       diagnostics: deadline.diagnostics({ phase: 'git_diff_stat', sourceId, paths })
     }) as Record<string, unknown>
     if ((diff as { exitCode?: number }).exitCode !== 0) {
@@ -62,6 +63,7 @@ export async function POST(request: NextRequest) {
     const add = await dispatchWorkbenchCommand({ version: 2, sessionId, command: { sourceId, commandKind: 'git_add_paths', paths, confirmedByUser, confirmationToken, timeoutMs: 2500 } }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(3000),
+      requestId: `${deadline.requestId}:add`,
       diagnostics: deadline.diagnostics({ phase: 'git_add_paths', sourceId, paths })
     }) as Record<string, unknown>
     if ((add as { exitCode?: number }).exitCode !== 0) {
@@ -73,6 +75,7 @@ export async function POST(request: NextRequest) {
       return await dispatchWorkbenchCommand({ version: 2, sessionId, command: { sourceId, commandKind: 'git_commit', paths, message, confirmedByUser, confirmationToken, timeoutMs: 4500 } }, auth.bearerToken, {
         signal: deadline.signal,
         timeoutMs: deadline.transportTimeoutMs(5000),
+        requestId: `${deadline.requestId}:commit`,
         diagnostics: deadline.diagnostics({ phase: 'git_commit', sourceId, paths })
       }) as Record<string, unknown>
     })

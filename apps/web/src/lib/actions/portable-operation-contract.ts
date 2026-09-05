@@ -16,7 +16,9 @@ export const WORKBENCH_OPERATION_IDS = {
 } as const
 
 export const WORKBENCH_PRIVATE_OPERATION_IDS = {
-  manageWorkbenchApprovalIntent: 'manageWorkbenchApprovalIntent'
+  manageWorkbenchApprovalIntent: 'manageWorkbenchApprovalIntent',
+  discoverRepositories: 'discoverRepositories',
+  setSourceDiscoverySettings: 'setSourceDiscoverySettings'
 } as const
 
 export type WorkbenchOperationId =
@@ -39,7 +41,9 @@ export const WORKBENCH_OPERATION_MUTATION_CLASS: Record<WorkbenchOperationId, Wo
   refreshSourceMetadata: 'mutation_capable',
   addBranchSource: 'mutation_capable',
   registerExistingWorktree: 'mutation_capable',
-  removeBranchSource: 'mutation_capable'
+  removeBranchSource: 'mutation_capable',
+  discoverRepositories: 'read_only',
+  setSourceDiscoverySettings: 'mutation_capable'
 }
 
 export interface WorkbenchOperationRequest<TPayload = unknown> {

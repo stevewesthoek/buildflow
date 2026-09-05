@@ -168,11 +168,23 @@ function ensureSchemaRules(schema) {
   }
   assert(!schemaText.includes('/api/actions/agent/'), 'Schema must not expose agent-mode action routes')
 
+  const statusOp = ops.find(op => op.operationId === 'getWorkbenchStatus')
+  const statusDescription = `${statusOp?.summary || ''} ${statusOp?.description || ''}`.toLowerCase()
+  for (const phrase of ['resume', 'continue', 'current state', 'read-only', 'does not start', 'include=active']) {
+    assert(statusDescription.includes(phrase), `getWorkbenchStatus schema must explicitly guide ${phrase} routing`)
+  }
+
   const readContext = ops.find(op => op.operationId === 'readWorkbenchContext')
   const readSchema = readContext?.requestBody?.content?.['application/json']?.schema
   const readProps = readSchema?.properties || {}
   const modes = readProps.mode?.enum || []
-  assert(readProps.mode?.description === 'Mode determines operation. Use graph_context for unknown areas; use exact read modes for known paths or symbols. Persistent workflow continuation is handled through supported Workbench lifecycle mechanisms, not through context reads.', 'readWorkbenchContext mode description must use lifecycle wording')
+  assert(readProps.mode?.description === 'Mode: prefer prepare_task_context for ordinary exploratory or multi-file work; it returns navigationEvidence and exactEvidence in one bounded packet. Use graph_context for explicit structure, exact modes for known paths/symbols. Persistent workflows use Workbench lifecycle.', 'readWorkbenchContext mode description must use lifecycle wording')
+  const instructionsText = fs.readFileSync(path.join(ROOT, 'docs/CUSTOM_GPT_INSTRUCTIONS.md'), 'utf8')
+  assert(instructionsText.includes('supported read-only session bootstrap'), 'Custom GPT instructions must document the bounded session bootstrap')
+  assert(instructionsText.includes('workbenchRun.sessionId'), 'Custom GPT instructions must require the returned Workbench session ID')
+  for (const phrase of ['Deterministic Resume Routing (MANDATORY)', 'MUST be exactly one', 'read-only `getWorkbenchStatus` call', 'include=active', 'chat history']) {
+    assert(instructionsText.includes(phrase), `Custom GPT instructions must contain deterministic resume rule: ${phrase}`)
+  }
   for (const mode of ['grep_context', 'read_range', 'read_symbol']) {
     assert(modes.includes(mode), `readWorkbenchContext schema missing focused mode: ${mode}`)
   }
@@ -196,6 +208,16 @@ function ensureSchemaRules(schema) {
   assert((envelopeSchema.required || []).includes('command'), 'runWorkbenchCommand must require nested command')
   assert(envelopeProps.version?.enum?.length === 1 && envelopeProps.version.enum[0] === 2, 'runWorkbenchCommand envelope version must be exactly 2')
   assert(commandProps.timeoutMs?.maximum <= 12000, 'runWorkbenchCommand timeoutMs must be capped at 12000')
+  assert(['submit', 'status', 'cancel', 'evidence'].every(operation => (commandProps.validationJobOperation?.enum || []).includes(operation)), 'validation job operation contract must expose submit, status, cancel, and evidence')
+  assert((commandProps.commandKind?.enum || []).includes('read_evidence'), 'runWorkbenchCommand must expose the bounded read_evidence selector')
+  assert(commandProps.evidenceId?.description?.includes('not a bearer credential'), 'evidenceId must not be documented as a bearer credential')
+  assert(commandProps.evidenceOwner?.additionalProperties === false, 'evidenceOwner must be strict')
+  assert(commandProps.evidencePageBytes?.maximum <= 4000, 'evidence pages must be capped at 4000 bytes')
+  assert(/redacted/i.test(commandProps.evidencePageBytes?.description || ''), 'evidence pages must document current redaction')
+  assert(commandProps.validationJobId?.description?.includes('resultRef'), 'validationJobId must document its durable resultRef role')
+  assert(commandProps.resultStream?.enum?.includes('stdout') && commandProps.resultStream?.enum?.includes('stderr'), 'validation result streams must be stdout or stderr')
+  assert(commandProps.resultPageBytes?.maximum <= 4000, 'validation result pages must be capped at 4000 bytes')
+  assert(/opaque/i.test(commandProps.resultCursor?.description || ''), 'validation result cursor must be documented as opaque')
   assert((commandProps.commandKind?.enum || []).includes('n8n_workflow_export'), 'Generated schema must expose n8n_workflow_export')
   assert((commandProps.commandKind?.enum || []).includes('n8n_workflow_migration'), 'Generated schema must expose n8n_workflow_migration')
   assert(commandProps.workflowId, 'Generated schema must expose workflowId')
@@ -206,8 +228,9 @@ function ensureSchemaRules(schema) {
     assert(sourceDescription.includes(required), `runWorkbenchCommand sourceId guidance missing ${required}`)
   }
   assert(!Object.prototype.hasOwnProperty.call(commandContent || {}, 'examples'), 'Generated schema must not expose command examples')
-  assert(Array.isArray(commandProps.migration?.oneOf) && commandProps.migration.oneOf.length === 3, 'Generated schema must expose strict prepare, execute, and status migration schemas')
-  const migrationPhaseProperties = commandProps.migration.oneOf.flatMap(phase => Object.keys(phase.properties || {}))
+  assert(commandProps.migration?.type === 'object' && commandProps.migration?.additionalProperties === false, 'Generated schema must expose an importer-safe strict migration object')
+  assert(!['oneOf', 'anyOf', 'allOf'].some(keyword => Object.hasOwn(commandProps.migration || {}, keyword)), 'Generated schema must not hide migration fields behind schema composition')
+  const migrationPhaseProperties = Object.keys(commandProps.migration?.properties || {})
   for (const forbidden of ['executable', 'args', 'shell', 'environment', 'wrapperOperation', 'confirmationDigest', 'dispatchAuthorization', 'leaseProof', 'credential']) {
     assert(!migrationPhaseProperties.includes(forbidden), `Migration schema must not expose ${forbidden}`)
   }
@@ -314,6 +337,8 @@ function ensureSourceDeadlineLayer() {
   const runCommandText = fs.readFileSync(files.runCommand, 'utf8')
   assert(runCommandText.includes('commandTimeoutMs'), 'run-command route must clamp GPT command timeouts')
   assert(runCommandText.includes('sourceSelectionRequired(body.sourceId)'), 'run-command route must reject placeholder source IDs before dispatch')
+  assert(runCommandText.includes('evidenceRefs: clean.evidenceRefs ?? job?.evidenceRefs'), 'run-command route must project canonical evidence metadata')
+  assert(runCommandText.includes("'evidenceRefs', 'evidenceUnavailable'"), 'run-command minimal response must preserve evidence availability metadata')
   assert(runCommandText.includes("code: 'SOURCE_SELECTION_REQUIRED'" ) || fs.readFileSync(files.gptActions, 'utf8').includes("code: 'SOURCE_SELECTION_REQUIRED'"), 'Source-selection rejection must expose the canonical error code')
   const gptActionsText = fs.readFileSync(files.gptActions, 'utf8')
   for (const placeholder of ["'default'", "'workspace'", "'current'", "'repo'"]) {
@@ -326,6 +351,11 @@ function ensureSourceDeadlineLayer() {
     JSON.stringify(readJson(files.canonicalSchema)) === JSON.stringify(readJson(DOCS_SCHEMA_FILE)),
     'Checked-in OpenAPI docs artifact must match the canonical schema artifact'
   )
+  const canonicalSchema = readJson(files.canonicalSchema)
+  const readContextDescription = canonicalSchema.paths?.['/api/actions/read-context']?.post?.description || ''
+  const readModeDescription = canonicalSchema.paths?.['/api/actions/read-context']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.mode?.description || ''
+  assert(readContextDescription.toLowerCase().includes('prefer prepare_task_context'), 'OpenAPI must prefer prepare_task_context for ordinary exploratory work')
+  assert(readModeDescription.includes('exactEvidence'), 'OpenAPI must describe the separate exact evidence packet')
   for (const required of ['sessionId']) {
     assert(canonicalSchemaText.includes(required), `Canonical OpenAPI schema must include ${required}`)
   }
@@ -379,6 +409,8 @@ function ensureActionBudgetAndTimeoutLanguage() {
   assert(text.includes('Use the smallest safe mode'), 'Instructions must preserve bounded mode guidance')
   assert(text.includes('Stop when:'), 'Instructions must define Goal Mode stop conditions')
   assert(text.includes('loop indefinitely'), 'Instructions must prohibit unbounded continuation')
+  assert(text.includes('prefer one bounded `prepare_task_context` call'), 'Instructions must prefer one bounded task-context call for exploratory repository work')
+  assert(text.includes('exactEvidence'), 'Instructions must distinguish exact-source evidence from navigation evidence')
   assert(/fail fast|deadline|timeout/i.test(text), 'Instructions must include fail-fast, deadline, or timeout language')
 
   const deadlineText = fs.readFileSync(path.join(ROOT, 'apps/web/src/lib/actions/deadline.ts'), 'utf8')
@@ -391,6 +423,7 @@ function ensureFocusedModeGuardrails() {
   assert(readContextText.includes('boundedInt(body.maxBytesPerFile'), 'read-context must clamp maxBytesPerFile with boundedInt')
   assert(readContextText.includes('needsNarrowerScope'), 'read-context must enforce needsNarrowerScope guardrail')
   assert(readContextText.includes("mode === 'graph_context'"), 'read-context must expose graph_context as a bounded read mode')
+  assert(readContextText.includes('PREPARED_CONTEXT_RESPONSE_BUDGET_BYTES'), 'read-context must enforce the bounded preparation packet budget')
 
   const graphContextFile = path.join(ROOT, 'packages/cli/src/agent/graph-context.ts')
   assert(fs.existsSync(graphContextFile), 'graph-context helper must exist')
@@ -490,7 +523,7 @@ function ensureWorkbenchRunModel() {
   const schema = readJson(DOCS_SCHEMA_FILE)
   const readSchema = schema.paths?.['/api/actions/read-context']?.post?.requestBody?.content?.['application/json']?.schema
   const modes = readSchema?.properties?.mode?.enum || []
-  assert(!modes.includes('active_run'), 'OpenAPI schema must not expose active_run')
+  assert(!modes.includes('active_run'), 'OpenAPI schema must not expose internal active_run')
 
   for (const required of ['createWorkbenchRun', 'resumeWorkbenchRun']) {
     assert(modelText.includes(required), `Workbench run model must include ${required}`)

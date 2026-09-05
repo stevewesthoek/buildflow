@@ -79,9 +79,8 @@ function countStatusEntries(output: string): { trackedChangedFileCount: number; 
   let trackedChangedFileCount = 0
   let untrackedFileCount = 0
   for (const entry of output.split('\0')) {
-    if (!entry || entry.length < 3 || entry[2] !== ' ') continue
-    if (entry.slice(0, 2) === '??') untrackedFileCount += 1
-    else trackedChangedFileCount += 1
+    if (entry.startsWith('? ')) untrackedFileCount += 1
+    else if (/^(?:1|2|u) /.test(entry)) trackedChangedFileCount += 1
   }
   return { trackedChangedFileCount, untrackedFileCount }
 }
@@ -131,20 +130,20 @@ function observeGit(source: KnowledgeSource): GitObservation | undefined {
     return undefined
   }
 
-  const inside = runGit(sourcePath, ['rev-parse', '--is-inside-work-tree'])
-  if (!inside.ok || inside.output.trim() !== 'true') return undefined
   const root = runGit(sourcePath, ['rev-parse', '--show-toplevel'])
-  const revision = runGit(sourcePath, ['rev-parse', 'HEAD'])
-  const branch = runGit(sourcePath, ['branch', '--show-current'])
-  const status = runGit(sourcePath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-  if (!root.ok || !revision.ok || !branch.ok || !status.ok || !revision.output) return undefined
+  const status = runGit(sourcePath, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--branch'])
+  if (!root.ok || !status.ok) return undefined
+
+  const records = status.output.split('\0')
+  const branchName = records.find(record => record.startsWith('# branch.head '))?.slice('# branch.head '.length).trim()
+  const observedRevision = records.find(record => record.startsWith('# branch.oid '))?.slice('# branch.oid '.length).trim()
+  if (!observedRevision || observedRevision === '(initial)') return undefined
 
   const canonicalRepositoryPath = candidateCanonicalPath(root.output.trim())
-  const observedRevision = revision.output.trim()
-  const counts = countStatusEntries(status.output)
+  const counts = countStatusEntries(records.join('\0'))
   return {
     canonicalRepositoryPath,
-    branchName: branch.output.trim() || undefined,
+    branchName: branchName && branchName !== '(detached)' ? branchName : undefined,
     observedRevision,
     gitStatus: counts.trackedChangedFileCount + counts.untrackedFileCount > 0 ? 'dirty' : 'clean',
     ...counts

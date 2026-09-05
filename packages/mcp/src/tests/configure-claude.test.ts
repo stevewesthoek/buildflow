@@ -8,6 +8,7 @@ import { configureClaude, inspectClaudeRegistration, probeProcessName } from '..
 import {
   BRAIN_PROFILE_ALLOWED_TOOLS,
   BRAIN_PROFILE_ALLOWED_COMMAND_KINDS,
+  BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS,
   PROFILE_AVAILABILITY
 } from '../configure-core.js'
 import { installWorkbenchOwnerConfig } from '@workbench/shared/workbench-owner-config'
@@ -278,6 +279,7 @@ test('configures brain profile with guarded scope restrictions', () => {
   assert.ok(env.WORKBENCH_MCP_CREDENTIAL_FILE)
   assert.equal(env.WORKBENCH_MCP_ALLOWED_TOOLS, BRAIN_PROFILE_ALLOWED_TOOLS)
   assert.equal(env.WORKBENCH_MCP_ALLOWED_COMMAND_KINDS, BRAIN_PROFILE_ALLOWED_COMMAND_KINDS)
+  assert.equal(env.WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS, BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS)
   fs.rmSync(item.root, { recursive: true })
 })
 

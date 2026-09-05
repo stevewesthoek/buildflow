@@ -3,7 +3,12 @@ import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
 import { evaluateResumeWorkflow } from './resume-workflow'
-import { appendAgentEvent } from './agent-events'
+import { appendAgentEvent, listAgentEvents } from './agent-events'
+import {
+  assessWorkbenchRunLiveness,
+  isReconciledStaleWorkbenchRun,
+  WORKBENCH_STALE_RUN_REASON
+} from './workbench-run-lifecycle'
 import { synchronizeWorkbenchRunSession, workbenchSessionIdForRun } from './workbench-run-session'
 import {
   createRunExecutionBudget,
@@ -18,8 +23,12 @@ import {
   type RunExecutionBudget,
   type RunExecutionBudgetLimits
 } from './run-budget'
+import { normalizeCompiledRunPlan, type CompiledRunPlan } from './roadmap-to-run-plan'
+import { buildResumeProjection, isResumeProjectionFresh, type ResumeProjection } from './resume-projection'
+import { buildHandoffProjection, classifyHandoffTransition, type HandoffProjection } from './handoff-projection'
 
 export const WORKBENCH_RUN_SCHEMA_VERSION = 1 as const
+const COMPLETED_RUN_PROJECTION_RETENTION_MS = 10 * 60 * 1000
 
 export type AgentJobStatus = 'queued' | 'running' | 'paused' | 'cancelled' | 'needs_confirmation' | 'blocked' | 'completed' | 'failed'
 export type AgentJobMode = 'repo_agent'
@@ -88,6 +97,7 @@ export type AgentJob = {
   runVersion: typeof WORKBENCH_RUN_SCHEMA_VERSION
   id: string
   sourceId: string
+  originRequestId?: string
   goal: string
   mode: AgentJobMode
   planVersion: number
@@ -122,6 +132,12 @@ export type AgentJob = {
   resumeInstructions: string[]
   fallbackPrompt?: string
   lastKnownGitStatus?: string
+  /** Persisted deterministic roadmap-to-run compilation for restart-safe continuation. */
+  compiledPlan?: CompiledRunPlan
+  /** Persisted compact continuation capsule; rebuilt on lifecycle transitions or explicit resume. */
+  resumeProjection?: ResumeProjection
+  /** Last meaningful transition rendered through the existing handoff projection. */
+  handoffProjection?: HandoffProjection
 }
 
 export type CompactProgress = {
@@ -192,6 +208,17 @@ export type CompactAgentJob = Pick<
     completedTasks: number
     totalTasks: number
   }>
+  compiledPlan?: {
+    planId: string
+    planDigest: string
+    status: CompiledRunPlan['status']
+    currentTaskId?: string
+    currentPacketId?: string
+    packetCount: number
+    schedulerReadyPacketCount: number
+    gateKinds: string[]
+    stopKinds: string[]
+  }
   compactStatus: CompactStatusProjection
 }
 
@@ -410,6 +437,7 @@ function coerceJob(raw: unknown): AgentJob | null {
     runVersion: WORKBENCH_RUN_SCHEMA_VERSION,
     id: String(item.id),
     sourceId: String(item.sourceId),
+    originRequestId: typeof item.originRequestId === 'string' ? item.originRequestId : undefined,
     goal: String(item.goal),
     mode: 'repo_agent',
     planVersion: Math.max(1, Number(item.planVersion || 1)),
@@ -460,7 +488,10 @@ function coerceJob(raw: unknown): AgentJob | null {
         ? item.resumeInstructions
         : buildResumeInstructions(documentationPath),
     fallbackPrompt: item.fallbackPrompt,
-    lastKnownGitStatus: item.lastKnownGitStatus
+    lastKnownGitStatus: item.lastKnownGitStatus,
+    compiledPlan: normalizeCompiledRunPlan(item.compiledPlan),
+    resumeProjection: item.resumeProjection && typeof item.resumeProjection === 'object' ? item.resumeProjection as ResumeProjection : undefined,
+    handoffProjection: item.handoffProjection && typeof item.handoffProjection === 'object' ? item.handoffProjection as HandoffProjection : undefined
   }
 }
 
@@ -576,7 +607,7 @@ function buildFallbackPrompt(job: Pick<AgentJob, 'sourceId' | 'goal' | 'document
 
 loadJobsFromDisk()
 
-export function startAgentJob(params: { sourceId: string; goal: string; maxIterations?: number; autonomyLevel?: AgentAutonomyLevel; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean; executionBudget?: RunExecutionBudgetLimits }): AgentJob {
+export function startAgentJob(params: { sourceId: string; goal: string; requestId?: string; maxIterations?: number; autonomyLevel?: AgentAutonomyLevel; documentationPath?: string; reviewEveryStep?: boolean; autoCommit?: boolean; autoPush?: boolean; executionBudget?: RunExecutionBudgetLimits }): AgentJob {
   const sourceId = String(params.sourceId || '').trim()
   if (!sourceId) throw new Error('sourceId is required')
   const goal = sanitizeGoal(params.goal)
@@ -591,6 +622,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     runVersion: WORKBENCH_RUN_SCHEMA_VERSION,
     id: `agent-${crypto.randomUUID()}`,
     sourceId,
+    originRequestId: params.requestId,
     goal,
     mode: 'repo_agent',
     planVersion: 1,
@@ -632,6 +664,7 @@ export function startAgentJob(params: { sourceId: string; goal: string; maxItera
     handoffPath: documentationPath,
     resumeInstructions
   }
+  job.resumeProjection = buildResumeProjection({ run: job })
   persistJobTransition(undefined, job)
   return job
 }
@@ -663,6 +696,7 @@ export type AgentJobUpdate = Partial<Pick<AgentJob,
   | 'metrics'
 >> & {
   executionBudget?: RunExecutionBudgetLimits
+  compiledPlan?: CompiledRunPlan | null
 }
 
 export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
@@ -707,9 +741,14 @@ export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
   const budgetReason = executionBudget.exhausted && executionBudget.reasonCode
     ? `Run budget exhausted: ${executionBudget.reasonCode}`
     : undefined
+  const compiledPlan = patch.compiledPlan === null
+    ? undefined
+    : normalizeCompiledRunPlan(patch.compiledPlan || job.compiledPlan)
+  const patchWithoutCompiledPlan = { ...patch }
+  delete patchWithoutCompiledPlan.compiledPlan
   const base: AgentJob = {
     ...job,
-    ...patch,
+    ...patchWithoutCompiledPlan,
     runVersion: WORKBENCH_RUN_SCHEMA_VERSION,
     planVersion: Math.max(job.planVersion, Number(patch.planVersion || job.planVersion)),
     completedPacketIds,
@@ -731,15 +770,38 @@ export function updateAgentJob(jobId: string, patch: AgentJobUpdate): AgentJob {
           : buildLoopNextActions(job.documentationPath, roadmapPhases, activeTaskId),
     updatedAt,
     resumeInstructions,
-    handoffPath: job.handoffPath || job.documentationPath
+    handoffPath: job.handoffPath || job.documentationPath,
+    compiledPlan
   }
   const shouldRefreshFallback = base.status === 'blocked' || base.status === 'failed' || base.status === 'needs_confirmation' || Boolean(base.blockedReason || base.confirmationReason)
   const updated: AgentJob = {
     ...base,
     fallbackPrompt: shouldRefreshFallback ? buildFallbackPrompt(base) : base.fallbackPrompt
   }
-  persistJobTransition(job, updated)
-  return updated
+  const resumeProjection = buildResumeProjection({ run: updated })
+  const transition = classifyHandoffTransition(job.resumeProjection, resumeProjection)
+  const updatedWithContinuity: AgentJob = {
+    ...updated,
+    resumeProjection,
+    ...(transition
+      ? { handoffProjection: buildHandoffProjection({ transition, projection: resumeProjection }) }
+      : job.handoffProjection
+        ? { handoffProjection: job.handoffProjection }
+        : {})
+  }
+  persistJobTransition(job, updatedWithContinuity)
+  return updatedWithContinuity
+}
+
+function persistResumeProjectionRepair(run: AgentJob, projection: ResumeProjection): AgentJob {
+  const transition = classifyHandoffTransition(run.resumeProjection, projection)
+  const repaired: AgentJob = {
+    ...run,
+    resumeProjection: projection,
+    ...(transition ? { handoffProjection: buildHandoffProjection({ transition, projection }) } : {})
+  }
+  persistJobTransition(run, repaired)
+  return repaired
 }
 
 export type WorkbenchRunBudgetDecision = {
@@ -1094,6 +1156,17 @@ export function compactAgentJob(job: AgentJob): CompactAgentJob {
       completedTasks: phase.tasks.filter(task => task.status === 'completed' || task.status === 'skipped').length,
       totalTasks: phase.tasks.length
     })),
+    compiledPlan: job.compiledPlan ? {
+      planId: job.compiledPlan.planId,
+      planDigest: job.compiledPlan.planDigest,
+      status: job.compiledPlan.status,
+      currentTaskId: job.compiledPlan.currentTaskId,
+      currentPacketId: job.compiledPlan.currentPacketId,
+      packetCount: job.compiledPlan.evidence.packetCount,
+      schedulerReadyPacketCount: job.compiledPlan.evidence.schedulerReadyPacketCount,
+      gateKinds: job.compiledPlan.evidence.gateKinds.slice(0, 8),
+      stopKinds: job.compiledPlan.evidence.stopKinds.slice(0, 8)
+    } : undefined,
     compactStatus: buildCompactStatusProjection(job)
   }
 }
@@ -1150,17 +1223,26 @@ export function controlAgentJob(jobId: string, action: AgentJobControlAction, re
 export function getActiveWorkbenchRun(sourceId: string): Record<string, unknown> | undefined {
   const normalizedSourceId = String(sourceId || '').trim()
   if (!normalizedSourceId) return undefined
-  const active = listAgentJobs().find(job =>
+  const sourceJobs = listAgentJobs().filter(job => job.sourceId === normalizedSourceId)
+  const candidates = sourceJobs.filter(job =>
     job.sourceId === normalizedSourceId && !['completed', 'failed', 'cancelled'].includes(job.status)
   )
+  const reconciled = candidates.map(job => reconcileStaleWorkbenchRun(job))
+  const active = reconciled.find(job => ['queued', 'running', 'needs_confirmation'].includes(job.status))
+    || reconciled[0]
+    || sourceJobs.find(job => job.status === 'completed' && Date.now() - Date.parse(job.updatedAt) <= COMPLETED_RUN_PROJECTION_RETENTION_MS)
   if (!active) return undefined
   requireWorkbenchRunSession(active)
   const compact = compactAgentJob(active)
+  const resumeProjection = active.resumeProjection && isResumeProjectionFresh(active.resumeProjection, { run: active })
+    ? active.resumeProjection
+    : buildResumeProjection({ run: active })
   return {
     runVersion: active.runVersion,
     id: active.id,
     sessionId: workbenchSessionIdForRun(active.id),
     sourceId: active.sourceId,
+    originRequestId: active.originRequestId,
     goal: compactText(active.goal, 500),
     status: active.status,
     planVersion: active.planVersion,
@@ -1178,13 +1260,129 @@ export function getActiveWorkbenchRun(sourceId: string): Record<string, unknown>
     roadmapSummary: compact.roadmapSummary,
     completedTaskCount: compact.completedTaskCount,
     totalTaskCount: compact.totalTaskCount,
+    compiledPlan: compact.compiledPlan,
     summary: compact.summary,
     nextActions: compact.nextActions,
     handoffPath: compact.handoffPath,
     requiresConfirmation: compact.requiresConfirmation,
     confirmationReason: compact.confirmationReason,
     blockedReason: compact.blockedReason,
+    resumeProjection,
+    ...(active.handoffProjection ? { handoffProjection: active.handoffProjection } : {}),
     updatedAt: active.updatedAt
+  }
+}
+
+/** Resolve every non-terminal run from one persisted job-store read. */
+export function listActiveWorkbenchRuns(): Array<Record<string, unknown> & { sourceId: string; status: string }> {
+  return listAgentJobs()
+    .filter(job => ['queued', 'running', 'needs_confirmation', 'blocked'].includes(job.status))
+    .map(job => {
+      const active = reconcileStaleWorkbenchRun(job)
+      requireWorkbenchRunSession(active)
+      const compact = compactAgentJob(active)
+      const resumeProjection = active.resumeProjection && isResumeProjectionFresh(active.resumeProjection, { run: active })
+        ? active.resumeProjection
+        : buildResumeProjection({ run: active })
+      return {
+        runVersion: active.runVersion,
+        id: active.id,
+        sessionId: workbenchSessionIdForRun(active.id),
+        sourceId: active.sourceId,
+        originRequestId: active.originRequestId,
+        goal: compactText(active.goal, 500),
+        status: active.status,
+        summary: compact.summary,
+        nextActions: compact.nextActions,
+        requiresConfirmation: compact.requiresConfirmation,
+        confirmationReason: compact.confirmationReason,
+        blockedReason: compact.blockedReason,
+        activeTask: compact.activeTask,
+        resumeProjection,
+        updatedAt: active.updatedAt
+      }
+    })
+}
+
+export function reconcileStaleWorkbenchRun(job: AgentJob, now = new Date()): AgentJob {
+  if (job.status !== 'running' && job.status !== 'queued') return job
+  const latestEvent = listAgentEvents({ jobId: job.id, limit: 1 }).events[0]?.createdAt
+  const assessment = assessWorkbenchRunLiveness({
+    status: job.status,
+    updatedAt: job.updatedAt,
+    lastEventAt: latestEvent,
+    now: now.toISOString()
+  })
+  if (!assessment.stale) return job
+
+  const reason = `${WORKBENCH_STALE_RUN_REASON}: last activity ${assessment.lastSignalAt}`
+  const paused = updateAgentJob(job.id, {
+    status: 'paused',
+    blockedReason: reason,
+    summary: 'Run paused because no recent lifecycle activity or executor heartbeat was recorded. Review the activity ledger before resuming.',
+    nextActions: ['Review the last activity event and executor availability.', 'Resume only after confirming the intended task and source.']
+  })
+  appendAgentEvent({
+    jobId: paused.id,
+    sourceId: paused.sourceId,
+    type: 'job_paused',
+    activityKind: 'run_progress',
+    message: 'Run paused after stale lifecycle activity was reconciled; executor state is unknown.',
+    status: paused.status,
+    requestId: paused.originRequestId
+  })
+  return paused
+}
+
+export type WorkbenchActionRunBinding = {
+  runId: string
+  sessionId: string
+  sourceId: string
+  status: string
+  goal: string
+  created: boolean
+}
+
+export function ensureWorkbenchActionRun(params: { sourceId: string; goal: string; requestId?: string }): WorkbenchActionRunBinding {
+  const sourceId = String(params.sourceId || '').trim()
+  const goal = sanitizeGoal(params.goal)
+  if (!sourceId) throw new Error('sourceId is required')
+
+  let active = getActiveWorkbenchRun(sourceId)
+  if (!active || ['completed', 'failed', 'cancelled'].includes(String(active.status)) || isReconciledStaleWorkbenchRun(active as { status: string; blockedReason?: string })) {
+    const result = createWorkbenchRun({
+      sourceId,
+      goal,
+      requestId: params.requestId,
+      maxIterations: 1,
+      autoCommit: false,
+      autoPush: false,
+      autonomyLevel: 'hands_off_safe'
+    })
+    active = getActiveWorkbenchRun(sourceId) || {
+      id: result.run.id,
+      sessionId: workbenchSessionIdForRun(result.run.id),
+      sourceId,
+      status: result.run.status,
+      goal: result.run.goal
+    }
+    return {
+      runId: String(active.id),
+      sessionId: String(active.sessionId || workbenchSessionIdForRun(String(active.id))),
+      sourceId,
+      status: String(active.status || result.run.status),
+      goal: String(active.goal || goal),
+      created: result.created
+    }
+  }
+
+  return {
+    runId: String(active.id),
+    sessionId: String(active.sessionId || workbenchSessionIdForRun(String(active.id))),
+    sourceId,
+    status: String(active.status),
+    goal: String(active.goal || goal),
+    created: false
   }
 }
 
@@ -1194,9 +1392,15 @@ export function getActiveWorkbenchRun(sourceId: string): Record<string, unknown>
 export function createWorkbenchRun(params: Parameters<typeof startAgentJob>[0]): { run: AgentJob; created: boolean } {
   const sourceId = String(params.sourceId || '').trim()
   if (!sourceId) throw new Error('sourceId is required')
-  const existing = listAgentJobs().find(job =>
+  let existing = listAgentJobs().find(job =>
     job.sourceId === sourceId && !['completed', 'failed', 'cancelled'].includes(job.status)
   )
+  if (existing) existing = reconcileStaleWorkbenchRun(existing)
+  if (existing) {
+    if (isReconciledStaleWorkbenchRun(existing)) {
+      existing = undefined
+    }
+  }
   if (existing) {
     if (existing.goal.trim() === String(params.goal || '').trim()) {
       requireWorkbenchRunSession(existing)
@@ -1235,7 +1439,9 @@ export function resumeWorkbenchRun(params: { sourceId: string; runId?: string })
   }
   if (run.status === 'running') {
     requireWorkbenchRunSession(run)
-    return run
+    return run.resumeProjection && isResumeProjectionFresh(run.resumeProjection, { run })
+      ? run
+      : persistResumeProjectionRepair(run, decision.projection || buildResumeProjection({ run }))
   }
   if (resumeCandidate?.executionBudget) persistRunBudgetState(run, resumeCandidate.executionBudget)
   return updateAgentJob(run.id, {

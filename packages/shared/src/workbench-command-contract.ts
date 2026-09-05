@@ -1,5 +1,10 @@
 import { z } from 'zod'
 import { controlledWorkflowCanonicalizationVersionSchema } from './controlled-workflow-topology'
+import {
+  WORKBENCH_EVIDENCE_PAGE_MAX_BYTES,
+  WorkbenchEvidenceReadOwnerSchema,
+  workbenchEvidenceIdSchema
+} from './workbench-evidence'
 
 export const RUN_WORKBENCH_DIRECT_COMMAND_KINDS = [
   'git_status_short',
@@ -54,6 +59,10 @@ const optionalPathListSchema = z.array(repoPathSchema).max(50)
 const protectedPathListSchema = z.array(repoPathSchema).max(50)
 const timeoutMsSchema = z.number().int().min(1000).max(12000)
 const validationTimeoutMsSchema = z.number().int().min(1000).max(900000)
+const validationResultCursorSchema = z.string().min(1).max(2000)
+const validationResultPageBytesSchema = z.number().int().min(256).max(4000)
+const validationResultStreamSchema = z.enum(['stdout', 'stderr'])
+const validationCancelReasonSchema = z.string().trim().min(1).max(500)
 const confirmationTokenSchema = z.string().min(1).max(4096)
 const argsSchema = z.array(z.string().min(1).max(500)).max(100)
 const packageDirSchema = repoPathSchema.max(500)
@@ -236,11 +245,36 @@ export const validationJobStatusRequestSchema = z.object({
   commandKind: z.enum(PERSISTED_VALIDATION_COMMAND_KINDS),
   validationJobOperation: z.literal('status'),
   validationJobId: shortIdSchema,
+  timeoutMs: timeoutMsSchema.optional(),
+  resultStream: validationResultStreamSchema.optional(),
+  resultCursor: validationResultCursorSchema.optional(),
+  resultPageBytes: validationResultPageBytesSchema.optional()
+}).strict()
+
+export const workbenchEvidenceReadRequestSchema = z.object({
+  sourceId: workbenchSourceIdSchema,
+  commandKind: z.literal('read_evidence'),
+  validationJobOperation: z.literal('evidence'),
+  evidenceId: workbenchEvidenceIdSchema,
+  evidenceOwner: WorkbenchEvidenceReadOwnerSchema.optional(),
+  evidenceCursor: z.string().min(1).max(2000).optional(),
+  evidencePageBytes: z.number().int().min(256).max(WORKBENCH_EVIDENCE_PAGE_MAX_BYTES).optional(),
+  timeoutMs: timeoutMsSchema.optional()
+}).strict()
+
+export const validationJobCancelRequestSchema = z.object({
+  sourceId: workbenchSourceIdSchema,
+  commandKind: z.enum(PERSISTED_VALIDATION_COMMAND_KINDS),
+  validationJobOperation: z.literal('cancel'),
+  validationJobId: shortIdSchema,
+  cancelReason: validationCancelReasonSchema.optional(),
   timeoutMs: timeoutMsSchema.optional()
 }).strict()
 
 export const runWorkbenchCommandRequestSchema = z.union([
+  workbenchEvidenceReadRequestSchema,
   validationJobStatusRequestSchema,
+  validationJobCancelRequestSchema,
   validationJobSubmitRequestSchema,
   directRunWorkbenchCommandRequestSchema
 ])

@@ -23,7 +23,7 @@ function recordWorkbenchPacketResult(
   const result = persistWorkbenchPacketResult(params)
   const packetRecord = getWorkbenchPacketRecord(result.packetId)
   for (const [validationIndex, validation] of result.validation.entries()) {
-    const evidenceRef = `${result.packetId}:validation:${validationIndex}`
+    const evidenceRef = validation.evidenceRefs?.[0]?.evidenceId || `${result.packetId}:validation:${validationIndex}`
     const kind = validation.status === 'completed' ? 'validation_completed' : 'validation_failed'
     if (hasPacketValidationActivityEvent({
       jobId: result.runId,

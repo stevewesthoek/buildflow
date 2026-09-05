@@ -26,6 +26,63 @@ const FAST_COMMAND_KINDS = new Set([
   'security_scan_paths'
 ])
 
+const COMMAND_RESPONSE_BUDGET_BYTES = 8 * 1024
+const COMMAND_OUTPUT_TAIL_BYTES = 1_800
+
+function tailUtf8(value: unknown, maxBytes = COMMAND_OUTPUT_TAIL_BYTES): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const buffer = Buffer.from(value, 'utf8')
+  if (buffer.byteLength <= maxBytes) return value
+  let start = buffer.byteLength - maxBytes
+  while (start < buffer.byteLength && (buffer[start] & 0xc0) === 0x80) start += 1
+  return buffer.subarray(start).toString('utf8')
+}
+
+function publicCommandPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const candidate: Record<string, unknown> = { ...payload }
+  let outputWasCapped = false
+  if (candidate.job && typeof candidate.job === 'object' && !Array.isArray(candidate.job)) {
+    const job = { ...(candidate.job as Record<string, unknown>) }
+    const stdout = tailUtf8(job.stdout, 1_000)
+    const stderr = tailUtf8(job.stderr, 1_000)
+    outputWasCapped = (typeof job.stdout === 'string' && job.stdout !== stdout) || (typeof job.stderr === 'string' && job.stderr !== stderr)
+    delete job.stdout
+    delete job.stderr
+    delete job.details
+    delete job.stdoutTail
+    delete job.stderrTail
+    candidate.job = job
+  }
+  // Producer responses are metadata-only. Raw command bodies are persisted as
+  // evidence and may be returned only through an explicit bounded retrieval.
+  // Keep the truncation signal so callers know output was intentionally
+  // omitted, while preserving explicit resultPage/evidencePage fields below.
+  outputWasCapped = outputWasCapped
+    || typeof candidate.stdout === 'string'
+    || typeof candidate.stderr === 'string'
+  delete candidate.stdout
+  delete candidate.stderr
+  if (outputWasCapped) candidate.outputTruncated = true
+
+  const optionalFields = ['activity', 'runtime', 'protectedPathsChanged', 'changedPaths', 'args', 'shell']
+  while (Buffer.byteLength(JSON.stringify(candidate), 'utf8') > COMMAND_RESPONSE_BUDGET_BYTES && optionalFields.length > 0) {
+    delete candidate[optionalFields.shift() as string]
+  }
+  if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= COMMAND_RESPONSE_BUDGET_BYTES) return candidate
+
+  const minimal: Record<string, unknown> = {}
+  for (const key of [
+    'ok', 'status', 'requestId', 'sourceId', 'commandKind', 'validationJobOperation', 'validationJobId', 'resultRef', 'evidenceRefs', 'evidenceUnavailable',
+    'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'exitCode', 'signal', 'durationMs', 'outputTruncated',
+    'terminationReason', 'reason', 'error', 'resultPage', 'evidenceId', 'evidencePage', 'cancellationRequested'
+  ]) {
+    if (candidate[key] !== undefined) minimal[key] = candidate[key]
+  }
+  minimal.responseTruncated = true
+  minimal.continuation = 'Use resultRef with validationJobOperation=status and resultStream/resultCursor to retrieve bounded output.'
+  return minimal
+}
+
 function commandTimeoutMs(commandKind: string, requested: unknown): number {
   const requestedMs = typeof requested === 'number' && Number.isFinite(requested) ? Math.floor(requested) : undefined
   const defaultMs = FAST_COMMAND_KINDS.has(commandKind) ? 5_000 : 8_000
@@ -126,6 +183,7 @@ export async function POST(request: NextRequest) {
     const data = await dispatchWorkbenchCommand({ version: 2, sessionId, command }, auth.bearerToken, {
       signal: deadline.signal,
       timeoutMs: deadline.transportTimeoutMs(11_750),
+      requestId: deadline.requestId,
       diagnostics: deadline.diagnostics({
         phase: 'run_command',
         commandKind,
@@ -151,6 +209,7 @@ export async function POST(request: NextRequest) {
         },
         sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,
         commandKind,
+        resultRef: clean.resultRef,
         executable: clean.executable,
         args: clean.args,
         shell: clean.shell,
@@ -176,6 +235,8 @@ export async function POST(request: NextRequest) {
         elapsedMs: clean.durationMs,
         timeoutMs,
         outputTruncated: clean.outputTruncated,
+        evidenceRefs: clean.evidenceRefs,
+        evidenceUnavailable: clean.evidenceUnavailable,
         stdout: clean.stdout,
         stderr: clean.stderr,
         exitCode: clean.exitCode,
@@ -188,7 +249,7 @@ export async function POST(request: NextRequest) {
         }),
         activity: clean.activity
       }
-      return jsonWithRunCommandTelemetry(payload, { headers: { 'Cache-Control': 'no-store' } }, {
+      return jsonWithRunCommandTelemetry(publicCommandPayload(payload), { headers: { 'Cache-Control': 'no-store' } }, {
         requestId: deadline.requestId,
         disposition: 'timed_out',
         reasonCode: 'command_timed_out',
@@ -207,17 +268,18 @@ export async function POST(request: NextRequest) {
       ? clean.stdout
       : typeof job?.stdout === 'string'
         ? job.stdout
-        : typeof job?.stdoutTail === 'string' ? job.stdoutTail : undefined
+        : undefined
     const resolvedStderr = typeof clean.stderr === 'string'
       ? clean.stderr
       : typeof job?.stderr === 'string'
         ? job.stderr
-        : typeof job?.stderrTail === 'string' ? job.stderrTail : ''
+        : ''
     const resolvedOutputTruncated = typeof clean.outputTruncated === 'boolean'
       ? clean.outputTruncated
       : typeof job?.outputTruncated === 'boolean' ? job.outputTruncated : undefined
 
-    const terminalSucceeded = clean.status === 'completed' && resolvedExitCode === 0
+    const evidenceRead = validationJobOperation === 'evidence' || commandKind === 'read_evidence'
+    const terminalSucceeded = evidenceRead ? clean.status === 'completed' && clean.evidencePage !== undefined : clean.status === 'completed' && resolvedExitCode === 0
     const terminalRejected = clean.requiresConfirmation === true || clean.status === 'blocked'
     const terminalDisposition = terminalRejected ? 'rejected' as const : terminalSucceeded ? 'success' as const : 'failure' as const
     const terminalReason = terminalRejected ? 'command_rejected' as const : terminalSucceeded ? 'command_completed' as const : 'command_failed' as const
@@ -229,6 +291,7 @@ export async function POST(request: NextRequest) {
       commandKind,
       validationJobOperation,
       validationJobId: typeof job?.jobId === 'string' ? job.jobId : undefined,
+      resultRef: clean.resultRef ?? job?.resultRef,
       createdAt: job?.createdAt,
       updatedAt: job?.updatedAt,
       startedAt: job?.startedAt,
@@ -264,12 +327,17 @@ export async function POST(request: NextRequest) {
       reason: clean.reason,
       terminatedByInfrastructure: clean.terminatedByInfrastructure ?? job?.terminatedByInfrastructure,
       terminationReason: clean.terminationReason ?? job?.terminationReason ?? null,
+      resultPage: clean.resultPage,
+      evidenceId: clean.evidenceId,
+      evidencePage: clean.evidencePage,
+      evidenceRefs: clean.evidenceRefs ?? job?.evidenceRefs,
+      evidenceUnavailable: clean.evidenceUnavailable ?? job?.evidenceUnavailable,
       activity: clean.activity
     }
     const commandDurationMs = typeof clean.durationMs === 'number'
       ? clean.durationMs
       : typeof job?.durationMs === 'number' ? job.durationMs : undefined
-    return jsonWithRunCommandTelemetry(payload, { headers: { 'Cache-Control': 'no-store' } }, {
+    return jsonWithRunCommandTelemetry(publicCommandPayload(payload), { headers: { 'Cache-Control': 'no-store' } }, {
       requestId: deadline.requestId,
       disposition: terminalDisposition,
       reasonCode: terminalReason,

@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+import type { KnowledgeContentAccess } from '../knowledge-content.js'
+import { KnowledgeIndexStore } from '../knowledge-index-store.js'
+import { KnowledgeRefreshEngine } from '../knowledge-refresh.js'
+
+function provider(documents: Array<{ documentId: string; metadata?: Record<string, string> }>, fail = false): KnowledgeContentAccess { return { identity: { providerId: 'docs', providerType: 'generic', providerVersion: '1' }, enumerateDocuments: async () => fail ? ({ ok: false, code: 'unavailable', message: 'offline' }) : ({ ok: true, value: documents }), getMetadata: async () => ({ ok: false, code: 'not_found', message: 'unused' }), retrieveContent: async () => ({ ok: false, code: 'unavailable', message: 'unused' }), observeFreshness: async () => ({ ok: true, value: { strategy: 'revision', revision: fail ? 'r2' : 'r1', observedAt: '2026-01-01T00:00:00.000Z' } }) } }
+
+test('refreshes incrementally across restart and removes absent documents', async () => { const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-knowledge-refresh-')); try { const store = new KnowledgeIndexStore({ rootDir }); const engine = new KnowledgeRefreshEngine(store, () => '2026-01-01T00:00:00.000Z'); const first = await engine.refresh(provider([{ documentId: 'a' }, { documentId: 'b' }])); assert.equal(first.generation, 1); const second = await engine.refresh(provider([{ documentId: 'a' }, { documentId: 'c' }]), 'revision_changed'); assert.equal(second.previousGeneration, 1); assert.equal(second.removed, 1); assert.equal(second.unchanged, 2 - 1); const loaded = store.load('docs'); assert.equal(loaded.ok, true); if (loaded.ok) assert.deepEqual(loaded.value.list('docs').map(document => [document.documentId, document.indexState]), [['a', 'indexed'], ['b', 'removed'], ['c', 'indexed']]) } finally { fs.rmSync(rootDir, { recursive: true, force: true }) } })
+test('records failed refresh state for recovery diagnostics', async () => { const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-knowledge-refresh-')); try { const engine = new KnowledgeRefreshEngine(new KnowledgeIndexStore({ rootDir }), () => '2026-01-01T00:00:00.000Z'); await assert.rejects(() => engine.refresh(provider([], true)), /knowledge enumeration failed/); const loaded = new KnowledgeIndexStore({ rootDir }).load('docs'); assert.equal(loaded.ok, true); if (loaded.ok) assert.equal(loaded.value.status('docs').lifecycle, 'failed') } finally { fs.rmSync(rootDir, { recursive: true, force: true }) } })

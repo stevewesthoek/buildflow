@@ -40,6 +40,14 @@ Current route deadlines:
 
 If an operation cannot finish safely, Workbench should return structured timeout, unavailable, confirmation, or narrower-scope guidance before the external action timeout.
 
+### Durable validation results
+
+`runWorkbenchCommand` keeps the existing five-operation public surface while allowing `validationJobOperation` to be `submit`, `status`, or `cancel`. A validation submit is acknowledged with the existing persisted `validationJobId`, also returned as `resultRef`. If the HTTP response is lost, retry the same `idempotencyKey` or query the result reference; do not submit a new job.
+
+For `status`, omit `resultStream` for compact job state, or select `stdout`/`stderr` and request a bounded UTF-8 window with `resultPageBytes`. The response includes `resultPage.nextCursor` when more stored output exists. Pass that opaque cursor back with the same source and result reference. Pages are retry-stable, source-authorized, secret-redacted by the command runner, and retained only while the terminal job record is retained. `cancel` is a separate control request and must be reconciled by status. The public contract does not advertise heartbeat or SSE because support was not established by a real Custom GPT client.
+
+In a fresh conversation, bootstrap the strict command session with one bounded `readWorkbenchContext` call using the already-known exact `sourceId` (for example `mode: "list_files", limit: 1`). Use the returned `workbenchRun.sessionId` exactly in the v2 `runWorkbenchCommand` envelope: `{ "version": 2, "sessionId": "<returned sessionId>", "command": { "sourceId": "<exact sourceId>", "commandKind": "<allowlisted command>" } }`. This is a read-only session bootstrap, not a status preflight; never invent or derive a session ID. If a read-only command returns `session_invalid`, bootstrap once again and retry only that same read-only command once. Correct strict-validation failures before retrying; never automatically retry mutations.
+
 ## Goal-mode behavior
 
 The five-operation schema supports persistent goal-mode workflows through the existing bounded action surface described in:

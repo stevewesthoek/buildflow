@@ -6,12 +6,14 @@ export type GraphFallbackReason =
   | 'invalid_backend'
   | 'cbm_transport_unavailable'
   | 'cbm_stale'
+  | 'cbm_building'
+  | 'cbm_incompatible'
   | 'cbm_timeout'
   | 'cbm_invalid_response'
   | 'cbm_source_mismatch'
   | 'cbm_failed'
 
-export type GraphFreshnessState = 'fresh' | 'stale' | 'unknown' | 'not_applicable'
+export type GraphFreshnessState = 'fresh' | 'stale' | 'unavailable' | 'building' | 'incompatible' | 'unknown' | 'not_applicable'
 
 export type GraphBackendTelemetryInput = {
   sourceId?: string
@@ -24,7 +26,7 @@ export type GraphBackendTelemetryInput = {
 
 function healthForFreshness(state: GraphFreshnessState): 'healthy' | 'degraded' | 'unknown' {
   if (state === 'fresh') return 'healthy'
-  if (state === 'stale') return 'degraded'
+  if (state === 'stale' || state === 'unavailable' || state === 'building' || state === 'incompatible') return 'degraded'
   return 'unknown'
 }
 

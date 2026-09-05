@@ -8,10 +8,12 @@ import {
   addBranchSource,
   registerExistingWorktree,
   removeBranchSource,
+  startSourceReindex,
   SourceManagementError
 } from './source-management'
+import { setSourceDiscoverySettings, discoverRepositories } from './config'
 import type { PortableOperationHandlers } from '../../../../apps/web/src/lib/actions/portable-operation-dispatcher'
-import { PortableOperationError } from '../../../../apps/web/src/lib/actions/portable-operation-errors'
+import { PortableOperationError } from './portable-operation-errors'
 
 type Payload = Record<string, unknown>
 
@@ -54,7 +56,12 @@ export function createSourceManagementHandlers(): PortableOperationHandlers {
       const dirPath = requireString(p, 'path')
       const label = asString(p.label)
       const id = asString(p.id)
-      try { return addRepository(dirPath, label, id) } catch (err) { toPortableError(err) }
+      try {
+        const result = addRepository(dirPath, label, id)
+        const added = result.sources[result.sources.length - 1]
+        if (added?.id && added.enabled) startSourceReindex(added.id)
+        return { sources: listSourceDetails() }
+      } catch (err) { toPortableError(err) }
     },
 
     removeSource: (payload) => {
@@ -95,6 +102,31 @@ export function createSourceManagementHandlers(): PortableOperationHandlers {
       const p = payload as Payload
       const sourceId = requireString(p, 'sourceId')
       try { return removeBranchSource(sourceId) } catch (err) { toPortableError(err) }
+    },
+
+    discoverRepositories: (payload) => {
+      const p = payload as Payload
+      const rootPath = p.rootPath === undefined ? undefined : requireString(p, 'rootPath')
+      try { return discoverRepositories(rootPath) } catch (err) { toPortableError(err) }
+    },
+
+    setSourceDiscoverySettings: (payload) => {
+      const p = payload as Payload
+      if (p.rootPath !== undefined && typeof p.rootPath !== 'string') throw new PortableOperationError('invalid_request', 'rootPath must be a string')
+      if (p.allowedRoots !== undefined && (!Array.isArray(p.allowedRoots) || p.allowedRoots.some(item => typeof item !== 'string'))) throw new PortableOperationError('invalid_request', 'allowedRoots must be an array of strings')
+      if (p.ignorePatterns !== undefined && (!Array.isArray(p.ignorePatterns) || p.ignorePatterns.some(item => typeof item !== 'string'))) throw new PortableOperationError('invalid_request', 'ignorePatterns must be an array of strings')
+      if (p.namingPattern !== undefined && typeof p.namingPattern !== 'string') throw new PortableOperationError('invalid_request', 'namingPattern must be a string')
+      if (p.intervalMinutes !== undefined && typeof p.intervalMinutes !== 'number') throw new PortableOperationError('invalid_request', 'intervalMinutes must be a number')
+      try {
+        setSourceDiscoverySettings({
+          rootPath: p.rootPath as string | undefined,
+          allowedRoots: p.allowedRoots as string[] | undefined,
+          ignorePatterns: p.ignorePatterns as string[] | undefined,
+          namingPattern: p.namingPattern as string | undefined,
+          intervalMinutes: p.intervalMinutes as number | undefined
+        })
+        return discoverRepositories()
+      } catch (err) { toPortableError(err) }
     }
   }
 }

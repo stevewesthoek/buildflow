@@ -68,8 +68,11 @@ export type KnowledgeSource = {
   indexed?: boolean
   indexStatus?: 'ready' | 'pending' | 'indexing' | 'failed' | 'disabled' | 'unknown'
   indexedFileCount?: number
+  indexProgressCompleted?: number
+  indexProgressTotal?: number
   lastIndexedAt?: string
   indexError?: string
+  indexFailureCode?: 'FAILED_DEPTH' | 'FAILED_BUDGET' | 'FAILED_IO' | 'STALE_POLICY' | 'RECONCILIATION_REQUIRED'
   autoIndexEnabled?: boolean
   autoIndexIntervalMinutes?: number
   lastAutoIndexedAt?: string
@@ -89,12 +92,25 @@ export type DiscoveredRepository = {
   isGitWorktree?: boolean
   alreadyAdded?: boolean
   sourceId?: string
+  enabled?: boolean
+  trustStatus?: 'trusted'
 }
 
 export type SourceDiscoverySettings = {
   rootPath?: string
+  allowedRoots?: string[]
+  ignorePatterns?: string[]
+  namingPattern?: string
+  trustMode?: 'git_non_symlink'
   intervalMinutes: number
   lastScannedAt?: string
+}
+
+export type SourceDiscoveryTelemetry = {
+  entriesExamined: number
+  maxDepth: number
+  resultsEmitted: number
+  terminationReason: 'completed' | 'depth_limit' | 'entries_limit' | 'result_limit'
 }
 
 export type ActiveSourcesMode = 'single' | 'multi' | 'all'
@@ -136,6 +152,26 @@ export type Workspace = {
   mode: 'read_only' | 'default'
   includePatterns?: string[]
   excludePatterns?: string[]
+}
+
+export type WorkspaceConfiguration = {
+  schemaVersion: 1
+  workspaces: WorkspaceConfigurationEntry[]
+  knowledgeProviders: ConfiguredProvider[]
+  capabilityProviders: ConfiguredProvider[]
+}
+
+export type WorkspaceConfigurationEntry = Workspace & {
+  workspaceId: string
+  enabled: boolean
+}
+
+export type ConfiguredProvider = {
+  providerId: string
+  manifestPath: string
+  enabled: boolean
+  ownerType: 'user' | 'workspace' | 'organization'
+  ownerId: string
 }
 
 export type TreeNode = {

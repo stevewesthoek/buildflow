@@ -679,6 +679,27 @@ export function expireContextSession(sessionId: string, options?: ContextIntelli
   })
 }
 
+export function extendContextSessionExpiry(sessionId: string, newExpiresAt: string, options?: ContextIntelligenceStoreOptions): ContextSessionResult {
+  const timestamp = nowIso(options)
+  if (!validIdentifier(sessionId) || !validTimestamp(newExpiresAt)) return invalidInput('Context session renewal input is invalid.')
+  return withLock(options, store => {
+    const expired = expireDueSessions(store, timestamp)
+    const session = findSession(store, sessionId)
+    if (!session) { if (expired) persistStore(store, options, timestamp); return sessionNotFound() }
+    if (session.status === 'expired') return contextFailure('CONTEXT_SESSION_EXPIRED', 'Expired context sessions cannot be renewed.')
+    if (session.status === 'cleared') return contextFailure('CONTEXT_INVALID_TRANSITION', 'Cleared context sessions cannot be renewed.')
+    if (session.status !== 'confirmed') return contextFailure('CONTEXT_SESSION_NOT_AUTHORIZED', 'Only confirmed context sessions can be renewed.')
+    const currentExpiry = session.expiresAt ? Date.parse(session.expiresAt) : Date.parse(session.createdAt)
+    const nextExpiry = Date.parse(newExpiresAt)
+    if (nextExpiry <= currentExpiry || nextExpiry - currentExpiry > 30 * 60_000 || nextExpiry - Date.parse(session.createdAt) > 24 * 60 * 60_000) return contextFailure('CONTEXT_INVALID_INPUT', 'Context session renewal exceeds the allowed extension or lifetime.')
+    const nextSession = { ...session, expiresAt: newExpiresAt }
+    if (!isContextSession(nextSession)) return invalidInput('Renewed context session failed validation.')
+    store.sessions[store.sessions.findIndex(item => item.sessionId === sessionId)] = nextSession
+    persistStore(store, options, timestamp)
+    return { ok: true, changed: true, session: nextSession }
+  })
+}
+
 export function clearContextSession(sessionId: string, options?: ContextIntelligenceStoreOptions): ContextSessionResult {
   const timestamp = nowIso(options)
   if (!validIdentifier(sessionId)) return invalidInput('Context session ID is invalid.')

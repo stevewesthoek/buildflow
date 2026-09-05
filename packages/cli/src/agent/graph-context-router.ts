@@ -4,6 +4,8 @@ import {
   CbmTransportUnavailableError,
   CbmUnsafeChangedPathError,
   createCodebaseMemoryTransport,
+  getCodebaseMemoryProviderDiagnostics,
+  recordCodebaseMemoryProviderFailure,
   validateCbmResult,
   type CbmGraphContextTransport
 } from './cbm-graph-context'
@@ -13,6 +15,18 @@ import {
   type GraphFallbackReason,
   type GraphFreshnessState
 } from './graph-backend-telemetry'
+
+let defaultCbmTransport: CbmGraphContextTransport | undefined
+
+// A reusable provider process can occasionally fail a read-only MCP request
+// after an otherwise healthy sequence. One fresh-session recovery is bounded
+// to the graph route; cache, identity, and safety failures remain fail-closed.
+const DEFAULT_GRAPH_CONTEXT_TIMEOUT_MS = 4_000
+const MAX_TRANSIENT_CBM_RECOVERY_ATTEMPTS = 1
+
+function defaultCbmTransportInstance(): CbmGraphContextTransport {
+  return defaultCbmTransport || (defaultCbmTransport = createCodebaseMemoryTransport({ reuseProviderSession: true }))
+}
 
 export type GraphContextBody = { sourceId: string; query?: string; limit?: number }
 export type GraphContextResult = { statusCode: number; payload: Record<string, unknown> }
@@ -46,7 +60,8 @@ function exactSourceFallback(
   reason: GraphFallbackReason,
   warning: string,
   elapsedMs: number,
-  providerDiagnostics: Record<string, unknown> = {}
+  providerDiagnostics: Record<string, unknown> = {},
+  freshnessStatus: GraphFreshnessState = 'unknown'
 ): GraphContextResult {
   return {
     statusCode: 200,
@@ -54,7 +69,7 @@ function exactSourceFallback(
       mode: 'graph_context',
       sourceId: body.sourceId,
       graphAvailable: false,
-      freshness: { status: 'unknown', basis: reason },
+      freshness: { status: freshnessStatus, basis: reason },
       warning,
       nextActions: [
         { mode: 'prepare_task_context', query: body.query || 'Describe the concrete task goal.', limit: 5 }
@@ -82,6 +97,26 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
     ])
   } finally {
     if (timer) clearTimeout(timer)
+  }
+}
+
+function isTransientCbmTransportFailure(error: unknown): boolean {
+  return error instanceof CbmTransportUnavailableError
+    && (error.stage === 'mcp_initialization_failure' || error.stage === 'mcp_request_failure')
+}
+
+async function resolveCbmWithBoundedRecovery(
+  cbmTransport: CbmGraphContextTransport,
+  request: Parameters<CbmGraphContextTransport['resolveGraphContext']>[0]
+): Promise<Awaited<ReturnType<CbmGraphContextTransport['resolveGraphContext']>>> {
+  let recoveryAttempts = 0
+  while (true) {
+    try {
+      return await cbmTransport.resolveGraphContext(request)
+    } catch (error) {
+      if (!isTransientCbmTransportFailure(error) || recoveryAttempts >= MAX_TRANSIENT_CBM_RECOVERY_ATTEMPTS) throw error
+      recoveryAttempts += 1
+    }
   }
 }
 
@@ -132,35 +167,50 @@ export async function handleGraphContextRouted(
   }
 
   const cbmTransport = dependencies.cbmTransport === undefined
-    ? createCodebaseMemoryTransport()
+    ? defaultCbmTransportInstance()
     : dependencies.cbmTransport
   if (!cbmTransport) {
     const elapsedMs = Date.now() - startedAt
     record(sourceId, selected.requested, 'exact_source', elapsedMs, 'unknown', 'cbm_transport_unavailable', telemetryRecorder)
-    return exactSourceFallback(body, 'cbm_transport_unavailable', 'Codebase Memory transport is not configured. Continue with exact-source navigation.', elapsedMs)
+    const provider = getCodebaseMemoryProviderDiagnostics({ sourceId, sourceRoot: source.path })
+    return exactSourceFallback(body, 'cbm_transport_unavailable', 'Codebase Memory transport is not configured. Continue with exact-source navigation.', elapsedMs, {
+      providerId: provider.providerId,
+      providerConfigured: provider.configured,
+      providerReachable: provider.providerReachable,
+      cacheConfigured: provider.cacheConfigured,
+      cacheFound: provider.cacheFound,
+      fallbackActive: true
+    })
   }
 
   try {
     const result = validateCbmResult(
-      await withTimeout(cbmTransport.resolveGraphContext({
+      await withTimeout(resolveCbmWithBoundedRecovery(cbmTransport, {
         sourceId,
         sourceRoot: source.path,
         query: body.query,
         limit: boundedLimit(body.limit)
-      }), dependencies.timeoutMs || 1500),
+      }), dependencies.timeoutMs ?? DEFAULT_GRAPH_CONTEXT_TIMEOUT_MS),
       sourceId
     )
     if (result.freshness !== 'fresh') {
       const elapsedMs = Date.now() - startedAt
-      record(sourceId, selected.requested, 'exact_source', elapsedMs, result.freshness, 'cbm_stale', telemetryRecorder)
+      const fallbackReason: GraphFallbackReason = result.freshness === 'building'
+        ? 'cbm_building'
+        : result.freshness === 'incompatible'
+          ? 'cbm_incompatible'
+          : 'cbm_stale'
+      record(sourceId, selected.requested, 'exact_source', elapsedMs, result.freshness, fallbackReason, telemetryRecorder)
       // Propagate safe structured stale diagnostics from the transport.
       // Never forward: absolute paths, env values, raw changed-file lists, credentials, or stderr.
       const safeKeys = new Set([
-        'stage', 'metadataVersion', 'expectedMetadataVersion', 'fingerprintAlgorithm',
+        'provider', 'providerId', 'repositoryIdentity', 'cacheIdentity',
+        'stage', 'freshnessState', 'metadataVersion', 'expectedMetadataVersion', 'fingerprintAlgorithm',
         'indexedAtSha', 'currentSha', 'storedFingerprint', 'computedFingerprint',
         'mismatchReason', 'changedPathCountRaw', 'changedPathCountCanonical',
         'changedPathSetDigest', 'providerChangedCount', 'providerVersion',
-        'indexedFileCount', 'phaseMs', 'elapsedMs', 'operations', 'expectedAlgorithm'
+        'indexedFileCount', 'phaseMs', 'elapsedMs', 'operations', 'expectedAlgorithm',
+        'providerReuseState', 'cacheHit', 'freshnessCacheHit'
       ])
       const safeDiagnostics: Record<string, unknown> = {}
       if (result.diagnostics) {
@@ -171,10 +221,11 @@ export async function handleGraphContextRouted(
       if (!safeDiagnostics.stage) safeDiagnostics.stage = 'stale_index'
       return exactSourceFallback(
         body,
-        'cbm_stale',
-        'Codebase Memory result is stale or freshness is unknown. Continue with exact-source navigation.',
+        fallbackReason,
+        `Codebase Memory result is ${result.freshness}; continue with exact-source navigation.`,
         elapsedMs,
-        safeDiagnostics
+        safeDiagnostics,
+        result.freshness
       )
     }
     const elapsedMs = Date.now() - startedAt
@@ -185,7 +236,7 @@ export async function handleGraphContextRouted(
         mode: 'graph_context',
         sourceId,
         graphAvailable: true,
-        freshness: { status: 'fresh', basis: 'codebase_memory' },
+        freshness: { status: 'fresh', basis: 'codebase_memory', ...(typeof result.diagnostics?.indexedAtSha === 'string' ? { indexedAtSha: result.diagnostics.indexedAtSha } : {}) },
         matches: result.matches || [],
         communityHubs: result.communityHubs || [],
         godNodes: result.godNodes || [],
@@ -206,13 +257,27 @@ export async function handleGraphContextRouted(
     else if (message.includes('Invalid Codebase Memory')) reason = 'cbm_invalid_response'
     const elapsedMs = Date.now() - startedAt
     const providerStage = error instanceof CbmTransportUnavailableError ? error.stage : undefined
-    record(sourceId, selected.requested, 'exact_source', elapsedMs, 'unknown', reason, telemetryRecorder)
+    const failureFreshness: GraphFreshnessState = reason === 'cbm_source_mismatch' || providerStage === 'cache_safety_failure'
+      ? 'incompatible'
+      : 'unavailable'
+    recordCodebaseMemoryProviderFailure({ sourceId, sourceRoot: source.path }, reason, failureFreshness)
+    const provider = getCodebaseMemoryProviderDiagnostics({ sourceId, sourceRoot: source.path })
+    record(sourceId, selected.requested, 'exact_source', elapsedMs, failureFreshness, reason, telemetryRecorder)
     return exactSourceFallback(
       body,
       reason,
       'Codebase Memory could not provide verified current context. Continue with exact-source navigation.',
       elapsedMs,
-      providerStage ? { providerStage } : {}
+      {
+        ...(providerStage ? { providerStage } : {}),
+        providerId: provider.providerId,
+        providerConfigured: provider.configured,
+        providerReachable: provider.providerReachable,
+        cacheConfigured: provider.cacheConfigured,
+        cacheFound: provider.cacheFound,
+        fallbackActive: true
+      },
+      failureFreshness
     )
   }
 }

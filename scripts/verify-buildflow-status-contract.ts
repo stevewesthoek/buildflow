@@ -51,6 +51,31 @@ async function main() {
     assert.equal(json.runtime.service.role, 'web')
   })
 
+  const activeCalls: string[] = []
+  await withFetch((async (input) => {
+    const url = String(input)
+    activeCalls.push(url)
+    if (url.includes('/api/get-active-sources')) {
+      return new Response(JSON.stringify({ mode: 'multi', activeSourceIds: ['brain', 'prochattools-workbench'] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    throw new Error(`unexpected active status transport: ${url}`)
+  }) as unknown as typeof fetch, async () => {
+    const response = await GET(new NextRequest('http://127.0.0.1/api/actions/status?include=active', { headers: authHeaders }))
+    assert.equal(response.status, 200)
+    const { json } = await readJson(response)
+    assert.deepEqual(json.activeRuns, [])
+    assert.deepEqual(json.resumeSourceSelection, {
+      status: 'source_selection_required',
+      reason: 'multiple_active_sources',
+      sourceCount: 2,
+      nextAction: 'Ask which named source to resume; never choose by source ID or array order.'
+    })
+    assert(!activeCalls.some(url => url.includes('/api/workbench-runs/active')), 'ambiguous active context must not query or expose an arbitrary run')
+  })
+
   await withFetch((async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch, async () => {
     const response = await GET(new NextRequest('http://127.0.0.1/api/actions/status', { headers: authHeaders }))
     assert.equal(response.status, 200)

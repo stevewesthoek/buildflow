@@ -238,6 +238,7 @@ const SAFE_WRITE_ROOTS = [
   'operations/runbooks',
   'operations/specs/video-orchestrator',
   'projects/probot/src',
+  'apps/web',
   'docs',
   'docs/product',
   'docs/product/releases',
@@ -440,7 +441,7 @@ export function resolveSourceWritePolicy(sourceId?: string): WritePolicySummary 
   }
 }
 
-function isWithinAllowedRoots(normalized: string, policy?: WritePolicySummary): boolean {
+export function isWithinAllowedRoots(normalized: string, policy?: WritePolicySummary): boolean {
   const effectivePolicy = policy ?? getDefaultWritePolicy()
   if (!normalized) return false
   if (isStaticAssetPath(normalized)) return false
@@ -448,6 +449,20 @@ function isWithinAllowedRoots(normalized: string, policy?: WritePolicySummary): 
   if (!normalized.includes('/') && SAFE_ROOT_WRITE_FILES.has(normalized)) return true
   if (effectivePolicy.allowedRoots.some(pattern => matchesGlob(pattern, normalized))) return true
   if (normalized.endsWith('.md') || normalized.endsWith('.mdx') || normalized.endsWith('.txt') || normalized.endsWith('.json') || normalized.endsWith('.ts') || normalized.endsWith('.tsx') || normalized.endsWith('.js') || normalized.endsWith('.jsx') || normalized.endsWith('.mjs') || normalized.endsWith('.cjs') || normalized.endsWith('.cts') || normalized.endsWith('.mts') || normalized.endsWith('.css') || normalized.endsWith('.scss') || normalized.endsWith('.sass') || normalized.endsWith('.html') || normalized.endsWith('.sql') || normalized.endsWith('.prisma') || normalized.endsWith('.graphql') || normalized.endsWith('.gql') || normalized.endsWith('.yaml') || normalized.endsWith('.yml') || normalized.endsWith('.toml') || normalized.endsWith('.sh') || normalized.endsWith('.bash') || normalized.endsWith('.zsh')) return true
+  return SAFE_WRITE_ROOTS.some(root => normalized === root || normalized.startsWith(`${root}/`))
+}
+
+/**
+ * Extensionless Git staging has no file-type signal, so new files must land in
+ * one of the ordinary text/source roots even though normal repository writes
+ * remain bounded by the broader source-root policy.
+ */
+export function isWithinOrdinaryWriteRoots(normalized: string, policy?: WritePolicySummary): boolean {
+  const effectivePolicy = policy ?? getDefaultWritePolicy()
+  if (!normalized || isStaticAssetPath(normalized)) return false
+  if (normalized === 'public' || normalized.startsWith('public/')) return true
+  if (!normalized.includes('/') && SAFE_ROOT_WRITE_FILES.has(normalized)) return true
+  if (effectivePolicy.allowedRoots.some(pattern => pattern !== '**' && matchesGlob(pattern, normalized))) return true
   return SAFE_WRITE_ROOTS.some(root => normalized === root || normalized.startsWith(`${root}/`))
 }
 
@@ -754,7 +769,7 @@ function isPathWithinRootAfterSymlinks(root: string, candidate: string): boolean
 }
 
 export function getSourceRoot(sourceId?: string): { id: string; path: string } {
-  const sources = getEnabledSources()
+  const sources = getEnabledSources({ includeIndexState: false })
   if (sources.length === 0) throw new Error('No enabled knowledge sources configured')
   if (sourceId) {
     const source = sources.find(s => s.id === sourceId)
@@ -766,7 +781,7 @@ export function getSourceRoot(sourceId?: string): { id: string; path: string } {
 
 export function resolveTargetSourceId(sourceId?: string): string {
   const active = getActiveSourceContext()
-  const enabled = getEnabledSources()
+  const enabled = getEnabledSources({ includeIndexState: false })
   if (sourceId) {
     const source = enabled.find(s => s.id === sourceId)
     if (!source) throw new Error(`Source not found: ${sourceId}`)
@@ -780,7 +795,7 @@ export function resolveTargetSourceId(sourceId?: string): string {
 
 export function getResolvedActiveSources(sourceIds?: string[]): Array<{ id: string; path: string }> {
   if (sourceIds && sourceIds.length > 0) {
-    const enabled = getEnabledSources()
+    const enabled = getEnabledSources({ includeIndexState: false })
     const wanted = new Set(sourceIds)
     const resolved = enabled.filter(source => wanted.has(source.id)).map(source => ({ id: source.id, path: source.path }))
     if (resolved.length === 0) throw new Error('No matching active sources found')
@@ -789,10 +804,10 @@ export function getResolvedActiveSources(sourceIds?: string[]): Array<{ id: stri
 
   const active = getActiveSourceContext()
   if (active.mode === 'all') {
-    return getEnabledSources().map(source => ({ id: source.id, path: source.path }))
+    return getEnabledSources({ includeIndexState: false }).map(source => ({ id: source.id, path: source.path }))
   }
   return active.activeSourceIds.map(id => {
-    const source = getEnabledSources().find(s => s.id === id)
+    const source = getEnabledSources({ includeIndexState: false }).find(s => s.id === id)
     if (!source) throw new Error(`Active source not found: ${id}`)
     return { id: source.id, path: source.path }
   })

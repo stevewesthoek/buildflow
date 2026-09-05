@@ -9,6 +9,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createWorkbenchMcpServer } from '../mcp-server.js'
 import { loadWorkbenchMcpScope } from '../scope.js'
+import { CLIENT_WORKFLOW_TOOL_NAMES } from '../client-workflow-tools.js'
 import { PERSISTED_VALIDATION_COMMAND_KINDS, RUN_WORKBENCH_DIRECT_COMMAND_KINDS, sessionAwareRunWorkbenchCommandRequestSchema } from '@workbench/shared'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..')
@@ -30,20 +31,21 @@ async function connectedPair(invoke?: Parameters<typeof createWorkbenchMcpServer
   return { client, server }
 }
 
-test('initializes, advertises instructions, and lists exactly five bounded tools', async () => {
+test('initializes, advertises instructions, and lists the full Workbench tool surface', async () => {
   const { client, server } = await connectedPair()
   try {
     assert(client.getInstructions()?.includes('admitted bounded Workbench actions'))
     const listed = await client.listTools()
     assert.deepEqual(listed.tools.map(tool => tool.name), [
+      ...CLIENT_WORKFLOW_TOOL_NAMES,
       'getWorkbenchStatus',
       'readWorkbenchContext',
       'applyWorkbenchFileChange',
       'commitWorkbenchChanges',
       'runWorkbenchCommand'
     ])
-    assert.equal(listed.tools[0].annotations?.readOnlyHint, true)
-    assert.equal(listed.tools[2].annotations?.destructiveHint, true)
+    assert.equal(listed.tools.find(tool => tool.name === 'getWorkbenchStatus')?.annotations?.readOnlyHint, true)
+    assert.equal(listed.tools.find(tool => tool.name === 'applyWorkbenchFileChange')?.annotations?.destructiveHint, true)
     const runWorkbenchCommand = listed.tools.find(tool => tool.name === 'runWorkbenchCommand')
     assert(runWorkbenchCommand)
     const inputSchema = runWorkbenchCommand?.inputSchema || {}
@@ -96,7 +98,8 @@ test('advertises and enforces an installation-admitted tool and nested-command s
     repoRoot,
     scope: loadWorkbenchMcpScope({
       WORKBENCH_MCP_ALLOWED_TOOLS: 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand',
-      WORKBENCH_MCP_ALLOWED_COMMAND_KINDS: 'n8n_workflow_migration'
+      WORKBENCH_MCP_ALLOWED_COMMAND_KINDS: 'n8n_workflow_migration',
+      WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS: ''
     }),
     invoke: async (_contract, input) => ({ ok: true, result: { status: 'ok', input } })
   })
@@ -124,6 +127,10 @@ test('advertises and enforces an installation-admitted tool and nested-command s
     assert.equal(runCommandProperties.validationJobOperation, undefined)
     await assert.rejects(
       client.callTool({ name: 'applyWorkbenchFileChange', arguments: {} }),
+      /Unknown or unadmitted Workbench MCP tool/
+    )
+    await assert.rejects(
+      client.callTool({ name: 'mcpClientSessionCreate', arguments: { clientId: 'brain', expiresAt: '2099-01-01T00:00:00.000Z' } }),
       /Unknown or unadmitted Workbench MCP tool/
     )
     const denied = await client.callTool({
@@ -188,6 +195,37 @@ test('rejects unknown or incoherent admitted scope values', () => {
     WORKBENCH_MCP_ALLOWED_TOOLS: 'getWorkbenchStatus',
     WORKBENCH_MCP_ALLOWED_COMMAND_KINDS: 'n8n_workflow_migration'
   }), /requires runWorkbenchCommand/)
+  assert.throws(() => loadWorkbenchMcpScope({
+    WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS: 'mcpClientSessionCreate,unknownWorkflowTool'
+  }), /WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS contains unknown values/)
+  assert.equal(loadWorkbenchMcpScope({ WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS: '' }).clientWorkflowTools.size, 0)
+})
+
+test('Brain profile exposes exactly its three admitted tools and no client workflow tools', async () => {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  const server = createWorkbenchMcpServer({
+    repoRoot,
+    scope: loadWorkbenchMcpScope({
+      WORKBENCH_MCP_ALLOWED_TOOLS: 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand',
+      WORKBENCH_MCP_ALLOWED_COMMAND_KINDS: 'n8n_workflow_migration',
+      WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS: ''
+    })
+  })
+  const client = new Client({ name: 'brain-mcp-scope-test', version: '1.0.0' })
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  try {
+    assert.deepEqual((await client.listTools()).tools.map(tool => tool.name), [
+      'getWorkbenchStatus', 'readWorkbenchContext', 'runWorkbenchCommand'
+    ])
+    await assert.rejects(
+      client.callTool({ name: 'mcpCapabilityDiscover', arguments: {} }),
+      /Unknown or unadmitted Workbench MCP tool/
+    )
+  } finally {
+    await client.close()
+    await server.close()
+  }
 })
 
 test('invokes a validated tool and returns structured content', async () => {
@@ -427,6 +465,7 @@ test('runs the fixed stdio entrypoint, lists tools, and closes cleanly', async (
   await client.connect(transport)
   const listed = await client.listTools()
   assert.deepEqual(listed.tools.map(tool => tool.name), [
+    ...CLIENT_WORKFLOW_TOOL_NAMES,
     'getWorkbenchStatus',
     'readWorkbenchContext',
     'applyWorkbenchFileChange',
@@ -449,7 +488,7 @@ test('repeated cold initialize and tools/list complete within justified budget',
     const client = new Client({ name: `workbench-cold-${i}`, version: '1.0.0' })
     await client.connect(transport)
     const listed = await client.listTools()
-    assert.equal(listed.tools.length, 5, `Cold start ${i + 1}: expected 5 tools`)
+    assert.equal(listed.tools.length, CLIENT_WORKFLOW_TOOL_NAMES.length + 5, `Cold start ${i + 1}: expected full Workbench tool surface`)
     await client.close()
     const elapsed = Date.now() - start
     assert.ok(elapsed < BUDGET_MS, `Cold start ${i + 1} took ${elapsed}ms, exceeds ${BUDGET_MS}ms justified budget`)

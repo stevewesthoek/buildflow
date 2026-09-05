@@ -35,6 +35,11 @@ const ALLOWED_FILES = new Set([
   path.normalize('apps/web/src/app/api/openapi/route.ts')
 ])
 const SELF_FILE = path.normalize('scripts/audit-public-scope.mjs')
+// These are public protocol identifiers, not references to private infrastructure.
+// Keep exceptions file-specific so the release boundary remains fail-closed elsewhere.
+const ALLOWED_PUBLIC_SCOPE_FINDINGS = new Map([
+  [path.normalize('packages/cli/src/agent/roadmap-effect-policy.ts'), new Set(['cloudflare'])]
+])
 
 const RULES = makeRules()
 
@@ -124,6 +129,7 @@ async function walk(currentPath, findings) {
       const line = lines[i]
       for (const [term, regex] of RULES) {
         if (regex.test(line)) {
+          if (ALLOWED_PUBLIC_SCOPE_FINDINGS.get(path.normalize(rel))?.has(term)) continue
           findings.push({ file: rel, line: i + 1, term })
           break
         }

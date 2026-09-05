@@ -1,19 +1,27 @@
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
-import { getActiveWorkbenchRun } from './agent-jobs'
-import { listWorkbenchActivity } from './agent-events'
+import { getActiveWorkbenchRun, listActiveWorkbenchRuns } from './agent-jobs'
+import { appendAgentEvent, listWorkbenchActivity } from './agent-events'
+import { ensureWorkbenchActionRun, type WorkbenchActionRunBinding, updateAgentJob } from './agent-jobs'
 import { listWorkbenchPacketRecords } from './workbench-packet-store'
 import { getActiveSourceContext, getSourceIndexState, getSourcesSafe } from './config'
 import { handleFocusedRead } from './focused-read'
 import { handleGraphContextRouted } from './graph-context-router'
 import { Indexer, getIndexedDocumentCountFromDisk } from './indexer'
-import { prepareTaskContext } from './prepare-task-context'
+import { prepareTaskContext, shouldPrepareStructuralContext, type KnowledgeContextPreparation, type StructuralContextPreparation } from './prepare-task-context'
 import { VaultSearcher } from './search'
 import { getResolvedActiveSources, redactSecrets, shouldIncludeEntry, truncateContent } from './safe-access'
 import { readFile } from './vault'
 import type { PortableExecutionContext, PortableOperationHandlers } from '../../../../apps/web/src/lib/actions/portable-operation-dispatcher'
-import { PortableOperationError } from '../../../../apps/web/src/lib/actions/portable-operation-errors'
+import { PortableOperationError } from './portable-operation-errors'
+import { negotiateMcpContextClient, formatMcpContextWorkflowResponse, recordMcpContextWorkflowResult } from './mcp-context-workflow'
 import { authorizeContextRead } from './context-broker'
+import { consumePreparedMcpContext } from './mcp-context-bridge'
+import { attachWorkbenchEvidence, deterministicWorkbenchEvidenceId } from './workbench-evidence-producers'
+import type { WorkbenchEvidenceStoreOptions } from './workbench-evidence-store'
+import { getWorkbenchReadResultRecovery, markWorkbenchReadResultReconciled, persistWorkbenchReadResult, type WorkbenchReadResultRecoveryIdentity, type WorkbenchReadResultRecoveryOptions } from './workbench-read-result-recovery'
+import { projectActiveRunContinuity, resolveResumeNavigation, type ActiveRunContinuity } from '@workbench/shared'
+import { getFocusedWorkspace } from './focused-workspace'
 
 const MAX_PATHS = 5
 const MAX_FILE_BYTES = 4_000
@@ -28,12 +36,29 @@ export type PortableReadHandlerDependencies = {
   readResponseBudgetBytes?: number
   readMaxBytesPerFile?: number
   searcher?: (sourceIds?: string[]) => VaultSearcher
+  knowledgeContextPreparer?: (input: { query: string; sessionId: string; sourceIds: string[]; limit: number; maxBytes: number }) => ReturnType<KnowledgeContextPreparation['prepare']>
+  structuralContextResolver?: StructuralContextPreparation['resolve'] | null
+  maintenanceSnapshot?: () => unknown
+  evidenceStore?: WorkbenchEvidenceStoreOptions
+  readResultRecovery?: WorkbenchReadResultRecoveryOptions
+  requestSourceIndexRecovery?: (sourceIds: string[]) => Array<{ sourceId: string; status: 'queued' | 'already_ready' | 'already_queued' | 'unavailable' }>
 }
 
 export const MAX_ACTIVE_RUN_ACTIVITY_EVENTS = 40
 
+export function projectPortableActiveRunsForStatus(
+  sourceIds: string[],
+  getRun: (sourceId: string) => unknown = getActiveWorkbenchRun
+): ActiveRunContinuity[] {
+  return sourceIds
+    .filter((sourceId): sourceId is string => typeof sourceId === 'string' && sourceId.trim().length > 0)
+    .slice(0, 4)
+    .map(sourceId => projectActiveRunContinuity(getRun(sourceId)))
+    .filter((run): run is ActiveRunContinuity => Boolean(run))
+}
+
 type ActivityListFn = (
-  params: { runId?: string; sourceId?: string; limit?: number }
+  params: { runId?: string; sourceId?: string; limit?: number; afterEventId?: string }
 ) => ReturnType<typeof listWorkbenchActivity>
 
 export function projectPortableActiveRunActivity(
@@ -53,6 +78,15 @@ export function maybeProjectPortableActiveRunActivity(
   return includeActivity === true
     ? projectPortableActiveRunActivity(sourceId, runId, listActivity)
     : undefined
+}
+
+export function projectPortableActivityDelta(
+  sourceId: string,
+  runId: string,
+  afterEventId: string | undefined,
+  listActivity: ActivityListFn = listWorkbenchActivity
+) {
+  return listActivity({ runId, sourceId, limit: MAX_ACTIVE_RUN_ACTIVITY_EVENTS, ...(afterEventId ? { afterEventId } : {}) })
 }
 
 export function formatPortableActiveRunResponse<T extends object, P, A = never>(
@@ -86,30 +120,109 @@ function bounded(value: unknown, fallback: number, min: number, max: number): nu
   return Number.isFinite(numeric) ? Math.max(min, Math.min(max, Math.floor(numeric))) : fallback
 }
 
+function actionRunSourceId(payload: Payload, context?: PortableExecutionContext): string | undefined {
+  if (context?.sourceId) return context.sourceId
+  const explicit = asString(payload.sourceId)
+  if (explicit) return explicit
+  const sourceIds = Array.isArray(payload.sourceIds)
+    ? payload.sourceIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : []
+  return sourceIds.length === 1 ? sourceIds[0] : undefined
+}
+
+function actionRunGoal(payload: Payload): string {
+  const mode = asString(payload.mode) || 'repository operation'
+  const subject = asString(payload.query) || asString(payload.path) || (Array.isArray(payload.paths) ? payload.paths.filter((value): value is string => typeof value === 'string').slice(0, 2).join(', ') : undefined)
+  const safeSubject = subject ? redactSecrets(subject).slice(0, 180) : 'current task'
+  return `External Workbench task: ${mode}${safeSubject ? ` · ${safeSubject}` : ''}`
+}
+
+function projectActionRunStart(binding: WorkbenchActionRunBinding, context?: PortableExecutionContext): void {
+  appendAgentEvent({
+    jobId: binding.runId,
+    sourceId: binding.sourceId,
+    type: 'preflight_started',
+    activityKind: 'run_progress',
+    message: 'Workbench is reading the selected repository for the current task.',
+    requestId: context?.requestId,
+    status: 'running'
+  })
+}
+
+function projectContextRead(binding: WorkbenchActionRunBinding, payload: Payload, context?: PortableExecutionContext): void {
+  const mode = asString(payload.mode) || 'context read'
+  const paths = Array.isArray(payload.paths)
+    ? payload.paths.filter((value): value is string => typeof value === 'string').slice(0, 24)
+    : asString(payload.path) ? [asString(payload.path)!] : undefined
+  appendAgentEvent({
+    jobId: binding.runId,
+    sourceId: binding.sourceId,
+    type: 'file_read',
+    activityKind: 'file_read',
+    message: mode === 'search' || mode === 'search_and_read' ? 'Repository search completed.' : 'Repository context read completed.',
+    requestId: context?.requestId,
+    status: 'completed',
+    ...(paths && paths.length > 0 ? { paths } : {})
+  })
+}
+
+function projectResultPersisting(binding: WorkbenchActionRunBinding, context?: PortableExecutionContext): void {
+  appendAgentEvent({
+    jobId: binding.runId,
+    sourceId: binding.sourceId,
+    type: 'result_persisting',
+    activityKind: 'run_progress',
+    message: 'Workbench is persisting the completed repository result for recovery.',
+    requestId: context?.requestId,
+    status: 'running'
+  })
+}
+
+function projectResponseCompleted(binding: WorkbenchActionRunBinding, context?: PortableExecutionContext, recovered = false): void {
+  appendAgentEvent({
+    jobId: binding.runId,
+    sourceId: binding.sourceId,
+    type: recovered ? 'read_recovered' : 'response_completed',
+    activityKind: 'run_progress',
+    message: recovered ? 'Workbench recovered the completed repository result without rereading.' : 'Workbench response completed with a persisted result reference.',
+    requestId: context?.requestId,
+    status: 'completed'
+  })
+}
+
 function fail(code: 'invalid_request' | 'source_mismatch' | 'dependency_unavailable', message: string): never {
   throw new PortableOperationError(code, message)
 }
 
-function requireSearchReady(sourceIds: string[]): void {
+export function isSourceSearchReady(state: { indexStatus?: string } | null | undefined): boolean {
+  return state?.indexStatus === 'ready'
+}
+
+function requireSearchReady(sourceIds: string[], dependencies: PortableReadHandlerDependencies = {}): void {
   const blocked = sourceIds
     .map(sourceId => ({ sourceId, state: getSourceIndexState(sourceId) }))
-    .filter(({ state }) => !state || (state.indexStatus !== 'ready' && !(state.indexStatus === 'indexing' && (state.indexedFileCount ?? 0) > 0)))
+    .filter(({ state }) => !isSourceSearchReady(state))
   if (!blocked.length) return
+  const recovery = dependencies.requestSourceIndexRecovery?.(blocked.map(item => item.sourceId)) || []
   const details = blocked.map(item => ({
     sourceId: item.sourceId,
     indexStatus: item.state?.indexStatus || 'unknown',
     indexError: item.state?.indexError,
     indexedFileCount: item.state?.indexedFileCount,
-    recoveryAction: item.state?.indexStatus === 'pending' ? 'Reindex from dashboard' : item.state?.indexStatus === 'failed' ? 'Reindex from dashboard or choose a ready source' : 'Choose a ready source'
+    recoveryAction: recovery.find(candidate => candidate.sourceId === item.sourceId)?.status === 'unavailable'
+      ? 'Choose a ready source'
+      : recovery.find(candidate => candidate.sourceId === item.sourceId)?.status === 'already_ready'
+        ? 'Retry the same bounded search'
+        : 'Workbench queued source readiness automatically'
   }))
   const message = blocked.map(item => item.state?.indexStatus === 'pending'
-    ? `${item.sourceId} has not been indexed yet. Reindex it from the dashboard first.`
+    ? `${item.sourceId} is being prepared for search automatically.`
     : item.state?.indexStatus === 'indexing'
-      ? `${item.sourceId} is being reindexed. Searching using the older index.`
+      ? `${item.sourceId} is being reindexed. Search will be available after the new index is ready.`
       : item.state?.indexStatus === 'failed'
-        ? `${item.sourceId} failed to index: ${item.state.indexError || 'unknown error'}. Reindex it from the dashboard.`
-        : `${item.sourceId} is not ready for search.`).join(' ')
-  throw new PortableOperationError('dependency_unavailable', `Source(s) not ready for search: ${blocked.map(item => item.sourceId).join(', ')}`, { details: { readinessMessage: message, sources: details } })
+        ? `${item.sourceId} failed to index: ${item.state.indexError || 'unknown error'}. Workbench queued an automatic recovery attempt.`
+    : `${item.sourceId} is not ready for search; Workbench is preparing it automatically.`).join(' ')
+  throw new PortableOperationError('dependency_unavailable', `Source(s) not ready for search: ${blocked.map(item => item.sourceId).join(', ')}`, { details: { readinessMessage: message, sources: details, recovery } })
 }
 
 function brokerReadMetadata(sourceId: string, executionContext?: PortableExecutionContext, payload?: Payload) {
@@ -230,7 +343,7 @@ async function readContext(payload: Payload, executionContext?: PortableExecutio
     const query = asString(payload.query)
     const selected = sourceIds(payload, executionContext)
     if (!query || !selected.length) fail('invalid_request', 'query and sourceId or sourceIds are required')
-    requireSearchReady(selected)
+    requireSearchReady(selected, dependencies)
     const search = (dependencies.searcher ? dependencies.searcher(selected) : makeSearcher(selected)).searchBounded(query, bounded(payload.limit, 5, 1, MAX_PATHS), selected, { startedAt: Date.now(), deadlineMs: 1200, maxDocsPerSource: 1500, maxContentDocsPerSource: 350 })
     const matches = search.results.slice(0, MAX_PATHS)
     if (!matches.length) return { mode, results: [], noMatches: true, query, ...(search.sourceWarnings.length ? { sourceWarnings: search.sourceWarnings } : {}) }
@@ -264,10 +377,31 @@ async function readContext(payload: Payload, executionContext?: PortableExecutio
     const source = getSourcesSafe().find(item => item.id === sourceId && item.enabled)
     if (!source) fail('source_mismatch', `Source not found or disabled: ${sourceId}`)
     const run = getActiveWorkbenchRun(sourceId)
+    const requestedRunId = asString(payload.runId)
+    if (payload.activityDelta === true && requestedRunId) {
+      if (!run || run.id !== requestedRunId) {
+        return {
+          status: 'ok' as const,
+          sourceId,
+          runId: String(run?.id || requestedRunId),
+          activity: undefined,
+          cursorFound: false,
+          fullRefreshRequired: true
+        }
+      }
+      const delta = projectPortableActivityDelta(sourceId, requestedRunId, asString(payload.activitySinceEventId))
+      return {
+        status: 'ok' as const,
+        sourceId,
+        runId: requestedRunId,
+        activity: delta.projection,
+        cursorFound: delta.cursorFound,
+        fullRefreshRequired: !delta.cursorFound
+      }
+    }
     const packets = run && typeof run.id === 'string'
       ? listWorkbenchPacketRecords({ runId: run.id, limit: 10 }).map(record => ({
-          packetId: record.packet.packetId,
-          taskId: record.packet.taskId,
+          ...(payload.includePacket === true ? { packet: record.packet } : { packetId: record.packet.packetId, taskId: record.packet.taskId }),
           status: record.status,
           exactPaths: record.exactPaths,
           reservedAt: record.reservedAt,
@@ -283,7 +417,7 @@ async function readContext(payload: Payload, executionContext?: PortableExecutio
     const query = asString(payload.query)
     const selected = sourceIds(payload, executionContext)
     if (!query || !selected.length) fail('invalid_request', 'query and sourceId or sourceIds are required')
-    requireSearchReady(selected)
+    requireSearchReady(selected, dependencies)
     if (mode === 'prepare_task_context' && selected.length !== 1) {
       fail('dependency_unavailable', 'Context Broker requires one authorized source for task context preparation.')
     }
@@ -293,8 +427,52 @@ async function readContext(payload: Payload, executionContext?: PortableExecutio
     if (preparation && !preparation.ok) fail('dependency_unavailable', 'message' in preparation ? preparation.message : 'Context preparation failed.')
     const searcher = dependencies.searcher ? dependencies.searcher(selected) : makeSearcher(selected)
     if (mode === 'prepare_task_context') {
-      const prepared = await prepareTaskContext({ query, sourceIds: selected, searcher, limit: bounded(payload.limit, 5, 1, 5), paths: Array.isArray(payload.paths) ? payload.paths.filter((value): value is string => typeof value === 'string').slice(0, MAX_PATHS) : undefined, maxBytesPerFile: bounded(payload.maxBytesPerFile, 3_000, 1_000, MAX_FILE_BYTES) })
-      return { ...prepared, contextMetadata: preparation && preparation.ok ? preparation.metadata : undefined }
+      const workflowStartedAt = Date.now()
+      if (payload.contextWorkflow === true) {
+        const negotiation = negotiateMcpContextClient(payload.clientCapabilities as any)
+        if (!negotiation.supported) { recordMcpContextWorkflowResult({ clientId: negotiation.clientId, ok: false, latencyMs: Date.now() - workflowStartedAt, failureCode: negotiation.reason || 'unsupported_client' }); fail('dependency_unavailable', `MCP client does not support the Workbench context workflow (${negotiation.reason || 'unsupported_client'}).`) }
+      }
+      const sessionId = typeof payload.contextIntelligenceSessionId === 'string' ? payload.contextIntelligenceSessionId : undefined
+      const knowledgeContext = sessionId && dependencies.knowledgeContextPreparer
+        ? { sessionId, sourceIds: selected, prepare: dependencies.knowledgeContextPreparer }
+        : undefined
+      const structuralContext = dependencies.structuralContextResolver === null
+        ? undefined
+        : {
+            resolve: dependencies.structuralContextResolver || (async (input: Parameters<StructuralContextPreparation['resolve']>[0]) => {
+              const result = await handleGraphContextRouted(input, {
+                sourceResolver: getSourcesSafe,
+                telemetryRecorder: () => undefined
+              })
+              if (result.statusCode >= 400) throw new Error(String(result.payload.error || 'Structural navigation failed'))
+              return result.payload
+            })
+          }
+      let prepared
+      try {
+        const paths = Array.isArray(payload.paths) ? payload.paths.filter((value): value is string => typeof value === 'string').slice(0, MAX_PATHS) : undefined
+        prepared = await prepareTaskContext({
+          query,
+          sourceIds: selected,
+          searcher,
+          limit: bounded(payload.limit, 5, 1, 5),
+          paths,
+          maxBytesPerFile: bounded(payload.maxBytesPerFile, 3_000, 1_000, MAX_FILE_BYTES),
+          knowledgeContext,
+          structuralContext: shouldPrepareStructuralContext(query, paths) ? structuralContext : undefined
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Context package preparation failed.'
+        fail('dependency_unavailable', message)
+      }
+      const withMetadata = { ...prepared, contextMetadata: preparation && preparation.ok ? preparation.metadata : undefined }
+      if (sessionId) {
+        const consumed = consumePreparedMcpContext(withMetadata, sessionId, {}, asString(payload.requestId))
+        if (!consumed.ok) { recordMcpContextWorkflowResult({ clientId: typeof (payload.clientCapabilities as any)?.clientId === 'string' ? (payload.clientCapabilities as any).clientId : undefined, ok: false, latencyMs: Date.now() - workflowStartedAt, failureCode: 'code' in consumed ? consumed.code : 'context_rejected' }); fail('dependency_unavailable', 'message' in consumed ? consumed.message : 'MCP context could not be consumed.') }
+        if (payload.contextWorkflow === true) recordMcpContextWorkflowResult({ clientId: typeof (payload.clientCapabilities as any)?.clientId === 'string' ? (payload.clientCapabilities as any).clientId : undefined, ok: true, latencyMs: Date.now() - workflowStartedAt, packageBytes: withMetadata.knowledgeContext?.bytes })
+        return { ...withMetadata, mcpContext: consumed.context, ...(payload.contextWorkflow === true ? { contextWorkflow: formatMcpContextWorkflowResponse(withMetadata, sessionId) } : {}) }
+      }
+      return withMetadata
     }
     const startedAt = Date.now()
     const effectiveQuery = mode === 'search' && !/^(?:content|full):/i.test(query)
@@ -310,8 +488,20 @@ export function createPortableReadHandlers(dependencies: PortableReadHandlerDepe
   return {
     getWorkbenchStatus: payload => {
       const include = asString((payload as Payload).include)
-      const sources = getSourcesSafe()
-      const active = getActiveSourceContext()
+      const fullSources = include === 'sources' || include === 'all'
+      const sources = getSourcesSafe(fullSources ? {} : { refreshGitMetadata: false, includeIndexState: false })
+      const active = getActiveSourceContext(fullSources ? {} : { refreshGitMetadata: false, includeIndexState: false })
+      const focusedWorkspace = getFocusedWorkspace()
+      const activeRuns = listActiveWorkbenchRuns()
+      const resume = resolveResumeNavigation({ sources, focusedWorkspace, activeRuns })
+      const focusedWorkspaceProjection = focusedWorkspace ? {
+        version: focusedWorkspace.version,
+        sourceId: focusedWorkspace.sourceId,
+        ...(focusedWorkspace.repoGroupId ? { repoGroupId: focusedWorkspace.repoGroupId } : {}),
+        ...(focusedWorkspace.branchName ? { branchName: focusedWorkspace.branchName } : {}),
+        ...(focusedWorkspace.isGitWorktree !== undefined ? { isGitWorktree: focusedWorkspace.isGitWorktree } : {}),
+        updatedAt: focusedWorkspace.updatedAt
+      } : undefined
       return {
         connected: true,
         sourceCount: sources.length,
@@ -319,8 +509,15 @@ export function createPortableReadHandlers(dependencies: PortableReadHandlerDepe
         indexedFiles: dependencies.indexedFiles ? dependencies.indexedFiles() : getIndexedDocumentCountFromDisk(),
         ...(dependencies.indexingActive ? { indexingActive: dependencies.indexingActive() } : {}),
         ...(dependencies.indexingSourceIds ? { indexingSourceIds: dependencies.indexingSourceIds() } : {}),
+        ...(dependencies.maintenanceSnapshot ? { maintenance: dependencies.maintenanceSnapshot() } : {}),
         ...(include === 'sources' || include === 'all' ? { sources } : {}),
-        ...(include === 'active' || include === 'all' ? { activeSourceIds: active.activeSourceIds, contextMode: active.mode } : {})
+        ...(include === 'active' || include === 'all' ? {
+          activeSourceIds: active.activeSourceIds,
+          contextMode: active.mode,
+          resume,
+          ...(focusedWorkspaceProjection ? { focusedWorkspace: focusedWorkspaceProjection } : {}),
+          activeRuns: resume.status === 'ACTIVE_RUN' || resume.status === 'BLOCKED_RUN' ? [resume.activeRun] : []
+        } : {})
       }
     },
     readWorkbenchContext: (payload, context) => contextReadWithDependencies(payload as Payload, context, dependencies)
@@ -328,6 +525,136 @@ export function createPortableReadHandlers(dependencies: PortableReadHandlerDepe
 }
 
 async function contextReadWithDependencies(payload: Payload, context: PortableExecutionContext, dependencies: PortableReadHandlerDependencies): Promise<Record<string, unknown>> {
-  if (asString(payload.mode) === 'read_paths') return readPaths(payload, context, dependencies)
-  return readContext(payload, context, dependencies)
+  if (asString(payload.mode) === 'active_run') return readContext(payload, context, dependencies)
+
+  const sourceId = actionRunSourceId(payload, context)
+  const binding = sourceId
+    ? ensureWorkbenchActionRun({ sourceId, goal: actionRunGoal(payload), requestId: context.requestId })
+    : undefined
+  if (binding) projectActionRunStart(binding, context)
+
+  try {
+    const recoveryIdentity: WorkbenchReadResultRecoveryIdentity | undefined = binding
+      ? {
+          sourceId: binding.sourceId,
+          sessionId: binding.sessionId,
+          runId: binding.runId,
+          ...(context.requestId ? { requestId: context.requestId } : {}),
+          mode: asString(payload.mode) || 'repository operation',
+          ...(Array.isArray(payload.paths) ? { paths: payload.paths.filter((value): value is string => typeof value === 'string').slice(0, MAX_PATHS) } : {}),
+          ...(asString(payload.path) ? { path: asString(payload.path) } : {}),
+          ...(asString(payload.query) ? { query: asString(payload.query) } : {})
+        }
+      : undefined
+    const recovered = recoveryIdentity ? getWorkbenchReadResultRecovery(recoveryIdentity, dependencies.readResultRecovery) : undefined
+    if (recovered) {
+      let recoveredResult: Record<string, unknown>
+      try {
+        const parsed = JSON.parse(recovered.content)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('recovery payload is not an object')
+        recoveredResult = parsed as Record<string, unknown>
+      } catch {
+        throw new PortableOperationError('dependency_unavailable', 'The completed Workbench result could not be decoded for recovery.', { details: { recoveryId: recovered.recoveryId } })
+      }
+      if (binding) {
+        appendAgentEvent({
+          jobId: binding.runId,
+          sourceId: binding.sourceId,
+          type: 'read_recovered',
+          activityKind: 'run_progress',
+          message: 'Workbench recovered the completed repository result without rereading.',
+          requestId: context.requestId,
+          status: 'completed'
+        })
+      }
+      const evidence = attachWorkbenchEvidence({
+        entries: [{
+          kind: 'capability_result',
+          owner: recovered.owner,
+          retentionClass: 'active_run',
+          content: recovered.content
+        }]
+      }, dependencies.evidenceStore)
+      if (evidence.evidenceRefs?.length) {
+        markWorkbenchReadResultReconciled(recovered.recoveryId, evidence.evidenceRefs[0].evidenceId, dependencies.readResultRecovery)
+        if (binding) projectResponseCompleted(binding, context, true)
+        return { ...recoveredResult, resultRef: evidence.evidenceRefs[0].evidenceId }
+      }
+      if (binding) projectResponseCompleted(binding, context, true)
+      return {
+        ...recoveredResult,
+        resultRef: recovered.evidenceId,
+        resultPersistence: { status: 'recovery_pending', authoritative: false },
+        evidenceUnavailable: evidence.evidenceUnavailable
+      }
+    }
+    const result = asString(payload.mode) === 'read_paths'
+      ? await readPaths(payload, context, dependencies)
+      : await readContext(payload, context, dependencies)
+    if (binding) {
+      projectContextRead(binding, payload, context)
+      result.workbenchRun = binding
+    }
+    if (!binding) return { ...result, ...(context.requestId ? { requestId: context.requestId } : {}) }
+
+    const durableResult = {
+      ...result,
+      ...(context.requestId ? { requestId: context.requestId } : {})
+    }
+    const owner = {
+      sourceId: binding.sourceId,
+      sessionId: binding.sessionId,
+      runId: binding.runId,
+      operationId: 'readWorkbenchContext',
+      ...(context.requestId ? { requestId: context.requestId } : {})
+    }
+    const content = redactSecrets(JSON.stringify(durableResult))
+    const resultRef = deterministicWorkbenchEvidenceId({ kind: 'capability_result', owner, retentionClass: 'active_run', content })
+    projectResultPersisting(binding, context)
+    const recovery = recoveryIdentity
+      ? persistWorkbenchReadResult({ identity: recoveryIdentity, owner, evidenceId: resultRef, content })
+      : undefined
+    if (recovery && !recovery.ok) {
+      throw new PortableOperationError('dependency_unavailable', 'Workbench completed the read but could not persist its bounded recovery result.', { details: recovery })
+    }
+    let evidence = attachWorkbenchEvidence({ entries: [{ kind: 'capability_result', owner, retentionClass: 'active_run', content }] }, dependencies.evidenceStore)
+    // A lock collision is transient. Retry the persistence operation once, without rerunning the repository read.
+    if (!evidence.evidenceRefs?.length && evidence.evidenceUnavailable?.code === 'EVIDENCE_STORE_BUSY') {
+      evidence = attachWorkbenchEvidence({ entries: [{ kind: 'capability_result', owner, retentionClass: 'active_run', content }] }, dependencies.evidenceStore)
+    }
+    if (!evidence.evidenceRefs?.length) {
+      if (binding) projectResponseCompleted(binding, context)
+      return {
+        ...durableResult,
+        resultRef,
+        resultPersistence: { status: 'recovery_pending', authoritative: false, ...(recovery && recovery.ok ? { recoveryId: recovery.record.recoveryId } : {}) },
+        evidenceUnavailable: evidence.evidenceUnavailable
+      }
+    }
+    const authoritativeRef = evidence.evidenceRefs[0].evidenceId
+    if (recovery?.ok) markWorkbenchReadResultReconciled(recovery.record.recoveryId, authoritativeRef, dependencies.readResultRecovery)
+    if (binding) projectResponseCompleted(binding, context)
+    return {
+      ...durableResult,
+      resultRef: authoritativeRef
+    }
+  } catch (error) {
+    if (binding) {
+      updateAgentJob(binding.runId, {
+        status: 'failed',
+        blockedReason: 'context_read_failed',
+        summary: 'The external Workbench context operation failed before the task could continue.'
+      })
+      appendAgentEvent({
+        jobId: binding.runId,
+        sourceId: binding.sourceId,
+        type: 'job_failed',
+        activityKind: 'run_failed',
+        message: 'Repository context operation failed.',
+        requestId: context.requestId,
+        status: 'failed'
+      })
+    }
+    throw error
+  }
 }

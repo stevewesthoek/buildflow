@@ -4,9 +4,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { getConfigPath, expandTilde } from '../utils/paths'
-import { loadConfig, saveConfig, withSourceDefaults, withSourceIndexState, generateSourceIdFromPath, clearGitMetadataCache, setSourceIndexStatus, type AgentConfig } from './config'
-import { upsertIndexState } from './index-state'
-import { Indexer } from './indexer'
+import { getSourceIndexBinding, loadConfig, saveConfig, withSourceDefaults, withSourceIndexState, generateSourceIdFromPath, clearGitMetadataCache, setSourceIndexStatus, type AgentConfig } from './config'
+import { getIndexRecord, upsertIndexState } from './index-state'
+import { IndexScanError, Indexer } from './indexer'
+import { INDEX_SCAN_EXCLUSION_VERSION, INDEX_SCAN_POLICY_ID, INDEX_SCAN_POLICY_VERSION } from './index-scan-policy'
 import type { KnowledgeSource } from '@workbench/shared'
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ type KnowledgeSourceExt = KnowledgeSource & { isManagedWorktree?: boolean }
 
 const GIT_TIMEOUT_MS = 2000
 const activeReindexes = new Set<string>()
+const indexRetryAttempts = new Map<string, number>()
 export const MANAGED_WORKTREES_BASE = path.join(os.homedir(), '.buildflow', 'worktrees')
 
 // Fixed Git executable — no PATH resolution
@@ -455,40 +457,105 @@ export function startSourceReindex(sourceId: string): ReindexSourceResult {
     upsertIndexState(sourceId, {
       indexed: false,
       indexStatus: 'indexing',
-      indexError: undefined
+      indexError: undefined,
+      indexProgressCompleted: 0,
+      indexProgressTotal: 0
     })
     void (async () => {
       try {
-        const indexedFileCount = await new Indexer([sourceId]).buildIndexForSource(sourceId, target.path)
+        const indexedFileCount = await new Indexer([sourceId], {
+          onProgress: progress => setSourceIndexStatus(sourceId, {
+            indexed: false,
+            indexStatus: 'indexing',
+            indexedFileCount: progress.indexed,
+            indexProgressCompleted: progress.completed,
+            indexProgressTotal: progress.total,
+            indexError: undefined
+          })
+        }).buildIndexForSource(sourceId, target.path)
         setSourceIndexStatus(sourceId, {
           indexed: true,
           indexStatus: 'ready',
           indexedFileCount,
+          indexProgressCompleted: indexedFileCount,
+          indexProgressTotal: indexedFileCount,
           lastIndexedAt: new Date().toISOString(),
           indexError: undefined
         })
+        indexRetryAttempts.delete(sourceId)
       } catch (error) {
-        upsertIndexState(sourceId, {
+        const missing = !fs.existsSync(target.path)
+        const attempt = indexRetryAttempts.get(sourceId) ?? 0
+        const retryDelayMs = 2 ** attempt * 1000
+        const retryScheduled = !missing && attempt < 3
+        const indexFailureCode = missing
+          ? 'FAILED_IO' as const
+          : error instanceof IndexScanError ? error.failureCode : 'FAILED_IO' as const
+        setSourceIndexStatus(sourceId, {
           indexed: false,
           indexStatus: 'failed',
-          indexError: error instanceof Error ? error.message : String(error)
+          indexFailureCode,
+          indexError: missing
+            ? 'source_missing_or_renamed'
+            : String(error instanceof Error ? error.message : error) + (retryScheduled ? '. Retrying automatically in ' + Math.ceil(retryDelayMs / 1000) + 's.' : '')
         })
+        if (retryScheduled) {
+          indexRetryAttempts.set(sourceId, attempt + 1)
+          setTimeout(() => {
+            try {
+              if (getCurrentSources(loadConfigRequired()).some(source => source.id === sourceId && source.enabled)) startSourceReindex(sourceId)
+            } catch { /* the next discovery/reconciliation will surface the source state */ }
+          }, retryDelayMs)
+        } else {
+          indexRetryAttempts.delete(sourceId)
+        }
       } finally {
         activeReindexes.delete(sourceId)
       }
     })()
   }
 
-  const source = listSourceDetails().find(item => item.id === sourceId)
-  if (!source) throw new SourceManagementError('internal', `Source disappeared after reindex start: ${sourceId}`)
+  // Do not hydrate every configured source here. Full source hydration checks
+  // Git HEAD/worktree identity for ready records and can take several seconds
+  // when a user has many sources. Reindex admission must return promptly so
+  // native status/XPC startup remains responsive.
+  const source = {
+    ...withSourceIndexState(target),
+    isManaged: !!target.isManagedWorktree,
+    managedWorktreeDir: target.isManagedWorktree ? getManagedWorktreePath(target) : undefined
+  }
   return { source, status: activeReindexes.has(sourceId) ? 'indexing' : (source.indexStatus === 'ready' ? 'ready' : 'failed') }
+}
+
+function requiresStartupReconciliation(sourceId: string): boolean {
+  const record = getIndexRecord(sourceId)
+  if (!record || record.indexStatus !== 'ready' || record.indexed !== true) return true
+  if (!record.lastIndexedAt
+    || record.indexPolicyVersion !== INDEX_SCAN_POLICY_VERSION
+    || record.indexExclusionVersion !== INDEX_SCAN_EXCLUSION_VERSION
+    || record.indexPolicyIdentity !== INDEX_SCAN_POLICY_ID
+    || !record.sourcePathIdentity) return true
+
+  const current = getSourceIndexBinding(sourceId)
+  return !current
+    || current.sourcePathIdentity !== record.sourcePathIdentity
+    || current.sourceRevision !== record.sourceRevision
+    || current.sourceWorktreeIdentity !== record.sourceWorktreeIdentity
 }
 
 /** Repair enabled sources whose durable index is pending or stale after host startup. */
 export function startPendingSourceReindexes(): void {
-  const pending = listSourceDetails().filter(source => source.enabled && source.indexStatus !== 'ready')
+  // Startup must use only the persisted source/index records. Calling
+  // listSourceDetails() here performs Git identity checks for every ready
+  // source, which can starve the native ingress before its first status probe.
+  const pending = getCurrentSources(loadConfigRequired())
   void (async () => {
     for (const source of pending) {
+      // Yield before each source's binding check and reindex admission. A
+      // large configured source set must never monopolize the host event loop
+      // immediately after native ingress announces readiness.
+      await new Promise<void>(resolve => setImmediate(resolve))
+      if (!source.enabled || !requiresStartupReconciliation(source.id)) continue
       if (activeReindexes.has(source.id)) continue
       try {
         startSourceReindex(source.id)
@@ -515,6 +582,9 @@ export function refreshSourceMetadata(sourceId: string): RefreshSourceMetadataRe
 
   let meta: Partial<GitRepMeta> = {}
   try { meta = requireGitRepo(target.path) } catch { /* non-git source — keep existing metadata */ }
+  const metadataChanged = Object.keys(meta).length > 0 && (
+    target.repoGroupId !== meta.repoGroupId || target.repoRoot !== meta.repoRoot || target.branchName !== meta.branchName
+  )
 
   const backupSources = config.sources ? [...config.sources] : undefined
   try {
@@ -527,6 +597,7 @@ export function refreshSourceMetadata(sourceId: string): RefreshSourceMetadataRe
   }
 
   const updated = listSourceDetails().find(s => s.id === sourceId)
+  if (metadataChanged && updated?.enabled) startSourceReindex(sourceId)
   if (!updated) throw new SourceManagementError('internal', `Source disappeared after refresh: ${sourceId}`)
   return { source: updated }
 }

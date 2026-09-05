@@ -141,6 +141,8 @@ test('rejects connected false', () => assert.throws(() => parseWorkbenchStatusRe
 test('rejects missing sources', () => assert.throws(() => parseWorkbenchStatusResponse({ content: [{ type: 'text', text: JSON.stringify({ connected: true, sourceCount: 1 }) }] }), /omitted sources/))
 test('rejects malformed source count', () => assert.throws(() => parseWorkbenchStatusResponse({ content: [{ type: 'text', text: JSON.stringify({ connected: true, sourceCount: '1', sources: [{}] }) }] }), /invalid sourceCount/))
 test('rejects mismatched source count', () => assert.throws(() => parseWorkbenchStatusResponse({ content: [{ type: 'text', text: JSON.stringify({ connected: true, sourceCount: 2, sources: [{}] }) }] }), /did not match/))
+test('accepts an explicitly truncated source list', () => assert.deepEqual(parseWorkbenchStatusResponse({ content: [{ type: 'text', text: JSON.stringify({ connected: true, sourceCount: 40, sources: [{}], sourcesTruncated: true }) }] }), { connected: true, sourceCount: 40 }))
+test('rejects a truncated source list larger than sourceCount', () => assert.throws(() => parseWorkbenchStatusResponse({ content: [{ type: 'text', text: JSON.stringify({ connected: true, sourceCount: 1, sources: [{}, {}], sourcesTruncated: true }) }] }), /exceeded sourceCount/))
 test('rejects tool-level errors without leaking payload text', () => assert.throws(() => parseWorkbenchStatusResponse({ isError: true, content: [{ type: 'text', text: 'Bearer private-token' }] }), error => error instanceof Error && error.message === 'Workbench MCP health request failed.'))
 test('rejects invalid JSON', () => assert.throws(() => parseWorkbenchStatusResponse({ content: [{ type: 'text', text: '{' }] }), /not valid JSON/))
 test('rejects non-object payloads', () => assert.throws(() => parseWorkbenchStatusResponse({ content: [{ type: 'text', text: '[]' }] }), /must be an object/))
@@ -156,6 +158,24 @@ test('runs a complete health check and closes the client', async () => {
   assert.equal(client.callCalls, 1)
   assert.equal(client.closeCalls, 1)
   assert(!JSON.stringify(result).includes('/private/'))
+})
+
+test('accepts one valid owner-global Codex registration', async () => {
+  const client = new MockHealthClient()
+  const result = await runHealthCheck({}, dependencies(client, {
+    inspectCodex: () => codex({ globalMatchCount: 1, projectMatchCount: 0, scope: 'global' })
+  }))
+  assert.equal(result.codexRegistration, 'valid')
+  assert.equal(result.connected, true)
+})
+
+test('rejects conflicting global and project Codex registrations', async () => {
+  const client = new MockHealthClient()
+  await assert.rejects(
+    runHealthCheck({}, dependencies(client, { inspectCodex: () => codex({ globalMatchCount: 1, projectMatchCount: 1, duplicateCount: 2 }) })),
+    /Codex/
+  )
+  assert.equal(client.connectCalls, 0)
 })
 
 test('fails invalid Codex registration before starting a client', async () => {

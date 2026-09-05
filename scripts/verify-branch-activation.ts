@@ -103,8 +103,10 @@ try {
   git(mainRepo, ['worktree', 'add', '-b', 'feature-workbench', featureWorktree])
 
   const discovered = discoverRepositories(discoveryRoot).repositories
-  const mainDiscovered = discovered.find(repo => repo.path === mainRepo)
-  const featureDiscovered = discovered.find(repo => repo.path === featureWorktree)
+  const canonicalMainRepo = fs.realpathSync(mainRepo)
+  const canonicalFeatureWorktree = fs.realpathSync(featureWorktree)
+  const mainDiscovered = discovered.find(repo => repo.path === canonicalMainRepo)
+  const featureDiscovered = discovered.find(repo => repo.path === canonicalFeatureWorktree)
   assert(mainDiscovered, 'repository discovery must include the primary checkout')
   assert(featureDiscovered, 'repository discovery must include linked Git worktrees with .git files')
   assert.equal(mainDiscovered.repoGroupId, featureDiscovered.repoGroupId, 'primary checkout and worktree must share a repo group')

@@ -93,6 +93,7 @@ test('preserves the restricted optional Brain profile', async () => {
   assert.equal(entry.required, false)
   assert.equal(entry.env.WORKBENCH_MCP_ALLOWED_TOOLS, 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand')
   assert.equal(entry.env.WORKBENCH_MCP_ALLOWED_COMMAND_KINDS, 'n8n_workflow_migration')
+  assert.equal(entry.env.WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS, '')
 })
 
 test('rejects global duplicates before mutation', async () => {

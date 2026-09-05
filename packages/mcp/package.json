@@ -1,6 +1,6 @@
 {
   "name": "@workbench/mcp",
-  "version": "1.3.12-beta",
+  "version": "1.3.13-beta",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -50,6 +50,182 @@
       "types": "./dist/provider-packaging.d.ts",
       "default": "./dist/provider-packaging.js"
     },
+    "./provider-discovery": {
+      "types": "./dist/provider-discovery.d.ts",
+      "default": "./dist/provider-discovery.js"
+    },
+    "./provider-inventory": {
+      "types": "./dist/provider-inventory.d.ts",
+      "default": "./dist/provider-inventory.js"
+    },
+    "./provider-onboarding": {
+      "types": "./dist/provider-onboarding.d.ts",
+      "default": "./dist/provider-onboarding.js"
+    },
+    "./provider-activation": {
+      "types": "./dist/provider-activation.d.ts",
+      "default": "./dist/provider-activation.js"
+    },
+    "./capability-provider": {
+      "types": "./dist/capability-provider.d.ts",
+      "default": "./dist/capability-provider.js"
+    },
+    "./capability-ecosystem-adapters": {
+      "types": "./dist/capability-ecosystem-adapters.d.ts",
+      "default": "./dist/capability-ecosystem-adapters.js"
+    },
+    "./capability-ecosystem-diagnostics": {
+      "types": "./dist/capability-ecosystem-diagnostics.d.ts",
+      "default": "./dist/capability-ecosystem-diagnostics.js"
+    },
+    "./capability-audit": {
+      "types": "./dist/capability-audit.d.ts",
+      "default": "./dist/capability-audit.js"
+    },
+    "./mcp-capability-adoption": {
+      "types": "./dist/mcp-capability-adoption.d.ts",
+      "default": "./dist/mcp-capability-adoption.js"
+    },
+    "./mcp-capability-provider": {
+      "types": "./dist/mcp-capability-provider.d.ts",
+      "default": "./dist/mcp-capability-provider.js"
+    },
+    "./capability-resolution": {
+      "types": "./dist/capability-resolution.d.ts",
+      "default": "./dist/capability-resolution.js"
+    },
+    "./capability-planning": {
+      "types": "./dist/capability-planning.d.ts",
+      "default": "./dist/capability-planning.js"
+    },
+    "./capability-pre-execution": {
+      "types": "./dist/capability-pre-execution.d.ts",
+      "default": "./dist/capability-pre-execution.js"
+    },
+    "./capability-dispatch": {
+      "types": "./dist/capability-dispatch.d.ts",
+      "default": "./dist/capability-dispatch.js"
+    },
+    "./mcp-capability-adapter": {
+      "types": "./dist/mcp-capability-adapter.d.ts",
+      "default": "./dist/mcp-capability-adapter.js"
+    },
+    "./capability-execution-coordinator": {
+      "types": "./dist/capability-execution-coordinator.d.ts",
+      "default": "./dist/capability-execution-coordinator.js"
+    },
+    "./capability-registry": {
+      "types": "./dist/capability-registry.d.ts",
+      "default": "./dist/capability-registry.js"
+    },
+    "./capability-broker": {
+      "types": "./dist/capability-broker.d.ts",
+      "default": "./dist/capability-broker.js"
+    },
+    "./capability-safe-handlers": {
+      "types": "./dist/capability-safe-handlers.d.ts",
+      "default": "./dist/capability-safe-handlers.js"
+    },
+    "./capability-read-only-cli": {
+      "types": "./dist/capability-read-only-cli.d.ts",
+      "default": "./dist/capability-read-only-cli.js"
+    },
+    "./capability-isolated-output-cli": {
+      "types": "./dist/capability-isolated-output-cli.d.ts",
+      "default": "./dist/capability-isolated-output-cli.js"
+    },
+    "./capability-write-capable-cli": {
+      "types": "./dist/capability-write-capable-cli.d.ts",
+      "default": "./dist/capability-write-capable-cli.js"
+    },
+    "./capability-output-artifact": {
+      "types": "./dist/capability-output-artifact.d.ts",
+      "default": "./dist/capability-output-artifact.js"
+    },
+    "./capability-runtime-enforcement": {
+      "types": "./dist/capability-runtime-enforcement.d.ts",
+      "default": "./dist/capability-runtime-enforcement.js"
+    },
+    "./capability-runtime-lifecycle": {
+      "types": "./dist/capability-runtime-lifecycle.d.ts",
+      "default": "./dist/capability-runtime-lifecycle.js"
+    },
+    "./capability-runtime-bootstrap": {
+      "types": "./dist/capability-runtime-bootstrap.d.ts",
+      "default": "./dist/capability-runtime-bootstrap.js"
+    },
+    "./capability-runtime-diagnostics": {
+      "types": "./dist/capability-runtime-diagnostics.d.ts",
+      "default": "./dist/capability-runtime-diagnostics.js"
+    },
+    "./knowledge-provider": {
+      "types": "./dist/knowledge-provider.d.ts",
+      "default": "./dist/knowledge-provider.js"
+    },
+    "./knowledge-content": {
+      "types": "./dist/knowledge-content.d.ts",
+      "default": "./dist/knowledge-content.js"
+    },
+    "./knowledge-document": {
+      "types": "./dist/knowledge-document.d.ts",
+      "default": "./dist/knowledge-document.js"
+    },
+    "./knowledge-index": {
+      "types": "./dist/knowledge-index.d.ts",
+      "default": "./dist/knowledge-index.js"
+    },
+    "./knowledge-indexer": {
+      "types": "./dist/knowledge-indexer.d.ts",
+      "default": "./dist/knowledge-indexer.js"
+    },
+    "./knowledge-index-store": {
+      "types": "./dist/knowledge-index-store.d.ts",
+      "default": "./dist/knowledge-index-store.js"
+    },
+    "./knowledge-refresh": {
+      "types": "./dist/knowledge-refresh.d.ts",
+      "default": "./dist/knowledge-refresh.js"
+    },
+    "./knowledge-provider-adapter": {
+      "types": "./dist/knowledge-provider-adapter.d.ts",
+      "default": "./dist/knowledge-provider-adapter.js"
+    },
+    "./knowledge-refresh-plan": {
+      "types": "./dist/knowledge-refresh-plan.d.ts",
+      "default": "./dist/knowledge-refresh-plan.js"
+    },
+    "./knowledge-refresh-approval": {
+      "types": "./dist/knowledge-refresh-approval.d.ts",
+      "default": "./dist/knowledge-refresh-approval.js"
+    },
+    "./knowledge-refresh-store": {
+      "types": "./dist/knowledge-refresh-store.d.ts",
+      "default": "./dist/knowledge-refresh-store.js"
+    },
+    "./knowledge-refresh-lifecycle": {
+      "types": "./dist/knowledge-refresh-lifecycle.d.ts",
+      "default": "./dist/knowledge-refresh-lifecycle.js"
+    },
+    "./knowledge-refresh-worker": {
+      "types": "./dist/knowledge-refresh-worker.d.ts",
+      "default": "./dist/knowledge-refresh-worker.js"
+    },
+    "./knowledge-refresh-monitor": {
+      "types": "./dist/knowledge-refresh-monitor.d.ts",
+      "default": "./dist/knowledge-refresh-monitor.js"
+    },
+    "./knowledge-refresh-supervisor": {
+      "types": "./dist/knowledge-refresh-supervisor.d.ts",
+      "default": "./dist/knowledge-refresh-supervisor.js"
+    },
+    "./knowledge-retrieval": {
+      "types": "./dist/knowledge-retrieval.d.ts",
+      "default": "./dist/knowledge-retrieval.js"
+    },
+    "./knowledge-diagnostics": {
+      "types": "./dist/knowledge-diagnostics.d.ts",
+      "default": "./dist/knowledge-diagnostics.js"
+    },
     "./provider-benchmark": {
       "types": "./dist/provider-benchmark.d.ts",
       "default": "./dist/provider-benchmark.js"
@@ -77,6 +253,30 @@
     "./automatic-delegation": {
       "types": "./dist/automatic-delegation.d.ts",
       "default": "./dist/automatic-delegation.js"
+    },
+    "./external-mcp-intake": {
+      "types": "./dist/external-mcp-intake.d.ts",
+      "default": "./dist/external-mcp-intake.js"
+    },
+    "./external-mcp-schema-validation": {
+      "types": "./dist/external-mcp-schema-validation.d.ts",
+      "default": "./dist/external-mcp-schema-validation.js"
+    },
+    "./external-mcp-output-isolation": {
+      "types": "./dist/external-mcp-output-isolation.d.ts",
+      "default": "./dist/external-mcp-output-isolation.js"
+    },
+    "./external-mcp-credential-binding": {
+      "types": "./dist/external-mcp-credential-binding.d.ts",
+      "default": "./dist/external-mcp-credential-binding.js"
+    },
+    "./external-mcp-policy-enforcement": {
+      "types": "./dist/external-mcp-policy-enforcement.d.ts",
+      "default": "./dist/external-mcp-policy-enforcement.js"
+    },
+    "./external-mcp-client-broker": {
+      "types": "./dist/external-mcp-client-broker.d.ts",
+      "default": "./dist/external-mcp-client-broker.js"
     },
     "./device-registry": {
       "types": "./dist/device-registry.d.ts",

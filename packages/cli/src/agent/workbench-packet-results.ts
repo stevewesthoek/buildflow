@@ -2,6 +2,8 @@ import fs from 'fs'
 import path from 'path'
 import { getConfigDir } from '../utils/paths'
 import type { WorkbenchPacketExecutionResult } from './workbench-packet-executor'
+import { WorkbenchEvidenceMetadataSchema, type WorkbenchEvidenceMetadata } from '@workbench/shared'
+import type { WorkbenchEvidenceUnavailable } from './workbench-evidence-producers'
 
 export const WORKBENCH_PACKET_RESULT_STORE_VERSION = 1 as const
 
@@ -14,6 +16,7 @@ export type WorkbenchPacketCompactResult = {
   writesPerformed: boolean
   rolledBack: boolean
   completedSteps: number
+  changedPaths: string[]
   failedStep?: number
   planHash?: string
   validation: Array<{
@@ -21,6 +24,8 @@ export type WorkbenchPacketCompactResult = {
     status: string
     exitCode: number | null
     durationMs: number
+    evidenceRefs?: WorkbenchEvidenceMetadata[]
+    evidenceUnavailable?: WorkbenchEvidenceUnavailable
   }>
   commitHash?: string
   errors: Array<{ code: string; message: string; path?: string }>
@@ -78,6 +83,7 @@ function isCompactResult(value: unknown): value is WorkbenchPacketCompactResult 
     && typeof item.sourceId === 'string'
     && typeof item.status === 'string'
     && typeof item.recordedAt === 'string'
+    && (item.validation === undefined || (Array.isArray(item.validation) && item.validation.every(validation => Array.isArray(validation.evidenceRefs) ? validation.evidenceRefs.every(ref => WorkbenchEvidenceMetadataSchema.safeParse(ref).success) : true)))
 }
 
 function persistStore(store: WorkbenchPacketResultStore): void {
@@ -112,13 +118,16 @@ export function recordWorkbenchPacketResult(params: {
     writesPerformed: execution?.writesPerformed === true,
     rolledBack: execution?.rolledBack === true,
     completedSteps: Math.max(0, Number(execution?.completedSteps || 0)),
+    changedPaths: Array.from(new Set(execution?.changedPaths || [])).slice(0, 32),
     failedStep: execution?.failedStep,
     planHash: execution?.planHash,
     validation: (execution?.validationResults || []).slice(0, 3).map(item => ({
       commandKind: item.commandKind,
       status: item.status,
       exitCode: item.exitCode,
-      durationMs: item.durationMs
+      durationMs: item.durationMs,
+      evidenceRefs: item.evidenceRefs,
+      evidenceUnavailable: item.evidenceUnavailable
     })),
     commitHash: execution?.commitHash,
     errors: [

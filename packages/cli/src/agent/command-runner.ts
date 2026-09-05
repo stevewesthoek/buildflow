@@ -2,7 +2,7 @@ import fs from 'fs'
 import { createHash } from 'crypto'
 import { execFileSync, spawn } from 'child_process'
 import path from 'path'
-import { buildWriteConfirmationToken, normalizeRepoRelativePath, validateWriteTarget } from './safe-access'
+import { buildWriteConfirmationToken, isWithinOrdinaryWriteRoots, normalizeRepoRelativePath, validateWriteTarget } from './safe-access'
 import { runN8nWorkflowExportCapability } from './n8n-workflow-export'
 
 const MAX_OUTPUT_BYTES = 60_000
@@ -24,6 +24,7 @@ export type SafeCommandKind =
   | 'git_diff_stat'
   | 'git_diff_name_only'
   | 'git_diff'
+  | 'git_diff_check'
   | 'git_log_latest'
   | 'git_branch_current'
   | 'verify_public_scope'
@@ -549,6 +550,9 @@ function assertStagePathAllowed(request: SafeCommandRequest, sourceRoot: string,
   }
   if (BINARY_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) throw new Error('Binary path is blocked: ' + relativePath)
   assertExtensionlessGitTextPath(sourceRoot, relativePath)
+  if (!isTrackedInIndexOrHead(sourceRoot, relativePath) && !isWithinOrdinaryWriteRoots(relativePath)) {
+    throw new Error(`${relativePath} is outside ordinary write roots: PATH_NOT_ALLOWED`)
+  }
   return assertGitWriteAllowed(request, sourceRoot, relativePath, 'patch')
 }
 
@@ -1158,6 +1162,7 @@ export function getAllowedCommandKinds(): SafeCommandKind[] {
     'git_diff_stat',
     'git_diff_name_only',
     'git_diff',
+    'git_diff_check',
     'git_log_latest',
     'git_branch_current',
     'verify_public_scope',
@@ -1849,6 +1854,18 @@ export async function runSafeCommand(request: SafeCommandRequest): Promise<SafeC
 
   if (request.commandKind === 'validate_json_files') return validateJsonFiles(request)
   if (request.commandKind === 'security_scan_paths') return scanSecurityPaths(request)
+
+  if (request.commandKind === 'git_diff_check') {
+    const pathspecs = assertExplicitPaths(request.paths).map(item => {
+      const normalized = normalizeRepoRelativePath(item)
+      if (!normalized || normalized === '.' || normalized.startsWith('-')) throw new Error(`Unsafe git pathspec: ${item}`)
+      const resolved = path.resolve(sourceRoot, normalized)
+      const relative = path.relative(sourceRoot, resolved)
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Git pathspec escaped the source root: ${item}`)
+      return normalized
+    })
+    return runProcess(request, ['git', 'diff', '--check', '--', ...pathspecs], sourceRoot)
+  }
 
   if (request.commandKind === 'git_add_paths') {
     const requestedInputPaths = assertExplicitPaths(request.paths, { allowBinaryPaths: true })

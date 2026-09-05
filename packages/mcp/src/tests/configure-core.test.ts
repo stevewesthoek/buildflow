@@ -7,6 +7,8 @@ import {
   WORKBENCH_MCP_PROFILES,
   BRAIN_PROFILE_ALLOWED_TOOLS,
   BRAIN_PROFILE_ALLOWED_COMMAND_KINDS,
+  BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS,
+  MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV,
   PROFILE_AVAILABILITY,
   WORKBENCH_CREDENTIAL_FILE_NAME,
   buildWorkbenchMcpServerSpec,
@@ -31,6 +33,8 @@ test('WORKBENCH_CREDENTIAL_FILE_NAME is the shared cross-client credential file 
 test('BRAIN_PROFILE constants are the exact allowlist values both clients must emit', () => {
   assert.equal(BRAIN_PROFILE_ALLOWED_TOOLS, 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand')
   assert.equal(BRAIN_PROFILE_ALLOWED_COMMAND_KINDS, 'n8n_workflow_migration')
+  assert.equal(BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS, '')
+  assert.equal(MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV, 'WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS')
 })
 
 test('buildWorkbenchMcpServerSpec workbench profile has no scope restrictions', () => {
@@ -44,6 +48,7 @@ test('buildWorkbenchMcpServerSpec workbench profile has no scope restrictions', 
   assert.equal(spec.env.WORKBENCH_MCP_CREDENTIAL_FILE, credFile)
   assert.equal(spec.env.WORKBENCH_MCP_ALLOWED_TOOLS, undefined)
   assert.equal(spec.env.WORKBENCH_MCP_ALLOWED_COMMAND_KINDS, undefined)
+  assert.equal(spec.env.WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS, undefined)
   assert.equal(spec.profile, 'workbench')
   assert.equal(spec.availability, 'required')
   fs.rmSync(root, { recursive: true })
@@ -56,6 +61,7 @@ test('buildWorkbenchMcpServerSpec brain profile includes exact scope restriction
   const spec = buildWorkbenchMcpServerSpec(root, credFile, nodeExec, 'brain')
   assert.equal(spec.env.WORKBENCH_MCP_ALLOWED_TOOLS, BRAIN_PROFILE_ALLOWED_TOOLS)
   assert.equal(spec.env.WORKBENCH_MCP_ALLOWED_COMMAND_KINDS, BRAIN_PROFILE_ALLOWED_COMMAND_KINDS)
+  assert.equal(spec.env.WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS, BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS)
   assert.equal(spec.profile, 'brain')
   assert.equal(spec.availability, 'optional')
   fs.rmSync(root, { recursive: true })

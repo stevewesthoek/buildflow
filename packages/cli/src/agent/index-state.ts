@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import type { IndexedDoc } from '@workbench/shared'
 import { getConfigDir } from '../utils/paths'
+import type { IndexScanFailureCode } from './index-scan-policy'
 
 export type SourceIndexStatus = 'ready' | 'pending' | 'indexing' | 'failed' | 'disabled' | 'unknown'
 
@@ -9,9 +10,21 @@ export type SourceIndexRecord = {
   indexed?: boolean
   indexStatus: SourceIndexStatus
   indexedFileCount?: number
+  indexProgressCompleted?: number
+  indexProgressTotal?: number
   lastIndexedAt?: string
   indexError?: string
+  indexFailureCode?: IndexScanFailureCode
   sourceRevision?: string
+  sourcePathIdentity?: string
+  sourceWorktreeIdentity?: string
+  indexPolicyVersion?: string
+  indexExclusionVersion?: string
+  indexPolicyIdentity?: string
+  discoveredAt?: string
+  queuedAt?: string
+  indexingAt?: string
+  readyAt?: string
 }
 
 export type SourceIndexState = Record<string, SourceIndexRecord>
@@ -48,16 +61,6 @@ export function loadIndexState(): SourceIndexState {
           ...record,
           indexStatus: record.indexError ? 'failed' : 'pending',
           indexed: false
-        }
-        changed = true
-      }
-      // Normalize: if pending but has indexed files and timestamp, set to ready
-      if (record.indexStatus === 'pending' && (record.indexedFileCount ?? 0) > 0 && record.lastIndexedAt) {
-        state[sourceId] = {
-          ...record,
-          indexed: true,
-          indexStatus: 'ready',
-          indexError: undefined
         }
         changed = true
       }
@@ -122,6 +125,24 @@ export function getIndexRecord(sourceId: string): SourceIndexRecord | undefined 
   return loadIndexState()[sourceId]
 }
 
+/**
+ * Reconciliation only updates the observed document count. It must not infer
+ * readiness from documents left by an older or interrupted build; readiness is
+ * established by the explicit successful build transition and revision check.
+ */
+export function reconcileIndexRecord(current: SourceIndexRecord | undefined, indexedFileCount: number): SourceIndexRecord {
+  const indexStatus = current?.indexStatus && current.indexStatus !== 'unknown'
+    ? current.indexStatus
+    : 'pending'
+  return {
+    ...(current || {}),
+    indexed: indexStatus === 'ready',
+    indexStatus,
+    indexedFileCount,
+    indexError: indexStatus === 'ready' ? undefined : current?.indexError
+  }
+}
+
 export function reconcileIndexStateFromDocs(docs: IndexedDoc[], sources: Array<{ id: string; enabled: boolean }>): void {
   const state = loadIndexState()
   const counts = docs.reduce<Record<string, number>>((acc, doc) => {
@@ -143,19 +164,7 @@ export function reconcileIndexStateFromDocs(docs: IndexedDoc[], sources: Array<{
 
     const indexedFileCount = counts[source.id] || 0
     const current = state[source.id]
-    const hasConfirmedReady = current?.indexStatus === 'ready'
-    state[source.id] = {
-      ...(current || {}),
-      indexed: indexedFileCount > 0 || hasConfirmedReady,
-      indexStatus:
-        indexedFileCount > 0 || hasConfirmedReady
-          ? 'ready'
-          : current?.indexStatus === 'failed' && current.indexError
-            ? 'failed'
-            : 'pending',
-      indexedFileCount,
-      indexError: indexedFileCount > 0 || hasConfirmedReady ? undefined : current?.indexError
-    }
+    state[source.id] = reconcileIndexRecord(current, indexedFileCount)
   }
 
   saveIndexState(state)

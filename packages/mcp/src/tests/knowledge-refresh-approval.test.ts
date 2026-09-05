@@ -1,0 +1,9 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { KnowledgeIndex } from '../knowledge-index.js'
+import { createRefreshPlan } from '../knowledge-refresh-plan.js'
+import { approveRefreshProposal, createKnowledgeRefreshApprovalStore, createRefreshProposal, rejectRefreshProposal, scheduleApprovedRefresh } from '../knowledge-refresh-approval.js'
+
+function plan() { return createRefreshPlan(new KnowledgeIndex(), 'docs', { strategy: 'revision', revision: 'r2', observedAt: '2026-01-01T00:00:00.000Z' }, { added: 1, modified: 0, removed: 0, unchanged: 0, bounded: true }, ['a'], 'revision_changed', '2026-01-01T00:00:00.000Z', 'plan-1') }
+test('requires approval before scheduling and records audit events', async () => { const store = createKnowledgeRefreshApprovalStore(); const queue = { enqueue: async (job: { jobId: string }) => { assert.ok(job.jobId); return { accepted: true as const } } }; createRefreshProposal(store, plan()); assert.deepEqual(await scheduleApprovedRefresh(store, queue, 'plan-1', '2026-01-01T00:00:01.000Z'), { ok: false, reason: 'approval_required' }); assert.equal(approveRefreshProposal(store, 'plan-1', '2026-01-01T00:00:01.000Z').ok, true); assert.equal((await scheduleApprovedRefresh(store, queue, 'plan-1', '2026-01-01T00:00:02.000Z')).ok, true); assert.deepEqual(store.events.map(event => event.eventType), ['proposal.created', 'proposal.approved', 'refresh.scheduled']) })
+test('rejection and unavailable queue are fail-closed', async () => { const store = createKnowledgeRefreshApprovalStore(); createRefreshProposal(store, plan()); assert.equal(rejectRefreshProposal(store, 'plan-1', '2026-01-01T00:00:01.000Z', 'not approved').ok, true); assert.deepEqual(await scheduleApprovedRefresh(store, { enqueue: async () => ({ accepted: false as const, reason: 'unavailable' }) }, 'plan-1', '2026-01-01T00:00:02.000Z'), { ok: false, reason: 'approval_required' }) })

@@ -1,5 +1,7 @@
 import type { PortableOperationHandlers } from '../../../../apps/web/src/lib/actions/portable-operation-dispatcher'
-import { PortableOperationError } from '../../../../apps/web/src/lib/actions/portable-operation-errors'
+import { PortableOperationError } from './portable-operation-errors'
+import { resolveWorkbenchActorId } from './autonomy-decision-authorization'
+import { saveAutonomyDecision } from './autonomy-decision-store'
 import { decidePendingApprovalIntent, getPendingApprovalIntent, type WorkbenchApprovalIntentRecord } from './workbench-approval-intents'
 import { getWorkbenchSession, type WorkbenchSessionRecord, type WorkbenchSessionStoreFailure } from './workbench-session-store'
 import { workbenchSessionIdForRun } from './workbench-run-session'
@@ -19,6 +21,8 @@ type NativeApprovalIntentProjection = {
   reason: string
   status: WorkbenchApprovalIntentRecord['status']
   expiresAt: string
+  arguments?: string
+  capabilityId?: string
   decidedAt?: string
   consumedAt?: string
 }
@@ -41,6 +45,7 @@ function project(record: WorkbenchApprovalIntentRecord): NativeApprovalIntentPro
     reason: record.reason,
     status: record.status,
     expiresAt: record.expiresAt,
+    ...(record.decisionRequest ? { arguments: record.decisionRequest.normalizedArgs, capabilityId: record.decisionRequest.capabilityId } : {}),
     ...(record.decidedAt ? { decidedAt: record.decidedAt } : {}),
     ...(record.consumedAt ? { consumedAt: record.consumedAt } : {})
   }
@@ -102,6 +107,22 @@ export function createPortableApprovalHandlers(): PortableOperationHandlers {
           : decided.code === 'APPROVAL_INTENT_STORE_BUSY' || decided.code === 'APPROVAL_INTENT_STORE_CORRUPT' ? 'dependency_unavailable'
           : 'invalid_request'
         throw new PortableOperationError(code, decided.message)
+      }
+      if (bound.record.decisionRequest) {
+        if (!bound.record.evidenceRef) {
+          throw new PortableOperationError('dependency_unavailable', 'The exact approval evidence reference is unavailable; the decision was not persisted.')
+        }
+        const actorId = resolveWorkbenchActorId(context.actorId)
+        if (!actorId) throw new PortableOperationError('dependency_unavailable', 'The existing actor identity is unavailable; the decision was not persisted.')
+        const persisted = saveAutonomyDecision({
+          request: bound.record.decisionRequest,
+          decision: action === 'approve' ? 'APPROVED' : 'DENIED',
+          evidenceRef: bound.record.evidenceRef,
+          actorId,
+          createdAt: decided.record.decidedAt || decided.record.updatedAt,
+          expiresAt: bound.record.expiresAt
+        })
+        if (persisted.ok === false) throw new PortableOperationError('dependency_unavailable', persisted.message)
       }
       return { status: 'ok', changed: decided.changed, intent: project(decided.record) }
     }

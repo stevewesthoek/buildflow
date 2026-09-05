@@ -2,25 +2,30 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { getSourcesSafe, getWriteMode, loadConfig } from './config'
+import type { AutonomyDecisionEvidenceReference } from '@workbench/shared'
 import { buildWriteConfirmationToken, hasValidWriteConfirmation, normalizeRepoRelativePath, validateWriteTarget, type WriteChangeType } from './safe-access'
-import { getAllowedCommandKinds, runSafeCommand } from './command-runner'
+import { getAllowedCommandKinds, runSafeCommand, type SafeCommandRequest, type SafeCommandResult } from './command-runner'
 import { classifyParsedRunCommandRequest, parseRunCommandRouteRequest, toSafeCommandRequest } from './run-command-request'
-import { executeWithWorkbenchAdmission } from './workbench-admission-orchestrator'
-import { getCompactWorkbenchValidationJob, scheduleWorkbenchValidationJob, submitWorkbenchValidationJob } from './workbench-validation-jobs'
-import { runControlledWorkflowMigrationCommand } from './n8n-workflow-migration-command-adapter'
-import { createWorkbenchRun, getActiveWorkbenchRun, resumeWorkbenchRun } from './agent-jobs'
+import { executeWithWorkbenchAdmission, type WorkbenchAdmissionOptions } from './workbench-admission-orchestrator'
+import { cancelWorkbenchValidationJob, compactWorkbenchValidationJobForPublic, getWorkbenchValidationJob, getWorkbenchValidationJobResultPage, scheduleWorkbenchValidationJob, submitWorkbenchValidationJob } from './workbench-validation-jobs'
+import { runControlledWorkflowMigrationCommand, type MigrationCommandAdapterDependencies } from './n8n-workflow-migration-command-adapter'
+import { createWorkbenchRun, ensureWorkbenchActionRun, getActiveWorkbenchRun, resumeWorkbenchRun, updateAgentJob } from './agent-jobs'
 import { appendAgentEvent, findOpenApprovalActivity } from './agent-events'
 import { getWorkbenchSession } from './workbench-session-store'
+import { authorizeWorkbenchValidationJobRead, readAuthorizedWorkbenchEvidence } from './workbench-evidence-retrieval'
 import { closeWorkbenchRun } from './workbench-run-close'
 import { projectPortableActiveRunActivity } from './portable-read-handlers'
 import { preflightWorkbenchPacket, type WorkbenchPacket } from './workbench-packets'
 import { reserveWorkbenchPacket, claimNextWorkbenchPacket, compactWorkbenchPacketLeaseRecord } from './workbench-packet-store'
 import { planWorkbenchPacketExecution } from './workbench-packet-plan'
-import { executeWorkbenchPacket } from './workbench-packet-executor'
-import { buildApprovalRequestDigest, consumeApprovedApprovalIntent, consumeMatchingApprovalIntentAfterConfirmedSuccess, ensurePendingApprovalIntent } from './workbench-approval-intents'
+import { compactWorkbenchPacketExecutionResult, executeWorkbenchPacket } from './workbench-packet-executor'
+import { consumeMatchingApprovalIntentAfterConfirmedSuccess, ensurePendingApprovalIntent } from './workbench-approval-intents'
+import { attachWorkbenchEvidence, type WorkbenchEvidenceAttachment, type WorkbenchEvidenceReference } from './workbench-evidence-producers'
+import { prepareAutonomyDecisionAuthorization, type AutonomyDecisionAuthorization } from './autonomy-decision-authorization'
 import type { PortableOperationHandlers, PortableExecutionContext } from '../../../../apps/web/src/lib/actions/portable-operation-dispatcher'
-import { PortableOperationError } from '../../../../apps/web/src/lib/actions/portable-operation-errors'
+import { PortableOperationError } from './portable-operation-errors'
 import { authorizeContextOperation } from './context-broker'
+import { workbenchSessionIdForRun } from './workbench-run-session'
 
 type Payload = Record<string, unknown>
 type RouteResult = { statusCode: number; body: Record<string, unknown> }
@@ -66,8 +71,8 @@ function sessionFor(body: Payload, context: PortableExecutionContext): string {
   return sessionId
 }
 
-function requireEnabledSource(sourceId: string): { id: string; path: string } {
-  const source = getSourcesSafe({ refreshGitMetadata: false }).find(item => item.id === sourceId && item.enabled)
+function requireEnabledSource(sourceId: string, sources = getSourcesSafe({ refreshGitMetadata: false })): { id: string; path: string } {
+  const source = sources.find(item => item.id === sourceId && item.enabled)
   if (!source) throw new PortableOperationError('source_mismatch', `Source not found or disabled: ${sourceId}`)
   return source
 }
@@ -113,6 +118,267 @@ function fileActivityPaths(changeType: string, body: Record<string, unknown>): s
 }
 
 type ApprovalRequirement = { operation: string; paths: string[]; reason: string }
+
+function fileDecisionOperation(changeType: string): string {
+  const operations: Record<string, string> = {
+    create: 'create_file', overwrite: 'overwrite_file', patch: 'patch_file', append: 'append_file',
+    delete_file: 'delete_file', delete_directory: 'delete_directory', move: 'move_file',
+    rename: 'rename_file', mkdir: 'mkdir', rmdir: 'rmdir'
+  }
+  return operations[changeType] || changeType
+}
+
+function fileDecisionPaths(body: Payload): string[] {
+  return [body.path, body.from, body.to]
+    .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+}
+
+function decisionArguments(value: Record<string, unknown>): Record<string, unknown> {
+  // Paths have their own canonical set in the decision request. Keeping raw
+  // path spellings in arguments would make ./a, a, and a\\b different despite
+  // representing the same exact action scope.
+  return Object.fromEntries(Object.entries(value).filter(([key]) => ![
+    'confirmedByUser', 'confirmationToken', 'signal', 'approvalId',
+    'path', 'from', 'to', 'normalizedPath', 'paths', 'outputPath'
+  ].includes(key)))
+}
+
+function commandNeedsDurableDecision(commandKind: string): boolean {
+  return ['git_add_paths', 'git_commit', 'git_push', 'run_exact_command', 'n8n_workflow_export'].includes(commandKind)
+}
+
+function commandDecisionCategory(commandKind: string): 'git' | 'command' | 'capability' {
+  if (commandKind.startsWith('git_')) return 'git'
+  if (commandKind === 'n8n_workflow_export') return 'capability'
+  return 'command'
+}
+
+function decisionEvidence(request: AutonomyDecisionAuthorization['request'], sourceId: string, sessionId: string, runId: string, requestId?: string): AutonomyDecisionEvidenceReference | undefined {
+  if (!request) return undefined
+  const evidence: WorkbenchEvidenceAttachment = attachWorkbenchEvidence({ entries: [{
+    kind: 'validation_result',
+    owner: {
+      sourceId,
+      sessionId,
+      runId,
+      ...(requestId ? { requestId } : {}),
+      operationId: `autonomy:${request.operation}`
+    },
+    content: JSON.stringify({
+      schemaVersion: 1,
+      event: 'autonomy_confirmation_requested',
+      requestFingerprint: request.requestFingerprint,
+      scopeFingerprint: request.scopeFingerprint,
+      operation: request.operation,
+      paths: request.paths,
+      policyFingerprint: request.policy.fingerprint
+    }),
+    retentionClass: 'active_run'
+  }] })
+  const metadata = evidence.evidenceRefs?.[0]
+  return metadata
+    ? { evidenceId: metadata.evidenceId, kind: metadata.kind, reference: metadata.evidenceId, recordedAt: metadata.createdAt }
+    : undefined
+}
+
+function decisionFailure(authorization: AutonomyDecisionAuthorization): RouteResult {
+  const denied = authorization.status === 'denied'
+  return {
+    statusCode: denied ? 403 : 503,
+    body: {
+      status: 'blocked',
+      requiresConfirmation: false,
+      reason: authorization.reasonCode || (denied ? 'PERSISTED_DENIAL' : 'AUTONOMY_DECISION_UNAVAILABLE'),
+      error: {
+        code: denied ? 'AUTONOMY_DECISION_DENIED' : 'AUTONOMY_DECISION_UNAVAILABLE',
+        message: authorization.message || (denied ? 'The exact persisted denial applies.' : 'The exact persisted decision could not be checked safely.')
+      }
+    }
+  }
+}
+
+function commandActivityPaths(request: SafeCommandRequest): string[] | undefined {
+  const paths = Array.isArray(request.paths)
+    ? request.paths
+    : typeof request.outputPath === 'string' ? [request.outputPath] : []
+  const normalized = Array.from(new Set(paths
+    .filter((value): value is string => typeof value === 'string')
+    .map(value => normalizeRepoRelativePath(value))
+    .filter(Boolean)))
+  return normalized.length > 0 ? normalized : undefined
+}
+
+function activityEvidenceRefs(value: unknown): Array<{ kind: 'diff' | 'validation' | 'artifact'; ref: string }> | undefined {
+  if (!Array.isArray(value)) return undefined
+  const refs: Array<{ kind: 'diff' | 'validation' | 'artifact'; ref: string }> = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const ref = item as Partial<WorkbenchEvidenceReference>
+    if (typeof ref.evidenceId !== 'string' || !ref.evidenceId) continue
+    if (ref.kind === 'diff') refs.push({ kind: 'diff', ref: ref.evidenceId })
+    else if (ref.kind === 'validation_result') refs.push({ kind: 'validation', ref: ref.evidenceId })
+    else if (ref.kind === 'raw_log') refs.push({ kind: 'artifact', ref: ref.evidenceId })
+  }
+  return refs.length > 0 ? refs : undefined
+}
+
+function canonicalEvidenceRefs(value: unknown): WorkbenchEvidenceReference[] {
+  if (!Array.isArray(value)) return []
+  const refs: WorkbenchEvidenceReference[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const ref = item as Partial<WorkbenchEvidenceReference>
+    if (typeof ref.evidenceId === 'string' && ref.evidenceId) refs.push(ref as WorkbenchEvidenceReference)
+  }
+  return refs
+}
+
+function commandEvidenceEntries(params: {
+  sourceId: string
+  sessionId?: string
+  runId?: string
+  requestId?: string
+  request: SafeCommandRequest
+  result: SafeCommandResult
+}): Parameters<typeof attachWorkbenchEvidence>[0]['entries'] {
+  const { sourceId, sessionId, runId, requestId, request, result } = params
+  const owner = {
+    sourceId,
+    ...(sessionId ? { sessionId } : {}),
+    ...(runId ? { runId } : {}),
+    ...(requestId ? { requestId } : {}),
+    operationId: `runWorkbenchCommand:${request.commandKind}`
+  }
+  const retentionClass = runId ? 'active_run' as const : 'standard' as const
+  const isDiff = ['git_diff', 'git_diff_stat', 'git_diff_name_only', 'git_diff_cached_stat', 'git_diff_cached_name_only'].includes(request.commandKind)
+  const output = [
+    result.stdout ? `stdout:\n${result.stdout}` : '',
+    result.stderr ? `stderr:\n${result.stderr}` : ''
+  ].filter(Boolean).join('\n')
+  const entries: Parameters<typeof attachWorkbenchEvidence>[0]['entries'] = []
+  if (output && result.status !== 'needs_confirmation') {
+    entries.push({ kind: isDiff ? 'diff' : 'raw_log', owner, content: output, retentionClass })
+  }
+  const isValidation = [
+    'run_package_script',
+    'run_package_test',
+    'run_package_test_marker',
+    'type_check_web',
+    'type_check_cli',
+    'run_exact_command',
+    'security_scan_paths',
+    'verify_public_scope'
+  ].includes(request.commandKind)
+  if (isValidation && result.status !== 'needs_confirmation') {
+    entries.push({
+      kind: 'validation_result',
+      owner,
+      content: JSON.stringify({
+        commandKind: result.commandKind,
+        status: result.status,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        stdoutBytes: Buffer.byteLength(result.stdout, 'utf8'),
+        stderrBytes: Buffer.byteLength(result.stderr, 'utf8'),
+        outputTruncated: result.outputTruncated
+      }),
+      retentionClass
+    })
+  }
+  return entries
+}
+
+function attachCommandEvidence(params: {
+  sourceId: string
+  sessionId?: string
+  runId?: string
+  requestId?: string
+  request: SafeCommandRequest
+  result: SafeCommandResult
+}): WorkbenchEvidenceAttachment {
+  return attachWorkbenchEvidence({ entries: commandEvidenceEntries(params) })
+}
+
+function projectCommandStartedActivity(
+  activityRun: { id: string } | undefined,
+  sourceId: string,
+  request: SafeCommandRequest,
+  requestId: string | undefined,
+  startedAt: string
+): void {
+  if (!activityRun) return
+
+  const paths = commandActivityPaths(request)
+  appendAgentEvent({
+    jobId: activityRun.id,
+    sourceId,
+    type: 'command_started',
+    activityKind: 'executor_started',
+    message: `Running ${request.commandKind}`,
+    requestId,
+    commandKind: request.commandKind,
+    status: 'running',
+    ...(paths ? { paths } : {}),
+    createdAt: startedAt
+  })
+}
+
+function projectCommandCompletionActivity(
+  activityRun: { id: string } | undefined,
+  sourceId: string,
+  request: SafeCommandRequest,
+  result: SafeCommandResult,
+  requestId: string | undefined
+): void {
+  if (!activityRun) return
+
+  if (result.status === 'needs_confirmation') return
+
+  const completed = result.status === 'completed'
+  const paths = commandActivityPaths(request)
+  appendAgentEvent({
+    jobId: activityRun.id,
+    sourceId,
+    type: completed ? 'command_completed' : 'command_failed',
+    activityKind: completed ? 'executor_completed' : 'executor_failed',
+    message: `${request.commandKind} ${result.status}`,
+    requestId,
+    commandKind: request.commandKind,
+    status: result.status,
+    ...(paths ? { paths } : {}),
+    ...(activityEvidenceRefs((result as SafeCommandResult & { evidenceRefs?: unknown }).evidenceRefs) ? { evidenceRefs: activityEvidenceRefs((result as SafeCommandResult & { evidenceRefs?: unknown }).evidenceRefs) } : {}),
+    ...(typeof result.durationMs === 'number' ? { telemetry: { durationMs: result.durationMs } } : {})
+  })
+
+  if (completed && request.commandKind === 'git_commit') {
+    const completedRun = updateAgentJob(activityRun.id, {
+      status: 'completed',
+      summary: 'External Workbench task completed with a verified repository commit.',
+      nextActions: []
+    })
+    appendAgentEvent({
+      jobId: activityRun.id,
+      sourceId,
+      type: 'task_committed',
+      activityKind: 'commit_created',
+      message: 'Repository commit completed.',
+      requestId,
+      commandKind: request.commandKind,
+      status: result.status,
+      ...(paths ? { paths } : {}),
+      ...(typeof result.durationMs === 'number' ? { telemetry: { durationMs: result.durationMs } } : {})
+    })
+    appendAgentEvent({
+      jobId: completedRun.id,
+      sourceId: completedRun.sourceId,
+      type: 'job_completed',
+      activityKind: 'run_completed',
+      message: 'External Workbench task completed.',
+      requestId,
+      status: completedRun.status
+    })
+  }
+}
 
 function hasConfirmationAttempt(body: Payload): boolean {
   return body.confirmedByUser === true || (typeof body.confirmationToken === 'string' && Boolean(body.confirmationToken))
@@ -390,12 +656,69 @@ function executeWorkbenchFileChangeMutationInternal(body: Payload, context: Port
 
 export function executeWorkbenchFileChangeMutation(body: Payload, context: PortableExecutionContext = {}): RouteResult {
   const sourceId = sourceFor(body, context)
+  const changeType = typeof body.changeType === 'string' ? body.changeType : ''
+  const actionRun = ['create', 'overwrite', 'patch', 'append', 'delete_file', 'delete_directory', 'move', 'rename', 'mkdir', 'rmdir'].includes(changeType)
+    ? ensureWorkbenchActionRun({
+        sourceId,
+        goal: `External Workbench file task: ${changeType} ${typeof body.path === 'string' ? body.path : typeof body.from === 'string' ? body.from : 'selected path'}`,
+        requestId: context.requestId
+      })
+    : undefined
   const contextMetadata = requireBrokerMutationAuthorization(body, sourceId, 'mutation')
   const result = executeWorkbenchFileChangeMutationInternal(body, context)
-  return contextMetadata ? { ...result, body: { ...result.body, contextMetadata } } : result
+  if (actionRun && result.statusCode >= 400 && !context.suppressFileApprovalActivity) {
+    const blocked = result.body.status === 'needs_confirmation' || result.body.code === 'REQUIRES_EXPLICIT_CONFIRMATION'
+    const requirement = blocked ? fileApprovalRequirement(changeType, result) : undefined
+    updateAgentJob(actionRun.runId, {
+      status: blocked ? 'needs_confirmation' : 'blocked',
+      blockedReason: blocked ? 'confirmation_required' : 'file_change_blocked',
+      summary: blocked ? 'The file change is waiting for explicit confirmation.' : 'The file change was blocked before any filesystem mutation.'
+    })
+    appendAgentEvent({
+      jobId: actionRun.runId,
+      sourceId,
+      type: blocked ? 'control_requested' : 'job_blocked',
+      activityKind: blocked ? 'approval_required' : 'run_blocked',
+      message: blocked
+        ? `${requirement?.operation || changeType} requires approval: ${requirement?.reason || 'explicit confirmation.'}`
+        : 'File change was blocked before mutation.',
+      requestId: context.requestId,
+      ...(requirement ? {
+        approvalOperation: requirement.operation,
+        approvalReason: requirement.reason,
+        paths: requirement.paths
+      } : {}),
+      status: blocked ? 'required' : 'blocked'
+    })
+  }
+  if (actionRun && result.statusCode === 200 && result.body.verified === true && result.body.dryRun !== true && result.body.preflight !== true) {
+    const paths = fileActivityPaths(changeType, result.body)
+    if (paths.length > 0) {
+      appendAgentEvent({
+        jobId: actionRun.runId,
+        sourceId,
+        type: 'file_changed',
+        activityKind: 'file_changed',
+        message: changeType + ' changed ' + (paths.length === 1 ? paths[0] : paths.length + ' paths'),
+        requestId: context.requestId,
+        paths,
+        status: 'completed'
+      })
+    }
+  }
+  const bodyWithRun = actionRun ? { ...result.body, workbenchRun: actionRun } : result.body
+  return contextMetadata || actionRun ? { ...result, body: { ...bodyWithRun, ...(contextMetadata ? { contextMetadata } : {}) } } : result
 }
 
-export async function executeWorkbenchCommandMutation(body: Payload, context: PortableExecutionContext, options: { requireSession?: boolean } = {}): Promise<RouteResult> {
+export type WorkbenchCommandMutationOptions = {
+  requireSession?: boolean
+  getSources?: () => ReturnType<typeof getSourcesSafe>
+  loadConfig?: typeof loadConfig
+  migration?: Partial<MigrationCommandAdapterDependencies>
+  admission?: WorkbenchAdmissionOptions
+}
+
+export async function executeWorkbenchCommandMutation(body: Payload, context: PortableExecutionContext, options: WorkbenchCommandMutationOptions = {}): Promise<RouteResult> {
   if (context.signal?.aborted) return { statusCode: 499, body: { error: { code: 'CANCELLED', message: 'Operation was cancelled before command execution.' } } }
   const sourceId = sourceFor(body, context)
   const requireSession = options.requireSession !== false
@@ -406,7 +729,8 @@ export async function executeWorkbenchCommandMutation(body: Payload, context: Po
   if (routed.mode === 'session_aware' && sessionId && routed.sessionId !== sessionId) return { statusCode: 400, body: { error: { code: 'SESSION_SOURCE_MISMATCH', message: 'sessionId does not match the canonical request sessionId.' } } }
   const parsed = routed.command
   if (parsed.sourceId !== sourceId) return { statusCode: 400, body: { error: { code: 'SESSION_SOURCE_MISMATCH', message: 'sourceId does not match the canonical request sourceId.' } } }
-  const source = requireEnabledSource(sourceId)
+  const configuredSources = options.getSources ? options.getSources() : getSourcesSafe({ refreshGitMetadata: false })
+  const source = requireEnabledSource(sourceId, configuredSources)
   const contextMetadata = requireBrokerMutationAuthorization(body, sourceId, 'command')
   const attachCommandMetadata = (result: RouteResult): RouteResult => contextMetadata
     ? { ...result, body: { ...result.body, contextMetadata } }
@@ -418,6 +742,50 @@ export async function executeWorkbenchCommandMutation(body: Payload, context: Po
       : undefined
     : resolveActivityRun(sourceId, context)
   const dispatch = async (): Promise<RouteResult> => {
+    if (parsed.kind === 'evidence') {
+      const evidence = readAuthorizedWorkbenchEvidence({
+        evidenceId: parsed.evidenceId,
+        sourceId,
+        sessionId: routed.mode === 'session_aware' ? routed.sessionId : sessionId || '',
+        evidenceOwner: parsed.evidenceOwner,
+        cursor: parsed.evidenceCursor,
+        pageBytes: parsed.evidencePageBytes
+      })
+      if (evidence.ok === false) {
+        const statusCode = evidence.code === 'EVIDENCE_PAGE_INVALID'
+          || evidence.code === 'EVIDENCE_PAGE_TOO_LARGE'
+          || evidence.code === 'EVIDENCE_CONTENT_TOO_LARGE'
+          || evidence.code === 'EVIDENCE_CURSOR_INVALID'
+          || evidence.code === 'EVIDENCE_ID_INVALID'
+          ? 400
+          : evidence.code === 'EVIDENCE_STORE_UNAVAILABLE' || evidence.code === 'EVIDENCE_STORE_CORRUPT' ? 503 : 404
+        return {
+          statusCode,
+          body: {
+            status: 'failed',
+            ...(context.requestId ? { requestId: context.requestId } : {}),
+            commandKind: 'read_evidence',
+            validationJobOperation: 'evidence',
+            evidenceId: parsed.evidenceId,
+            code: evidence.code,
+            error: evidence.message
+          }
+        }
+      }
+      return {
+        statusCode: 200,
+        body: {
+          ok: true,
+          status: 'completed',
+          ...(context.requestId ? { requestId: context.requestId } : {}),
+          commandKind: 'read_evidence',
+          validationJobOperation: 'evidence',
+          evidenceId: parsed.evidenceId,
+          evidencePage: evidence.page,
+          ...(evidence.page.resultRef ? { resultRef: evidence.page.resultRef } : {})
+        }
+      }
+    }
     if (parsed.kind === 'validation_submit') {
       const sessionRunId = routed.mode === 'session_aware' && commandSession && !('ok' in commandSession) && typeof commandSession.activeRunId === 'string'
         ? commandSession.activeRunId
@@ -425,39 +793,98 @@ export async function executeWorkbenchCommandMutation(body: Payload, context: Po
       if (sessionRunId && parsed.request.runId && parsed.request.runId !== sessionRunId) {
         return { statusCode: 400, body: { error: { code: 'SESSION_SOURCE_MISMATCH', message: 'runId does not match the canonical active run for this session.' } } }
       }
-      const submitted = submitWorkbenchValidationJob(sessionRunId && !parsed.request.runId ? { ...parsed.request, runId: sessionRunId } : parsed.request)
+      const submitted = submitWorkbenchValidationJob({
+        ...parsed.request,
+        ...(routed.mode === 'session_aware' ? { sessionId: routed.sessionId } : {}),
+        ...(sessionRunId && !parsed.request.runId ? { runId: sessionRunId } : {})
+      })
       if ('code' in submitted) return { statusCode: submitted.code === 'VALIDATION_JOB_STORE_BUSY' ? 409 : 400, body: submitted }
       const schedule = submitted.job.status === 'queued'
         ? scheduleWorkbenchValidationJob({ jobId: submitted.job.jobId, sourceId, sourceRoot: source.path, leaseMs: Math.max(30_000, Math.min((submitted.job.timeoutMs || 300_000) + 60_000, 960_000)) })
         : undefined
-      return { statusCode: 200, body: { status: schedule?.status === 'scheduled' ? 'running' : submitted.job.status, validationJobOperation: 'submit', created: submitted.created, job: schedule?.status === 'scheduled' ? { ...submitted.job, status: 'running', workerId: schedule.workerId } : submitted.job, schedule } }
+      const record = getWorkbenchValidationJob(submitted.job.jobId, sourceId)
+      const publicJob = record ? compactWorkbenchValidationJobForPublic(record) : submitted.job
+      return { statusCode: 200, body: { status: schedule?.status === 'scheduled' ? 'running' : submitted.job.status, validationJobOperation: 'submit', resultRef: submitted.job.jobId, created: submitted.created, job: schedule?.status === 'scheduled' ? { ...publicJob, status: 'running', workerId: schedule.workerId } : publicJob, schedule } }
     }
     if (parsed.kind === 'validation_status') {
-      const job = getCompactWorkbenchValidationJob(parsed.validationJobId, sourceId)
-      return job ? { statusCode: 200, body: { status: job.status, validationJobOperation: 'status', job } } : { statusCode: 404, body: { error: 'Validation job not found for the selected source.' } }
+      const record = getWorkbenchValidationJob(parsed.validationJobId, sourceId)
+      if (!record) return { statusCode: 404, body: { error: 'Validation job not found for the selected source.' } }
+      if (routed.mode !== 'session_aware' || !authorizeWorkbenchValidationJobRead({
+        sourceId,
+        sessionId: routed.sessionId,
+        owner: { sourceId: record.sourceId, sessionId: record.sessionId, runId: record.runId }
+      })) return { statusCode: 404, body: { error: 'Validation job not found for the selected source.' } }
+      const page = parsed.resultStream
+        ? getWorkbenchValidationJobResultPage({ jobId: parsed.validationJobId, sourceId, stream: parsed.resultStream, cursor: parsed.resultCursor, pageBytes: parsed.resultPageBytes })
+        : undefined
+      if (page && page.ok === false) return { statusCode: page.code === 'VALIDATION_JOB_NOT_FOUND' ? 404 : 400, body: { error: page.message, code: page.code, resultRef: parsed.validationJobId } }
+      return { statusCode: 200, body: { status: record.status, validationJobOperation: 'status', resultRef: parsed.validationJobId, job: compactWorkbenchValidationJobForPublic(record), ...(page?.ok ? { resultPage: page.page } : {}) } }
+    }
+    if (parsed.kind === 'validation_cancel') {
+      const cancelled = cancelWorkbenchValidationJob({ jobId: parsed.validationJobId, sourceId, reason: parsed.cancelReason })
+      if (cancelled.ok === false) return { statusCode: cancelled.code === 'VALIDATION_JOB_NOT_FOUND' ? 404 : 409, body: { error: cancelled.message, code: cancelled.code, resultRef: parsed.validationJobId } }
+      const cancelledRecord = getWorkbenchValidationJob(parsed.validationJobId, sourceId)
+      if (!cancelledRecord) return { statusCode: 404, body: { error: 'Validation job disappeared before cancellation could be projected.', code: 'VALIDATION_JOB_NOT_FOUND', resultRef: parsed.validationJobId } }
+      return { statusCode: 200, body: { status: cancelled.job.status, validationJobOperation: 'cancel', resultRef: cancelled.job.resultRef, cancellationRequested: cancelled.cancellationRequested, job: compactWorkbenchValidationJobForPublic(cancelledRecord) } }
     }
     if (parsed.kind === 'migration') {
-      const result = await runControlledWorkflowMigrationCommand(parsed.request, { getSources: getSourcesSafe, getConfiguredGrants: () => loadConfig()?.controlledN8nWorkflowGrants })
+      const getSources = options.migration?.getSources || (() => configuredSources)
+      const configured = options.loadConfig || loadConfig
+      const migrationDependencies = {
+        ...options.migration,
+        getSources,
+        getConfiguredGrants: options.migration?.getConfiguredGrants || (() => configured()?.controlledN8nWorkflowGrants)
+      }
+      const result = await runControlledWorkflowMigrationCommand(parsed.request, migrationDependencies)
       return { statusCode: result.statusCode, body: result.body as Record<string, unknown> }
     }
     const commandOperationKind = parsed.kind === 'direct' ? `command:${parsed.request.commandKind}` : undefined
-    const commandRequestDigest = activityRun && commandOperationKind ? buildApprovalRequestDigest(commandOperationKind, parsed.request) : undefined
     const explicitConfirmationAttempt = parsed.kind === 'direct' && (parsed.request.confirmedByUser === true
       || (typeof parsed.request.confirmationToken === 'string' && Boolean(parsed.request.confirmationToken)))
-    let approvalIntentConsumed = false
+    const decisionSessionId = activityRun ? (sessionId || workbenchSessionIdForRun(activityRun.id)) : undefined
+    let decisionAuthorization: AutonomyDecisionAuthorization | undefined
     let effectiveRequest = parsed.request
-    if (parsed.kind === 'direct' && activityRun && commandOperationKind && commandRequestDigest && !explicitConfirmationAttempt) {
-      const consumed = consumeApprovedApprovalIntent({ sourceId, runId: activityRun.id, sessionId, operationKind: commandOperationKind, requestDigest: commandRequestDigest })
-      if (consumed.ok === true && consumed.consumed) {
-        approvalIntentConsumed = true
+    if (parsed.kind === 'direct' && activityRun && decisionSessionId && commandNeedsDurableDecision(parsed.request.commandKind)) {
+      decisionAuthorization = prepareAutonomyDecisionAuthorization({
+        operation: parsed.request.commandKind,
+        category: commandDecisionCategory(parsed.request.commandKind),
+        sourceId,
+        runId: activityRun.id,
+        sessionId: decisionSessionId,
+        actorId: context.actorId,
+        capabilityId: context.capabilityId || `workbench-command:${parsed.request.commandKind}`,
+        paths: Array.isArray(parsed.request.paths)
+          ? parsed.request.paths
+          : typeof parsed.request.outputPath === 'string' ? [parsed.request.outputPath] : [],
+        arguments: decisionArguments(parsed.request)
+      })
+      if (decisionAuthorization.status === 'denied' || decisionAuthorization.status === 'unavailable') {
+        return decisionFailure(decisionAuthorization)
+      }
+      if (decisionAuthorization.status === 'allowed') {
         effectiveRequest = { ...parsed.request, confirmedByUser: true }
       }
     }
     const safeRequest = toSafeCommandRequest(effectiveRequest, source.path)
     if (!getAllowedCommandKinds().includes(safeRequest.commandKind)) return { statusCode: 400, body: { error: 'commandKind is not allowlisted' } }
-    const result = await runSafeCommand({ ...safeRequest, signal: context.signal })
+    const commandStartedAt = new Date().toISOString()
+    projectCommandStartedActivity(activityRun, sourceId, safeRequest, context.requestId, commandStartedAt)
+    const commandResult = await runSafeCommand({ ...safeRequest, signal: context.signal })
+    const evidence = attachCommandEvidence({ sourceId, sessionId, runId: activityRun?.id, requestId: context.requestId, request: safeRequest, result: commandResult })
+    const result = evidence.evidenceRefs || evidence.evidenceUnavailable
+      ? { ...commandResult, ...evidence }
+      : commandResult
+    projectCommandCompletionActivity(activityRun, sourceId, safeRequest, result, context.requestId)
     if (context.signal?.aborted || result.reason === 'cancelled') {
       return { statusCode: 499, body: { error: { code: 'CANCELLED', message: 'Operation was cancelled during command execution.' } } }
+    }
+    if (result.status === 'needs_confirmation' && decisionAuthorization?.status === 'allowed') {
+      return decisionFailure({
+        ...decisionAuthorization,
+        status: 'denied',
+        reasonCode: 'PERSISTED_POLICY_CHANGED',
+        message: 'The current command guard no longer accepts the persisted exact approval.'
+      })
     }
     if (activityRun) {
       const fallbackPaths = Array.isArray(parsed.request.paths)
@@ -465,27 +892,30 @@ export async function executeWorkbenchCommandMutation(body: Payload, context: Po
         : typeof parsed.request.outputPath === 'string' ? [normalizeRepoRelativePath(parsed.request.outputPath)].filter(Boolean) : []
       const approvalRequirements = commandApprovalRequirements(result, fallbackPaths)
       let approvalId: string | undefined
-      if (result.status === 'needs_confirmation' && result.requiresConfirmation === true && commandOperationKind && commandRequestDigest && approvalRequirements.length > 0) {
+      if (result.status === 'needs_confirmation' && result.requiresConfirmation === true && commandOperationKind && decisionAuthorization?.request && approvalRequirements.length > 0) {
         const paths = Array.from(new Set(approvalRequirements.flatMap(item => item.paths)))
         const reason = Array.from(new Set(approvalRequirements.map(item => item.reason))).sort().join('+')
+        const evidenceRef = decisionEvidence(decisionAuthorization.request, sourceId, decisionSessionId || workbenchSessionIdForRun(activityRun.id), activityRun.id, context.requestId)
         const pending = ensurePendingApprovalIntent({
           sourceId,
           runId: activityRun.id,
-          sessionId,
+          sessionId: decisionSessionId,
           requestId: context.requestId,
           operationKind: commandOperationKind,
           paths,
           reason,
-          requestDigest: commandRequestDigest
+          requestDigest: decisionAuthorization.request.requestFingerprint,
+          decisionRequest: decisionAuthorization.request,
+          ...(evidenceRef ? { evidenceRef } : {})
         })
         if (pending.ok === true) approvalId = pending.record.approvalId
         for (const requirement of approvalRequirements) {
           projectApprovalRequired(activityRun.id, sourceId, { operation: parsed.request.commandKind, paths: requirement.paths, reason: requirement.reason }, context.requestId, approvalId)
         }
       }
-      const confirmationAttempt = explicitConfirmationAttempt || approvalIntentConsumed
-      if (result.status === 'completed' && explicitConfirmationAttempt && commandOperationKind && commandRequestDigest && !approvalIntentConsumed) {
-        consumeMatchingApprovalIntentAfterConfirmedSuccess({ sourceId, runId: activityRun.id, sessionId, operationKind: commandOperationKind, requestDigest: commandRequestDigest })
+      const confirmationAttempt = explicitConfirmationAttempt || decisionAuthorization?.status === 'allowed'
+      if (result.status === 'completed' && explicitConfirmationAttempt && commandOperationKind && decisionAuthorization?.request) {
+        consumeMatchingApprovalIntentAfterConfirmedSuccess({ sourceId, runId: activityRun.id, sessionId: decisionSessionId, operationKind: commandOperationKind, requestDigest: decisionAuthorization.request.requestFingerprint })
       }
       if (result.status === 'completed' && confirmationAttempt) {
         for (const requirement of approvalRequirements) {
@@ -513,6 +943,7 @@ export async function executeWorkbenchCommandMutation(body: Payload, context: Po
       commandKind,
       paths,
       status: 'completed',
+      ...(activityEvidenceRefs(result.body.evidenceRefs) ? { evidenceRefs: activityEvidenceRefs(result.body.evidenceRefs) } : {}),
       ...(typeof result.body.durationMs === 'number' ? { telemetry: { durationMs: result.body.durationMs } } : {})
     })
     return result
@@ -523,9 +954,9 @@ export async function executeWorkbenchCommandMutation(body: Payload, context: Po
     sessionId: sessionId || routed.sessionId,
     sourceId,
     operation: classifyParsedRunCommandRequest(parsed),
-    operationKind: parsed.kind === 'direct' ? parsed.request.commandKind : parsed.kind,
+    operationKind: parsed.kind === 'direct' || parsed.kind === 'migration' ? parsed.request.commandKind : parsed.kind,
     execute: dispatch
-  })
+  }, options.admission)
   if (admitted.ok === false) return { statusCode: admitted.code === 'ADMISSION_BUDGET_REJECTED' || admitted.code === 'ADMISSION_REPOSITORY_REJECTED' ? 409 : 400, body: { ok: false, status: 'blocked', error: { code: admitted.code, message: admitted.message }, ...(contextMetadata ? { contextMetadata } : {}) } }
   return projectCommandActivity(attachCommandMetadata(admitted.result))
 }
@@ -534,30 +965,51 @@ async function apply(body: Payload, context: PortableExecutionContext): Promise<
   const changeType = requiredString(body, 'changeType')
   const sourceId = sourceFor(body, context)
   if (['create', 'overwrite', 'patch', 'append', 'delete_file', 'delete_directory', 'move', 'rename', 'mkdir', 'rmdir'].includes(changeType)) {
-    const run = resolveActivityRun(sourceId, context)
+    const actionRun = ensureWorkbenchActionRun({
+      sourceId,
+      goal: `External Workbench file task: ${changeType} ${typeof body.path === 'string' ? body.path : typeof body.from === 'string' ? body.from : 'selected path'}`,
+      requestId: context.requestId
+    })
+    const run = { id: actionRun.runId }
     const operationKind = `file:${changeType}`
-    const requestDigest = run ? buildApprovalRequestDigest(operationKind, body) : undefined
-    let approvalIntentConsumed = false
+    const decisionSessionId = context.sessionId || workbenchSessionIdForRun(run.id)
+    const decisionAuthorization = prepareAutonomyDecisionAuthorization({
+      operation: fileDecisionOperation(changeType),
+      category: 'write',
+      sourceId,
+      runId: run.id,
+      sessionId: decisionSessionId,
+      actorId: context.actorId,
+      capabilityId: context.capabilityId || 'workbench-file-change',
+      paths: fileDecisionPaths(body),
+      arguments: decisionArguments(body)
+    })
+    if (decisionAuthorization.status === 'denied' || decisionAuthorization.status === 'unavailable') return decisionFailure(decisionAuthorization)
     let effectiveBody = body
-    if (run && requestDigest && !hasConfirmationAttempt(body)) {
-      const consumed = consumeApprovedApprovalIntent({ sourceId, runId: run.id, sessionId: context.sessionId, operationKind, requestDigest })
-      if (consumed.ok === true && consumed.consumed) {
-        approvalIntentConsumed = true
-        effectiveBody = { ...body, confirmedByUser: true }
-      }
+    if (decisionAuthorization.status === 'allowed') effectiveBody = { ...body, confirmedByUser: true }
+    const result = executeWorkbenchFileChangeMutation(effectiveBody, { ...context, suppressFileApprovalActivity: true })
+    if (result.body.status === 'needs_confirmation' && decisionAuthorization.status === 'allowed') {
+      return decisionFailure({
+        ...decisionAuthorization,
+        status: 'denied',
+        reasonCode: 'PERSISTED_POLICY_CHANGED',
+        message: 'The current file guard no longer accepts the persisted exact approval.'
+      })
     }
-    const result = executeWorkbenchFileChangeMutation(effectiveBody, context)
     const requirement = fileApprovalRequirement(changeType, result)
-    if (run && requestDigest && requirement) {
+    if (decisionAuthorization.request && requirement) {
+      const evidenceRef = decisionEvidence(decisionAuthorization.request, sourceId, decisionSessionId, run.id, context.requestId)
       const pending = ensurePendingApprovalIntent({
         sourceId,
         runId: run.id,
-        sessionId: context.sessionId,
+        sessionId: decisionSessionId,
         requestId: context.requestId,
         operationKind,
         paths: requirement.paths,
         reason: requirement.reason,
-        requestDigest
+        requestDigest: decisionAuthorization.request.requestFingerprint,
+        decisionRequest: decisionAuthorization.request,
+        ...(evidenceRef ? { evidenceRef } : {})
       })
       projectApprovalRequired(run.id, sourceId, requirement, context.requestId, pending.ok === true ? pending.record.approvalId : undefined)
     }
@@ -566,26 +1018,18 @@ async function apply(body: Payload, context: PortableExecutionContext): Promise<
       const operation = typeof result.body.operation === 'string'
         ? result.body.operation
         : typeof result.body.changeType === 'string' ? result.body.changeType : changeType
-      if (run && requestDigest && hasConfirmationAttempt(body) && !approvalIntentConsumed) {
-        consumeMatchingApprovalIntentAfterConfirmedSuccess({ sourceId, runId: run.id, sessionId: context.sessionId, operationKind, requestDigest })
+      if (run && decisionAuthorization.request && hasConfirmationAttempt(body)) {
+        consumeMatchingApprovalIntentAfterConfirmedSuccess({ sourceId, runId: run.id, sessionId: decisionSessionId, operationKind, requestDigest: decisionAuthorization.request.requestFingerprint })
       }
-      if (run && (hasConfirmationAttempt(body) || approvalIntentConsumed) && paths.length > 0) {
+      if (run && (hasConfirmationAttempt(body) || decisionAuthorization.status === 'allowed') && paths.length > 0) {
         projectApprovalResolved(run.id, sourceId, operation, paths, context.requestId)
       }
-      if (run && paths.length > 0) {
-        appendAgentEvent({
-          jobId: run.id,
-          sourceId,
-          type: 'file_changed',
-          activityKind: 'file_changed',
-          message: `${changeType} changed ${paths.length === 1 ? paths[0] : `${paths.length} paths`}`,
-          requestId: context.requestId,
-          paths,
-          status: 'completed'
-        })
-      }
     }
-    return result
+    // The composition boundary owns run creation. The inner helper reuses the
+    // same run and therefore reports created:false; preserve the authoritative
+    // outer binding for the public action response.
+    const bodyWithRun = { ...result.body, workbenchRun: actionRun }
+    return { ...result, body: bodyWithRun }
   }
   const source = requireEnabledSource(sourceId)
   if (changeType === 'create_run') {
@@ -636,7 +1080,7 @@ async function apply(body: Payload, context: PortableExecutionContext): Promise<
   }
   if (changeType === 'packet_execute') {
     const result = await executeWorkbenchPacket({ sourceId, packetId: requiredString(body, 'packetId'), leaseToken: requiredString(body, 'leaseToken'), sourceRoot: source.path })
-    return { statusCode: result.status === 'completed' ? 200 : result.status === 'rejected' ? 409 : 500, body: result as unknown as Record<string, unknown> }
+    return { statusCode: result.status === 'completed' ? 200 : result.status === 'rejected' ? 409 : 500, body: compactWorkbenchPacketExecutionResult(result) }
   }
   return { statusCode: 400, body: { error: `Unsupported changeType: ${changeType}` } }
 }
@@ -654,7 +1098,11 @@ async function commit(body: Payload, context: PortableExecutionContext): Promise
   if (add.statusCode !== 200 || add.body.exitCode !== 0) return { statusCode: add.statusCode, body: { ok: false, step: 'add', add: add.body } }
   const commitResult = await executeWorkbenchCommandMutation({ ...shared, command: { ...shared.command, commandKind: 'git_commit', paths, message, body: typeof body.body === 'string' ? body.body : undefined, confirmedByUser: body.confirmedByUser === true, confirmationToken: body.confirmationToken } }, { ...context, requestId: `${context.requestId || 'native'}:commit` })
   const committed = commitResult.statusCode === 200 && commitResult.body.exitCode === 0
-  return { statusCode: commitResult.statusCode, body: { ok: committed, diffStat: diff.body.stdout, commitMessage: message, committed, staging: add.body.details, stdout: commitResult.body.stdout, ...(committed ? {} : { stderr: commitResult.body.stderr }) } }
+  const evidenceRefs = [diff.body, add.body, commitResult.body].flatMap(item => canonicalEvidenceRefs(item.evidenceRefs))
+  const evidenceUnavailable = [diff.body, add.body, commitResult.body]
+    .map(item => item.evidenceUnavailable)
+    .find(item => item && typeof item === 'object')
+  return { statusCode: commitResult.statusCode, body: { ok: committed, diffStat: diff.body.stdout, commitMessage: message, committed, staging: add.body.details, stdout: commitResult.body.stdout, ...(committed ? {} : { stderr: commitResult.body.stderr }), ...(evidenceRefs.length > 0 ? { evidenceRefs } : {}), ...(evidenceUnavailable ? { evidenceUnavailable } : {}) } }
 }
 
 /** The only mutation composition boundary used by the native portable host. */

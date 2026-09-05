@@ -140,7 +140,7 @@ function renderHuman(contract: PromptPacketTransportContract): string {
   ].join('\n')
 }
 
-function renderCodex(contract: PromptPacketTransportContract): string {
+export function renderCodexPrompt(contract: PromptPacketTransportContract): string {
   return [
     `Repository source: ${contract.sourceId}`,
     `Resume run ${contract.runId}.`,
@@ -250,7 +250,7 @@ export function compilePromptPacket(input: PromptPacketCompilerInput): PromptPac
   }
   const renderings = {
     human: renderHuman(contract),
-    codexManual: renderCodex(contract),
+    codexManual: renderCodexPrompt(contract),
     futureAdapter: renderAdapter(contract)
   }
   if (Object.values(renderings).some(value => !withinBudget(value, maxBytes))) {

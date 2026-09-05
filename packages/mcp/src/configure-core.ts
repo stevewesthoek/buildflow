@@ -34,6 +34,10 @@ export function validateNodeContract(version = process.version): { valid: boolea
 
 export const BRAIN_PROFILE_ALLOWED_TOOLS = 'getWorkbenchStatus,readWorkbenchContext,runWorkbenchCommand'
 export const BRAIN_PROFILE_ALLOWED_COMMAND_KINDS = 'n8n_workflow_migration'
+export const BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS = ''
+export const MCP_ALLOWED_TOOLS_ENV = 'WORKBENCH_MCP_ALLOWED_TOOLS'
+export const MCP_ALLOWED_COMMAND_KINDS_ENV = 'WORKBENCH_MCP_ALLOWED_COMMAND_KINDS'
+export const MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV = 'WORKBENCH_MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS'
 
 // The brain profile is optional so a transient Workbench outage cannot prevent Brain sessions
 // from starting. Guarded migration operations remain fail-closed at call time via scope enforcement.
@@ -88,6 +92,7 @@ export function buildWorkbenchMcpServerSpec(
   if (profile === 'brain') {
     env.WORKBENCH_MCP_ALLOWED_TOOLS = BRAIN_PROFILE_ALLOWED_TOOLS
     env.WORKBENCH_MCP_ALLOWED_COMMAND_KINDS = BRAIN_PROFILE_ALLOWED_COMMAND_KINDS
+    env[MCP_ALLOWED_CLIENT_WORKFLOW_TOOLS_ENV] = BRAIN_PROFILE_ALLOWED_CLIENT_WORKFLOW_TOOLS
   }
   return {
     command: nodeExecutable,

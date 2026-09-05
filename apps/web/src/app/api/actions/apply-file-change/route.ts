@@ -61,6 +61,7 @@ export async function POST(request: NextRequest) {
       data = await dispatchWorkbenchFileChange(body, auth.bearerToken, {
         signal: deadline.signal,
         timeoutMs: deadline.transportTimeoutMs(7500),
+        requestId: deadline.requestId,
         diagnostics: deadline.diagnostics({
           phase: isDryRun ? 'preflight_write' : 'apply_file_change',
           sourceId: typeof body.sourceId === 'string' ? body.sourceId : undefined,

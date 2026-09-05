@@ -70,12 +70,14 @@ export function parseHealthArguments(argv: string[]): HealthArguments {
 }
 
 function assertCodexRegistration(status: CodexRegistrationStatus): void {
+  const oneUnambiguousScope =
+    (status.globalMatchCount === 1 && status.projectMatchCount === 0)
+    || (status.globalMatchCount === 0 && status.projectMatchCount === 1)
   const valid = status.configured &&
     status.configMode === '0600' &&
     status.credentialMode === '0600' &&
     status.duplicateCount === 1 &&
-    status.globalMatchCount === 0 &&
-    status.projectMatchCount === 1
+    oneUnambiguousScope
   if (!valid) throw new Error('Codex Workbench MCP registration is invalid.')
 }
 
@@ -112,8 +114,12 @@ export function parseWorkbenchStatusResponse(response: HealthToolResponse, expec
     throw new Error('Workbench health payload contained an invalid sourceCount.')
   }
   const sourceCount = record.sourceCount as number
-  if (sourceCount !== record.sources.length) {
+  const sourcesTruncated = record.sourcesTruncated === true
+  if (sourceCount !== record.sources.length && !sourcesTruncated) {
     throw new Error('Workbench health sourceCount did not match sources.length.')
+  }
+  if (sourcesTruncated && record.sources.length > sourceCount) {
+    throw new Error('Workbench health truncated sources exceeded sourceCount.')
   }
   if (expectedSourceCount !== undefined && sourceCount !== expectedSourceCount) {
     throw new Error(`Workbench health expected ${expectedSourceCount} sources but received ${sourceCount}.`)

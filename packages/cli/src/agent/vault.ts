@@ -11,7 +11,7 @@ export async function resolveSafePath(relativePath: string, sourceId?: string): 
 
   // If sourceId provided, resolve against that source specifically
   if (sourceId) {
-    const sources = getEnabledSources()
+    const sources = getEnabledSources({ includeIndexState: false })
     const source = sources.find(s => s.id === sourceId)
     if (!source) {
       throw new Error(`Source not found: ${sourceId}`)
@@ -28,7 +28,7 @@ export async function resolveSafePath(relativePath: string, sourceId?: string): 
   }
 
   // Fallback: try each enabled source until file is found
-  const sources = getEnabledSources()
+  const sources = getEnabledSources({ includeIndexState: false })
   for (const source of sources) {
     const fullPath = path.join(source.path, normalized)
     const resolved = path.resolve(fullPath)
@@ -137,7 +137,7 @@ export async function createInboxNote(relativePath: string, content: string, sou
     throw new Error(validation.error)
   }
 
-  const sources = getEnabledSources()
+  const sources = getEnabledSources({ includeIndexState: false })
   if (sources.length === 0) {
     throw new Error('No enabled knowledge sources configured')
   }

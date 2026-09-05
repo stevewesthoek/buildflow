@@ -102,8 +102,18 @@ expectValid({
   sourceId: 'workbench-example-source',
   commandKind: 'run_package_script',
   validationJobOperation: 'status',
-  validationJobId: 'job-id'
+  validationJobId: 'job-id',
+  resultStream: 'stdout',
+  resultCursor: 'opaque-cursor',
+  resultPageBytes: 900
 }, 'validation status')
+expectValid({
+  sourceId: 'workbench-example-source',
+  commandKind: 'type_check_cli',
+  validationJobOperation: 'cancel',
+  validationJobId: 'job-id',
+  cancelReason: 'stop the bounded test'
+}, 'validation cancel')
 
 expectInvalid({ sourceId: 'repo', commandKind: 'git_status_short' }, 'placeholder source')
 expectInvalid({ sourceId: 'workbench-example-source', commandKind: 'git_status_short', args: ['status'] }, 'cross-command args')
@@ -158,6 +168,13 @@ expectInvalid({
   validationJobId: 'job-id',
   idempotencyKey: 'extra'
 }, 'status extra field')
+expectInvalid({
+  sourceId: 'workbench-example-source',
+  commandKind: 'run_package_script',
+  validationJobOperation: 'status',
+  validationJobId: 'job-id',
+  resultPageBytes: 9000
+}, 'status result page over budget')
 expectInvalid({ sourceId: 'workbench-example-source', commandKind: 'not_allowlisted' }, 'unknown command')
 
 assert.equal(new Set(RUN_WORKBENCH_DIRECT_COMMAND_KINDS).size, RUN_WORKBENCH_DIRECT_COMMAND_KINDS.length, 'command kinds must be unique')

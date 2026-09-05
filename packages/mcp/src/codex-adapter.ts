@@ -98,11 +98,11 @@ function plannedMutation(): WorkbenchMcpAdapterMutationEvidence {
 function diagnosticsForStatus(status: CodexRegistrationStatus, globalMode: string | undefined, expectation: 'present' | 'absent'): WorkbenchMcpAdapterDiagnostic[] {
   const diagnostics: WorkbenchMcpAdapterDiagnostic[] = []
   if (globalMode !== '0600') diagnostics.push({ code: 'codex_global_config_mode', message: `Expected global config mode 0600; found ${globalMode ?? 'missing'}.` })
-  if (status.globalMatchCount !== 0) diagnostics.push({ code: 'codex_global_scope_duplicate', message: `Found ${status.globalMatchCount} global Workbench definition(s).` })
-  const expectedCount = expectation === 'present' ? 1 : 0
-  if (status.projectMatchCount !== expectedCount) diagnostics.push({ code: 'codex_project_scope_count', message: `Expected ${expectedCount} project Workbench definition(s); found ${status.projectMatchCount}.` })
-  if (expectation === 'present' && !status.configured && status.projectMatchCount > 0) diagnostics.push({ code: 'codex_registration_mismatch', message: 'Project Workbench definition does not match the selected profile.' })
-  if (expectation === 'present' && status.configMode !== '0600') diagnostics.push({ code: 'codex_project_config_mode', message: `Expected project config mode 0600; found ${status.configMode ?? 'missing'}.` })
+  const total = status.globalMatchCount + status.projectMatchCount
+  if (expectation === 'present' && total !== 1) diagnostics.push({ code: 'codex_scope_count', message: `Expected exactly one Workbench definition in global or project scope; found ${total}.` })
+  if (expectation === 'absent' && total !== 0) diagnostics.push({ code: 'codex_scope_count', message: `Expected no Workbench definition in global or project scope; found ${total}.` })
+  if (expectation === 'present' && !status.configured && total > 0) diagnostics.push({ code: 'codex_registration_mismatch', message: 'Workbench definition does not match the selected profile.' })
+  if (expectation === 'present' && status.scope === 'project' && status.configMode !== '0600') diagnostics.push({ code: 'codex_project_config_mode', message: `Expected project config mode 0600; found ${status.configMode ?? 'missing'}.` })
   if (expectation === 'present' && status.credentialMode !== '0600') diagnostics.push({ code: 'codex_credential_mode', message: `Expected shared credential mode 0600; found ${status.credentialMode ?? 'missing'}.` })
   return diagnostics
 }
@@ -221,7 +221,7 @@ export class CodexProjectMcpAdapter implements WorkbenchMcpClientAdapter {
       return createWorkbenchMcpAdapterResult({
         adapterId: this.adapterId, clientId: this.clientId, operation: 'status', requestId: request.requestId,
         registrationId: request.selector.registrationId, profile: request.selector.profile,
-        outcome: status.projectMatchCount > 0 ? 'present' : 'absent', mutation: noMutation(),
+        outcome: status.globalMatchCount + status.projectMatchCount > 0 ? 'present' : 'absent', mutation: noMutation(),
         diagnostics: diagnosticsForStatus(status, fileMode(this.paths.globalConfigPath), 'present')
       })
     } catch (error) { throw this.wrapPreflightError(error, 'status') }
@@ -231,7 +231,9 @@ export class CodexProjectMcpAdapter implements WorkbenchMcpClientAdapter {
     this.assertSelector(request.selector, 'audit')
     try {
       const status = inspectCodexRegistration(this.operationOptions(request.selector.profile))
-      const compliant = status.configured && status.globalMatchCount === 0 && status.projectMatchCount === 1 && status.configMode === '0600' && status.credentialMode === '0600' && fileMode(this.paths.globalConfigPath) === '0600'
+      const oneUnambiguousScope = (status.globalMatchCount === 1 && status.projectMatchCount === 0) || (status.globalMatchCount === 0 && status.projectMatchCount === 1)
+      const registrationConfigMode = status.scope === 'global' ? fileMode(this.paths.globalConfigPath) : fileMode(this.paths.projectConfigPath)
+      const compliant = status.configured && status.duplicateCount === 1 && oneUnambiguousScope && status.configMode === '0600' && registrationConfigMode === '0600' && status.credentialMode === '0600' && fileMode(this.paths.globalConfigPath) === '0600'
       return createWorkbenchMcpAdapterResult({
         adapterId: this.adapterId, clientId: this.clientId, operation: 'audit', requestId: request.requestId,
         registrationId: request.selector.registrationId, profile: request.selector.profile,
